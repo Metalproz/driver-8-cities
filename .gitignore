@@ -1,0 +1,7 @@
+# converter inputs/outputs (from the user's discs, 400+ MB) and caches
+chicago/work/
+chicago/__pycache__/
+chicago/devtools/__pycache__/
+chicago/devtools/_pylib/
+*.pyc
+*.pkl

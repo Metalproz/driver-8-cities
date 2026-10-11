@@ -1,0 +1,191 @@
+{
+ "park": {
+  "d2": [
+   10162,
+   -238027
+  ],
+  "note": "river park: strip of missing ground ahead of the car (nothing drawn)"
+ },
+ "overpass_s": {
+  "d2": [
+   -129810,
+   -549728
+  ],
+  "note": "south freeway: overpass stretching near camera, missing ground below"
+ },
+ "overpass_e": {
+  "d2": [
+   129395,
+   44286
+  ],
+  "note": "east freeway overpass: stretching near camera"
+ },
+ "blackwall": {
+  "d2": [
+   95561,
+   -356588
+  ],
+  "note": "black wall / missing building faces (user snapshot)"
+ },
+ "bridge": {
+  "d2": [
+   3965,
+   4486
+  ],
+  "note": "bridge deck (was missing; looked fine after palette fix)"
+ },
+ "hang": {
+  "d2": [
+   4779,
+   31422
+  ],
+  "note": "user hang dump 17:58 (prim buffer overflow area)"
+ },
+ "shards": {
+  "d2": [
+   127706,
+   -402342
+  ],
+  "note": "Meigs Field planes (were shards before palette fix)"
+ },
+ "north": {
+  "d2": [
+   -185577,
+   664868
+  ],
+  "note": "north streets: downscaled/garbage textures (palette + shrink fixes)"
+ },
+ "floating": {
+  "d2": [
+   19867,
+   -226668
+  ],
+  "note": "user snapshot: car floated up high then fell (flat road map)"
+ },
+ "quay": {
+  "d2": [
+   -125502,
+   -118606
+  ],
+  "note": "user snapshots: car drove off a quay into the void and wrecked (river)"
+ },
+ "inwater": {
+  "d2": [
+   -170624,
+   -118107
+  ],
+  "note": "river cell (D2 overhead map water) near the quay: car must sink and the round end"
+ },
+ "riverbridge": {
+  "d2": [
+   6780,
+   -2567
+  ],
+  "note": "user snapshot 2026-10-10 23:59: water only in spots beside a bridge, smear in the gaps"
+ },
+ "blackroofs": {
+  "d2": [
+   -447920,
+   206720
+  ],
+  "note": "user snapshot 2026-10-11 00:06: building tops black (textures)"
+ },
+ "missingbld": {
+  "d2": [
+   -438873,
+   254138
+  ],
+  "note": "user snapshot 2026-10-11 00:06: buildings missing behind trees, background smear"
+ },
+ "beach_s": {
+  "d2": [
+   45285,
+   -227198
+  ],
+  "note": "sand next to the lake (south, near the park)"
+ },
+ "beach_n": {
+  "d2": [
+   -36533,
+   478484
+  ],
+  "note": "sand next to the lake (north shore)"
+ },
+ "underbridge": {
+  "d2": [
+   -243106,
+   -224149
+  ],
+  "note": "user snapshot 2026-10-11 00:46: driving under a highway bridge teleports the car up onto the bridge (wrecked); D1 road map has one level per cell"
+ },
+ "underbridge2": {
+  "d2": [
+   -243352,
+   90984
+  ],
+  "note": "sunken highway (same trench as underbridge) 4 cells north of the next crossing street; drive south under it"
+ },
+ "trenchbridge": {
+  "d2": [
+   -254715,
+   -227198
+  ],
+  "note": "crossing street 9 cells west of the underbridge bridge; drive east over the trench (C16 ramps: car dips into the trench and climbs out)"
+ },
+ "trench_ew": {
+  "d2": [
+   -279715,
+   136439
+  ],
+  "note": "east-west sunken highway 6 cells west of a north-south street bridging it; drive east under the bridge"
+ },
+ "rampsink": {
+  "d2": [
+   67500,
+   148597
+  ],
+  "note": "C17: east freeway ramp, car sinks into the raised road (user snapshots 001337-001402: stuck at 249677,108531, y 304-512, tilted 27 deg). Spawn faces N; drive heading ~108 deg (east)"
+ },
+ "lakeview": {
+  "d2": [
+   135764,
+   -25170
+  ],
+  "note": "user snapshot 2026-10-11 01:41: lake seen from the shore, far water only as separate squares"
+ },
+ "median": {
+  "d2": [
+   -189050,
+   -302912
+  ],
+  "note": "sunken highway median: median cells raised +23 (1329 vs 1352) over the whole 1500 cell, diagonal staircase; car floats/bumps (user snapshots 021207-021237)"
+ },
+ "wallclimb": {
+  "d2": [
+   -244764,
+   -240992
+  ],
+  "note": "trench wall lifts the car: cols 429/434 beside the lanes (rows 837-845) are the trench's own entry/exit ramps (1-cell strips 1352->0); scraping the barrier puts the car centre into the ramp cell. One-level limit, needs the engine patch (nearest-y). User snapshots 021813/021824"
+ },
+ "onbridge": {
+  "d2": [
+   1680,
+   1473
+  ],
+  "note": "user 02:44: on the bridge, through the railings no water mid-river"
+ },
+ "riverfar": {
+  "d2": [
+   74903,
+   -7858
+  ],
+  "note": "user 02:44: river/lake at distance as separate squares"
+ },
+ "unevenn": {
+  "d2": [
+   -107683,
+   519542
+  ],
+  "note": "north city edge by the lake (outside normal play): grass at street level next to single cells 912-1135 below street (D2 lower lakefront path?) + water 2703; car falls into pits and flips (user snapshots 025029-025051). Low priority"
+ }
+}

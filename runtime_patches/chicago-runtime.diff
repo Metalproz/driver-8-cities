@@ -1,0 +1,531 @@
+--- a/psxrecomp/runtime/src/boot_state.c
++++ b/psxrecomp/runtime/src/boot_state.c
+@@ -372,6 +372,10 @@
+     h.abi_tag       = (int32_t)PSX_OVERLAY_ABI_TAG;
+     h.codegen_ver   = (uint32_t)PSX_OVERLAY_CODEGEN_VER;
+     h.section_count = 17;
++    {
++        extern uint32_t psx_mod_memory_snapshot(const uint8_t** data);
++        if (psx_mod_memory_snapshot(NULL) != 0) h.section_count = 18;
++    }
+ 
+     ok = write_header_le(o, &h);
+ 
+@@ -464,6 +468,12 @@
+             free(db);
+         }
+     }
++    if (ok) {
++        extern uint32_t psx_mod_memory_snapshot(const uint8_t** data);
++        const uint8_t* mm = NULL;
++        uint32_t used = psx_mod_memory_snapshot(&mm);
++        if (used != 0) ok = write_section(o, BS_SEC_MODMEM, mm, used);
++    }
+     return ok;
+ }
+ 
+@@ -678,6 +688,10 @@
+         free(words);
+         return 1;
+     }
++    case BS_SEC_MODMEM: {
++        extern int psx_mod_memory_restore(const uint8_t* data, uint32_t len);
++        return psx_mod_memory_restore(p, len);
++    }
+     case BS_SEC_ICACHE: {
+         PstR r;
+         if (len != 1024u * 4u) return 0;
+--- a/psxrecomp/runtime/include/boot_state.h
++++ b/psxrecomp/runtime/include/boot_state.h
+@@ -104,6 +104,7 @@
+                               from identical baselines). Optional on load for
+                               old blobs (left untouched when absent).          */
+     BS_SEC_SCHED  = 0x11,  /* deterministic scheduler return continuation       */
++    BS_SEC_MODMEM = 0x12,  /* local: used part of mod (Expansion 1) memory      */
+ };
+ 
+ /* Save a COMPLETE snapshot at game handoff. Returns 1 on success. */
+--- a/psxrecomp/runtime/src/debug_server.c
++++ b/psxrecomp/runtime/src/debug_server.c
+@@ -9481,6 +9481,38 @@
+     free(out);
+ }
+ 
++/* Local (driver.personal): in-process write guard. Writes to the armed ranges
++ * are printed straight to stdout (pc, ra, all GPRs; the dev-mode log) so the culprit survives a
++ * crash or a frozen debug connection. Armed by the dev-mode plugin. */
++static uint32_t s_wguard_lo[8], s_wguard_hi[8];
++static int s_wguard_n = 0, s_wguard_hits = 0;
++void psx_debug_add_write_guard(uint32_t lo, uint32_t hi)
++{
++    if (s_wguard_n < 8) {
++        s_wguard_lo[s_wguard_n] = lo & 0x1FFFFFFFu;
++        s_wguard_hi[s_wguard_n] = hi & 0x1FFFFFFFu;
++        s_wguard_n++;
++    }
++}
++static void wguard_check(uint32_t phys, uint32_t old_val, uint32_t new_val, uint8_t width)
++{
++    for (int i = 0; i < s_wguard_n; i++) {
++        if (phys < s_wguard_lo[i] || phys >= s_wguard_hi[i]) continue;
++        if (s_wguard_hits >= 200) return;
++        s_wguard_hits++;
++        fprintf(stdout, "WRITE-GUARD #%d phys=%08X old=%08X new=%08X w=%u pc=%08X frame=%llu",
++                s_wguard_hits, phys, old_val, new_val, width, g_debug_last_store_pc,
++                (unsigned long long)s_frame_count);
++        if (debug_cpu_ptr) {
++            fprintf(stdout, " gpr=");
++            for (int r = 0; r < 32; r++) fprintf(stdout, "%s%08X", r ? "," : "", debug_cpu_ptr->gpr[r]);
++        }
++        fputc('\n', stdout);
++        fflush(stdout);
++        return;
++    }
++}
++
+ /* Multi-range check called from memory.c write paths.
+  * Iterates up to 8 ranges; records if any match.
+  * The always-on catch-all ring is recorded UNCONDITIONALLY first so
+@@ -9492,6 +9524,7 @@
+     (void)phys; (void)old_val; (void)new_val; (void)width;
+     return;
+ #endif
++    if (s_wguard_n) wguard_check(phys, old_val, new_val, width);
+     if (s_fmv_quiet) return;
+     if (is_card_critical_addr(phys)) card_trace_record(phys, old_val, new_val, width);
+     fp_record_write(phys, new_val, g_debug_last_store_pc);
+--- a/psxrecomp/runtime/src/dma.c
++++ b/psxrecomp/runtime/src/dma.c
+@@ -470,6 +470,8 @@
+     a->remaining_words = a->total_words;
+     a->cycles_accum = 0;
+     a->start_addr = channels[3].madr & 0x1FFFFCu;
++    /* Local: mod-memory destinations skip the RAM-only overlay capture. */
++    if ((channels[3].madr & 0x1FFFFFFCu) >= 0x1F000000u) a->start_addr = 0x1C0000u;
+     start_cdrom_dma_capture(a->total_words);
+ 
+     if (a->total_words == 0) {
+@@ -479,6 +481,20 @@
+     }
+ }
+ 
++/* Local (driver.personal): CD-ROM DMA may target mod (Expansion 1) memory, so
++ * a mod can move a large CD-streamed buffer out of the 2 MB main RAM. Real
++ * hardware masks to RAM; every other destination keeps that behaviour. */
++static uint32_t cdrom_dma_addr(uint32_t madr) {
++    uint32_t phys = madr & 0x1FFFFFFCu;
++    if (phys >= 0x1F000000u && phys < 0x1F100000u) return phys;
++    return madr & 0x1FFFFCu;
++}
++
++static uint32_t cdrom_dma_next(uint32_t addr, int32_t step) {
++    if (addr >= 0x1F000000u) return addr + (uint32_t)step;
++    return (addr + (uint32_t)step) & 0x1FFFFCu;
++}
++
+ static void finish_async_cdrom_transfer(uint32_t final_addr) {
+     finish_cdrom_dma_capture(final_addr, 1);
+     DMAAsyncChannel *a = &cdrom_async;
+@@ -1132,7 +1148,7 @@
+             }
+ 
+             uint32_t words_budget = a->cycles_accum / DMA_CDROM_CYCLES_PER_WORD;
+-            uint32_t addr = channels[3].madr & 0x1FFFFCu;
++            uint32_t addr = cdrom_dma_addr(channels[3].madr);
+             uint32_t moved = 0;
+             g_dma_cur_ch = 3; g_dma_cur_bcr = channels[3].bcr;
+             g_dma_initiator_pc = s_dma_ch_initiator_pc[3];  /* deferred: restore kick PC */
+@@ -1152,7 +1168,7 @@
+                 psx_write_word(addr, word);
+                 record_cdrom_dma_word(word);
+                 dirty_ram_mark_executable_range(addr, 4);
+-                addr = (addr + addr_step) & 0x1FFFFCu;
++                addr = cdrom_dma_next(addr, addr_step);
+                 a->remaining_words--;
+                 words_budget--;
+                 moved++;
+--- a/psxrecomp/runtime/src/gpu_gl_renderer.c
++++ b/psxrecomp/runtime/src/gpu_gl_renderer.c
+@@ -3975,6 +3975,11 @@
+             if (host_osd_image(&px, &ow, &oh) && px)
+                 gl_draw_osd_image(px, ow, oh, ow * ui, oh * ui,
+                                   margin, margin, ww, wh);
++            if (host_osd_panel_image(&px, &ow, &oh) && px) {
++                const int dw = ow * ui, dh = oh * ui;
++                int vx = (ww > dw + margin) ? (ww - dw - margin) : margin;
++                gl_draw_osd_image(px, ow, oh, dw, dh, vx, margin, ww, wh);
++            }
+             if (host_osd_volume_image(&px, &ow, &oh) && px) {
+                 const int dw = ow * ui, dh = oh * ui;
+                 int vx = (ww > dw + margin) ? (ww - dw - margin) : margin;
+--- a/psxrecomp/runtime/src/gpu_vk_renderer.c
++++ b/psxrecomp/runtime/src/gpu_vk_renderer.c
+@@ -1552,13 +1552,16 @@
+ 
+ static void vk_osd_blit(VkCommandBuffer cb, VkImage sc) {
+     const uint32_t *text_px = NULL, *vol_px = NULL, *rw_px = NULL, *ssm_px = NULL;
++    const uint32_t *pan_px = NULL;
+     int tw = 0, th = 0, vw = 0, vh = 0, rw = 0, rh = 0, sw = 0, sh = 0;
++    int pw = 0, ph = 0;
+     const int have_text = host_osd_image(&text_px, &tw, &th) && text_px;
++    const int have_pan = host_osd_panel_image(&pan_px, &pw, &ph) && pan_px;
+     const int have_vol = host_osd_volume_image(&vol_px, &vw, &vh) && vol_px;
+     const int have_rw = psx_rewind_overlay_image(&rw_px, &rw, &rh) && rw_px;
+     const int have_ssm =
+         psx_savestate_menu_overlay_image(&ssm_px, &sw, &sh) && ssm_px;
+-    if (!have_text && !have_vol && !have_rw && !have_ssm) {
++    if (!have_text && !have_pan && !have_vol && !have_rw && !have_ssm) {
+         host_osd_present_done();
+         return;
+     }
+@@ -1576,7 +1579,9 @@
+         have_rw ? (VkDeviceSize)rw * (VkDeviceSize)rh * 4u : 0;
+     VkDeviceSize ssm_bytes =
+         have_ssm ? (VkDeviceSize)sw * (VkDeviceSize)sh * 4u : 0;
+-    VkDeviceSize bytes = text_bytes + vol_bytes + rw_bytes + ssm_bytes;
++    VkDeviceSize pan_bytes =
++        have_pan ? (VkDeviceSize)pw * (VkDeviceSize)ph * 4u : 0;
++    VkDeviceSize bytes = text_bytes + pan_bytes + vol_bytes + rw_bytes + ssm_bytes;
+     if (bytes > s_osd_cap) {
+         p_vkQueueWaitIdle(s_queue);
+         osd_staging_free();
+@@ -1592,6 +1597,13 @@
+         vk_osd_copy_rect(cb, sc, text_px, tw, th, margin, margin, off);
+         off += text_bytes;
+     }
++    if (have_pan) {
++        int x = ((int)s_sc_extent.width > pw + margin)
++                    ? ((int)s_sc_extent.width - pw - margin)
++                    : margin;
++        vk_osd_copy_rect(cb, sc, pan_px, pw, ph, x, margin, off);
++        off += pan_bytes;
++    }
+     if (have_vol) {
+         int x = ((int)s_sc_extent.width > vw + margin)
+                     ? ((int)s_sc_extent.width - vw - margin)
+--- a/psxrecomp/runtime/src/host_osd.c
++++ b/psxrecomp/runtime/src/host_osd.c
+@@ -160,6 +160,9 @@
+ static SDL_Texture *s_sdl_tex;
+ static int          s_sdl_tw;
+ static int          s_sdl_th;
++static SDL_Texture *s_sdl_panel_tex;
++static int          s_sdl_panel_tw;
++static int          s_sdl_panel_th;
+ static SDL_Texture *s_sdl_vol_tex;
+ static int          s_sdl_vol_tw;
+ static int          s_sdl_vol_th;
+@@ -361,6 +364,98 @@
+ #endif
+ }
+ 
++/* Local (driver.personal): multi-line dev panel, drawn top-right at half the
++ * toast size. Set from the emulation thread, rasterized on present; a torn
++ * read only garbles one frame of text. */
++#define PANEL_COLS   40
++#define PANEL_ROWS   8
++#define PANEL_LINE_H (OSD_GLYPH_H + 2)
++#define PANEL_IMG_W  (OSD_PAD_X * 2 + PANEL_COLS * OSD_GLYPH_W)
++#define PANEL_IMG_H  (OSD_PAD_Y * 2 + PANEL_ROWS * PANEL_LINE_H)
++static char     s_panel_msg[PANEL_ROWS * (PANEL_COLS + 1) + 1];
++static int      s_panel_active;
++static int      s_panel_dirty;
++static uint32_t s_panel_img[PANEL_IMG_W * PANEL_IMG_H];
++static int      s_panel_w;
++static int      s_panel_h;
++
++void host_osd_set_panel(const char *text) {
++#if !HOST_OSD_VISUAL
++    (void)text;
++#else
++    if (!text || !text[0]) {
++        if (s_panel_active) s_needs_clear = 1;
++        s_panel_active = 0;
++        s_panel_msg[0] = '\0';
++        return;
++    }
++    if (s_panel_active && strcmp(s_panel_msg, text) == 0)
++        return;
++    snprintf(s_panel_msg, sizeof(s_panel_msg), "%s", text);
++    s_panel_active = 1;
++    s_panel_dirty = 1;
++#endif
++}
++
++#if HOST_OSD_VISUAL
++static void rasterize_panel(void) {
++    char msg[sizeof(s_panel_msg)];
++    int rows = 0, cols = 0, c = 0;
++    snprintf(msg, sizeof(msg), "%s", s_panel_msg);
++    for (const char *p = msg; ; p++) {
++        if (*p == '\n' || !*p) {
++            if (c > cols) cols = c;
++            rows++;
++            c = 0;
++            if (!*p || rows == PANEL_ROWS) break;
++        } else {
++            c++;
++        }
++    }
++    if (cols > PANEL_COLS) cols = PANEL_COLS;
++    if (cols < 1) cols = 1;
++    s_panel_w = OSD_PAD_X * 2 + cols * OSD_GLYPH_W;
++    s_panel_h = OSD_PAD_Y * 2 + rows * PANEL_LINE_H;
++    for (int i = 0; i < s_panel_w * s_panel_h; i++)
++        s_panel_img[i] = 0xFF202020u;
++    int row = 0, col = 0;
++    for (const char *p = msg; *p && row < PANEL_ROWS; p++) {
++        if (*p == '\n') { row++; col = 0; continue; }
++        if (col >= PANEL_COLS) continue;
++        unsigned char ch = (unsigned char)*p;
++        if (ch < 32 || ch > 126) ch = '?';
++        const uint8_t *g = FONT8X8[ch - 32];
++        for (int gy = 0; gy < OSD_GLYPH_H; gy++)
++            for (int gx = 0; gx < OSD_GLYPH_W; gx++)
++                if (g[gy] & (1u << gx)) {
++                    int x = OSD_PAD_X + col * OSD_GLYPH_W + gx;
++                    int y = OSD_PAD_Y + row * PANEL_LINE_H + gy;
++                    s_panel_img[y * s_panel_w + x] = 0xFFFFFFFFu;
++                }
++        col++;
++    }
++}
++#endif
++
++int host_osd_panel_image(const uint32_t **pixels, int *w, int *h) {
++#if HOST_OSD_VISUAL
++    if (s_panel_active) {
++        if (s_panel_dirty || !s_panel_w) {
++            s_panel_dirty = 0;
++            rasterize_panel();
++        }
++        if (pixels) *pixels = s_panel_img;
++        if (w) *w = s_panel_w;
++        if (h) *h = s_panel_h;
++        return 1;
++    }
++#endif
++    if (pixels) *pixels = NULL;
++    if (w) *w = 0;
++    if (h) *h = 0;
++    return 0;
++}
++
+ void host_osd_show_volume(int percent, int duration_ms) {
+ #if !HOST_OSD_VISUAL
+     (void)percent;
+@@ -399,6 +494,7 @@
+     return 0;
+ #else
+     if (msg_visible() || s_status_active || vol_visible()) return 1;
++    if (s_panel_active && s_panel_dirty) return 1;
+     return s_needs_clear;
+ #endif
+ }
+@@ -480,6 +576,12 @@
+         if (host_osd_image(&px, &w, &h) && px)
+             sdl_blit_argb(renderer, &s_sdl_tex, &s_sdl_tw, &s_sdl_th, px, w, h,
+                           margin, margin, w * ui, h * ui);
++        if (host_osd_panel_image(&px, &w, &h) && px) {
++            const int dw = w * ui;
++            int x = (lw > dw + margin) ? (lw - dw - margin) : margin;
++            sdl_blit_argb(renderer, &s_sdl_panel_tex, &s_sdl_panel_tw,
++                          &s_sdl_panel_th, px, w, h, x, margin, dw, h * ui);
++        }
+         if (host_osd_volume_image(&px, &w, &h) && px) {
+             const int dw = w * ui, dh = h * ui;
+             int x = (lw > dw + margin) ? (lw - dw - margin) : margin;
+--- a/psxrecomp/runtime/include/host_osd.h
++++ b/psxrecomp/runtime/include/host_osd.h
+@@ -22,6 +22,11 @@
+ /* Persistent top-left status text. Passing NULL/empty clears it. */
+ void host_osd_set_status(const char *msg);
+ 
++/* Local (driver.personal): persistent multi-line dev panel, top-right.
++ * Lines separated by '\n'; NULL/empty hides it. */
++void host_osd_set_panel(const char *text);
++int  host_osd_panel_image(const uint32_t **pixels, int *w, int *h);
++
+ /* Right-side vertical volume bar (percent clamped 0..100). */
+ void host_osd_show_volume(int percent, int duration_ms);
+ 
+--- a/psxrecomp/runtime/src/iso_reader_c.cpp
++++ b/psxrecomp/runtime/src/iso_reader_c.cpp
+@@ -7,6 +7,7 @@
+ #include "iso_reader.h"
+ #include "mod_runtime.h"
+ #include <cstdio>
++#include <cstring>
+ 
+ extern "C" {
+ 
+@@ -19,11 +20,34 @@
+     return reader;
+ }
+ 
++/* Local (driver.personal): a sector past the end of the image that an active
++ * disc overlay supplies. Built as a blank Mode 2 Form 1 data sector so the
++ * overlay hook can fill its user data like any stock sector. */
++static bool extension_sector(PS1::ISOReader* reader, uint32_t lba) {
++    return lba >= reader->GetSectorCount() && mod_runtime_disc_overlay_covers(lba);
++}
++
++static uint8_t to_bcd(uint32_t v) { return (uint8_t)(((v / 10) << 4) | (v % 10)); }
++
++static void synthesize_raw_sector(uint32_t lba, uint8_t* raw) {
++    std::memset(raw, 0, 2352);
++    std::memset(raw + 1, 0xFF, 10);          /* sync: 00 FF*10 00 */
++    const uint32_t abs = lba + 150;
++    raw[12] = to_bcd(abs / 4500);
++    raw[13] = to_bcd((abs / 75) % 60);
++    raw[14] = to_bcd(abs % 75);
++    raw[15] = 2;                              /* mode 2 */
++    raw[18] = raw[22] = 0x08;                 /* subheader: data, form 1 */
++}
++
+ int iso_read_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
+     if (!handle) return 0;
+     auto* reader = static_cast<PS1::ISOReader*>(handle);
+     (void)size; /* ReadSector always reads 2048 bytes */
+-    if (!reader->ReadSector(lba, buffer)) return 0;
++    if (!reader->ReadSector(lba, buffer)) {
++        if (!extension_sector(reader, lba)) return 0;
++        std::memset(buffer, 0, 2048);
++    }
+     mod_runtime_patch_disc_sector(lba, 0, buffer, 2048);
+     return 1;
+ }
+@@ -31,7 +55,10 @@
+ int iso_read_raw_sector(void* handle, uint32_t lba, uint8_t* buffer, int size) {
+     if (!handle || size < 2352) return 0;
+     auto* reader = static_cast<PS1::ISOReader*>(handle);
+-    if (!reader->ReadRawSector(lba, buffer)) return 0;
++    if (!reader->ReadRawSector(lba, buffer)) {
++        if (!extension_sector(reader, lba)) return 0;
++        synthesize_raw_sector(lba, buffer);
++    }
+     mod_runtime_patch_disc_sector(lba, 1, buffer, 2352);
+     return 1;
+ }
+--- a/psxrecomp/runtime/src/main.cpp
++++ b/psxrecomp/runtime/src/main.cpp
+@@ -4941,6 +4941,45 @@
+     return 0;
+ }
+ 
++/* Local (driver.personal): both stick buttons (L3 + R3) held on any connected
++ * game controller - the dev-mode snapshot combo. Raw SDL buttons, independent
++ * of the player's button mapping. */
++extern "C" int psx_host_controller_l3r3_held(void) {
++    const int n = SDL_NumJoysticks();
++    for (int i = 0; i < n; i++) {
++        if (!SDL_IsGameController(i)) continue;
++        SDL_JoystickID inst = SDL_JoystickGetDeviceInstanceID(i);
++        SDL_GameController* h = SDL_GameControllerFromInstanceID(inst);
++        if (!h) h = SDL_GameControllerOpen(i);
++        if (!h) continue;
++        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_LEFTSTICK) &&
++            SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_RIGHTSTICK))
++            return 1;
++    }
++    return 0;
++}
++
++/* Local (driver.personal): L3 plus one face button (0 Cross, 1 Circle,
++ * 2 Square, 3 Triangle) held on any connected game controller. */
++extern "C" int psx_host_controller_l3_combo_held(int face) {
++    static const SDL_GameControllerButton k_face[4] = {
++        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,
++        SDL_CONTROLLER_BUTTON_X, SDL_CONTROLLER_BUTTON_Y };
++    if (face < 0 || face > 3) return 0;
++    const int n = SDL_NumJoysticks();
++    for (int i = 0; i < n; i++) {
++        if (!SDL_IsGameController(i)) continue;
++        SDL_JoystickID inst = SDL_JoystickGetDeviceInstanceID(i);
++        SDL_GameController* h = SDL_GameControllerFromInstanceID(inst);
++        if (!h) h = SDL_GameControllerOpen(i);
++        if (!h) continue;
++        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_LEFTSTICK) &&
++            SDL_GameControllerGetButton(h, k_face[face]))
++            return 1;
++    }
++    return 0;
++}
++
+ static int savestate_resume_inputs_held(void) {
+     const Uint8* keys = SDL_GetKeyboardState(NULL);
+     if (keys) {
+--- a/psxrecomp/runtime/src/memory.c
++++ b/psxrecomp/runtime/src/memory.c
+@@ -48,6 +48,20 @@
+  * Trusted mods may opt into host-backed guest memory in Expansion 1. Before
+  * the first allocation this entire region retains hardware open-bus behavior.
+  */
++/* Local (driver.personal): save states capture mod memory (section 0x12) so
++ * guest data a mod placed there survives load/rewind. */
++uint32_t psx_mod_memory_snapshot(const uint8_t** data) {
++    if (data) *data = mod_memory;
++    return mod_memory_used;
++}
++
++int psx_mod_memory_restore(const uint8_t* data, uint32_t len) {
++    if (!data || len > MOD_MEMORY_SIZE) return 0;
++    memcpy(mod_memory, data, len);
++    if (mod_memory_used < len) mod_memory_used = len;
++    return 1;
++}
++
+ uint32_t psx_mod_memory_alloc(uint32_t size, uint32_t alignment) {
+     uint32_t start;
+     if (size == 0u) return 0u;
+--- a/psxrecomp/runtime/src/mod_runtime.cpp
++++ b/psxrecomp/runtime/src/mod_runtime.cpp
+@@ -1427,6 +1427,13 @@
+     }
+ }
+ 
++extern "C" int mod_runtime_disc_overlay_covers(uint32_t lba) {
++    using namespace PSXRecompV4;
++    RuntimeMods& s = state();
++    if (!s.initialized || !s.disc_enabled || s.disc_guard_failed) return 0;
++    return s.user_overlay_index.count(lba) || s.raw_overlay_index.count(lba);
++}
++
+ extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
+                                                uint8_t* bytes, uint32_t size) {
+     using namespace PSXRecompV4;
+--- a/psxrecomp/runtime/include/mod_runtime.h
++++ b/psxrecomp/runtime/include/mod_runtime.h
+@@ -49,6 +49,9 @@
+ void mod_runtime_on_vblank(void);
+ void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
+                                    uint8_t* bytes, uint32_t size);
++/* Local (driver.personal): 1 when an active disc overlay supplies this LBA.
++ * Lets overlays extend the image past its last sector (new, larger files). */
++int mod_runtime_disc_overlay_covers(uint32_t lba);
+ void mod_runtime_enable_disc_patches(void);
+ 
+ #ifdef __cplusplus
+--- a/psxrecomp/runtime/src/starvation_ring.c
++++ b/psxrecomp/runtime/src/starvation_ring.c
+@@ -248,13 +248,18 @@
+     uint64_t timeout = starvation_timeout_us();
+     if (timeout == 0) return;              /* watchdog disabled (renderer bring-up) */
+     uint64_t now = host_us_now();
+-    if (now - s_last_heartbeat_us > timeout) {
++    /* Local (driver.personal): the emulation thread can record a heartbeat
++     * after this thread read the clock; now - last would wrap to ~2^64 and
++     * abort a healthy game (seen under heavy load). */
++    uint64_t last = s_last_heartbeat_us;
++    if (now <= last) return;
++    if (now - last > timeout) {
+         starvation_ring_dump(NULL);
+         /* Abort cleanly so the dump file is preserved and the user knows
+          * the runtime starved. */
+         fprintf(stderr, "starvation_watchdog: %llu us without heartbeat — "
+                 "ring dumped to starvation_dump.jsonl, aborting\n",
+-                (unsigned long long)(now - s_last_heartbeat_us));
++                (unsigned long long)(now - last));
+         fflush(stderr);
+         exit(2);
+     }
