@@ -330,9 +330,19 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
 
     # object -> covered D1 cells, from its model's bounding sphere
     obj_list = []
+    # Driver 2 drew its river with flat street-level tiles in cells without a driving
+    # surface; our water is drawn behind everything (Miami's sea flags), so they hid it
+    kinds = sea_kinds(across, down) if "no_water" not in EXPERIMENT and "keep_rivertiles" not in EXPERIMENT else {}
+    dropped = 0
     for o in objects.values():
         x, z = ws.to_d1(o.x, o.z)
+        m = models_all.get(o.model)
+        if kinds and m is not None and m.shape_flags & 0x0400 and abs(ws.s(o.y)) < 200 and                 kinds.get(((x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT)) == "water":
+            dropped += 1
+            continue
         obj_list.append(CellObject(x, ws.s(o.y), z, o.yang, o.model))
+    if dropped:
+        print("Driver 2 river tiles dropped:", dropped)
     if "no_water" not in EXPERIMENT and "water_noobj" not in EXPERIMENT:
         wc = water_cells(across, down)
         n = CELL // (1500 * WATER_SCALE)         # LA's tile is 1500 wide; far tiles (shape 0x20, 0x800274B8)

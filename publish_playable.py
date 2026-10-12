@@ -4,6 +4,8 @@ dev mode, logs, F9 / L3+R3 snapshots, overlay, test-spot starts.
 
     python driver_personal/publish_playable.py            publish/update
     python driver_personal/publish_playable.py --dry-run  show how much would be copied
+    pythonw driver_personal/publish_playable.py --if-changed   scheduled task: publish only when build-dev
+        or the spot list changed and has been stable for 2 min; quiet otherwise; logs to WORKLOG.md
 
 Folder contents: game exe + runtime folders, mods (Chicago package + the dev client's
 features), disc image, retail BIOS, the user's settings/controls, and three launchers:
@@ -144,9 +146,29 @@ def copy_file(src: Path, dst: Path, dry: bool) -> int:
     return src.stat().st_size
 
 
+STAMP_NAME = ".published_from.txt"
+STABLE_S = 120
+
+
+def source_stamp() -> tuple[str, float]:
+    """Fingerprint of what the copy depends on + the newest change time."""
+    files = [DEV / "Driver_Recompiled.exe", DEV / "mods/state.toml", SPOTS,
+             *sorted((DEV / "mods/packages").rglob("manifest.toml")),
+             *sorted((DEV / "mods/packages").rglob("*.lev"))]
+    files = [f for f in files if f.exists()]
+    stamp = "\n".join("%s %d %d" % (f.relative_to(APP), f.stat().st_size, int(f.stat().st_mtime)) for f in files)
+    return stamp, max(f.stat().st_mtime for f in files)
+
+
 def main():
     dry = "--dry-run" in sys.argv
+    auto = "--if-changed" in sys.argv
     dest = desktop() / NAME
+    if auto:
+        stamp, newest = source_stamp()
+        old = (dest / STAMP_NAME).read_text(encoding="utf-8") if (dest / STAMP_NAME).exists() else ""
+        if stamp == old or datetime.datetime.now().timestamp() - newest < STABLE_S or running_from(dest):
+            return                                          # unchanged, still being written, or in use
     if running_from(dest):
         raise SystemExit("The playable copy is running (%s). Close the game first." % dest)
     copied = 0
@@ -184,6 +206,12 @@ def main():
             "Don't run it on two PCs at the same time (shared saves).\n"
             % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), exe_t.strftime("%Y-%m-%d %H:%M"), lev_t),
             encoding="utf-8")
+        (dest / STAMP_NAME).write_text(source_stamp()[0], encoding="utf-8")
+        if auto:
+            with open(APP / "driver_personal" / "WORKLOG.md", "a", encoding="utf-8") as w:
+                w.write("%s | publish (auto) | playable | build-dev mirrored to the OneDrive desktop copy '%s' "
+                        "(%.1f MB changed) for the laptop | publish_playable.py\n"
+                        % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), NAME, copied / 1e6))
     print("%s %s: %.1f MB %s, %d spots" % ("would update" if dry else "published to", dest, copied / 1e6,
                                           "to copy" if dry else "copied", table.count("\n") - 1))
 
