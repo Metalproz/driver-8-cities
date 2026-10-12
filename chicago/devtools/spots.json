@@ -292,5 +292,103 @@
    587545
   ],
   "note": "user 19:52: quay walls on a diagonal shore (sawtooth, white wall face seen from land)"
+ },
+ "c20_p2n": {
+  "d2": [
+   19153,
+   -120482
+  ],
+  "note": "C20 QA-2: drive north from D2 19148,-180607 lifts ~1373 at cell 602,794 (street 0 + trench 1352 in one cell)"
+ },
+ "c20_p2s": {
+  "d2": [
+   20880,
+   -172873
+  ],
+  "note": "C20 QA-2: drive south from D2 19148,-180607 jumps 410 and flips at cell 604,840 (sea 2703 cells)"
+ },
+ "c20_p3n": {
+  "d2": [
+   19350,
+   -284871
+  ],
+  "note": "C20 QA-2: drive north from street row 941 (D2 19148,-287425) into the portal, lifts to y 9134 (jump 3309), cell 602,938 boundary"
+ },
+ "c20_wall": {
+  "d2": [
+   -240368,
+   -88156
+  ],
+  "note": "C20 QA-2: drive east from D1 -165400,-206700, lifts 1257 at -159562,-203465 (trench wall, cell 373,765 area)"
+ },
+ "deckfall_w": {
+  "d2": [
+   -161533,
+   -549925
+  ],
+  "note": "QA-3: west ramp foot (road col 443, row 1172, height 0), spawn facing east; drive east up the ramp onto the south freeway deck (-1352) at x -38524; car fell off at the deck edge (y 1460 to 201 in 0.56 s)"
+ },
+ "deckfall_e": {
+  "d2": [
+   -99033,
+   -549925
+  ],
+  "note": "QA-3: east ramp foot (road col 498, row 1172, height 0), spawn facing east (reverse to go west); the ramp climbs to the deck (col 487, -1352)"
+ },
+ "deckramp_w": {
+  "d2": [
+   -150170,
+   -549925
+  ],
+  "note": "C17: on the west ramp (col 453, row 1172), drive east over the crest (col 455) onto the deck"
+ },
+ "shore_strip": {
+  "d2": [
+   -181988,
+   574696
+  ],
+  "note": "QA-3 C28: sloped 2-plane strip (col 425 rows 180-186, height 0, surface 25) between flat land and a raised 1176 bank; the car bounced 34x here (y up to 16362), launches from the bank"
+ },
+ "shore_bank": {
+  "d2": [
+   -180852,
+   574696
+  ],
+  "note": "QA-3 C28: raised 1176 bank (col 426, surfaces 38/341) at the water edge; water (surface 683, WATER_MODEL) at col 427"
+ },
+ "east_ramp_s": {
+  "d2": [
+   128239,
+   34166
+  ],
+  "note": "QA-2 item 11: east freeway south ramp foot (cell 698,658, street 4), drive north up onto the deck (cells 696-700 rows 640-647, -1348). build-dev: reaches deck 1505-1517; var_c20_full: same"
+ },
+ "east_ramp_w": {
+  "d2": [
+   122558,
+   52348
+  ],
+  "note": "QA-2 item 11: east freeway west slope foot (cell 693,642, street 4), drive east up the slope to the deck edge (cell 697,642, -988..-236). build-dev: launches to 1569 then falls back to street (flip); var_c20_full: no slope, flat 164"
+ },
+ "hs_lift_6_9": {
+  "d2": [
+   -220737,
+   135351
+  ],
+  "note": "QA-1 height sweep: car lifted to y 10700-11660 (dy +4510 and +2910) under the bridge, area 17, region 6,9; NOT reproduced on the rerun"
+ },
+ "hs_lift_7_19": {
+  "d2": [
+   -150105,
+   -547919
+  ],
+  "note": "QA-1 height sweep: one lift +1060 to y 1225, area 14, region 7,19 (rerun only; first pass clean)"
+ },
+ "hs_drop_8_3": {
+  "d2": [
+   -108122,
+   550507
+  ],
+  "note": "QA-1 height sweep: DROP -978 at street level near unevenn (C21 area), area 0, region 8,3 (pass 1; rerun showed a flip there)"
  }
 }

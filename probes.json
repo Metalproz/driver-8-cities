@@ -1,0 +1,7 @@
+{
+  "_comment": "Current probes for the user (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago). Desktop shortcuts and the laptop copy follow this list: python driver_personal/probes.py sync",
+  "full planes": {
+    "lev": "work/var_c20_full4.lev",
+    "what": "user's full-planes concept + code-review fixes + own plane first; trench ends (C20), ramps (C17), far water (C19)"
+  }
+}

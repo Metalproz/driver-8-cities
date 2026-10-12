@@ -1209,6 +1209,7 @@ SLOPE_MIN = 30                # height change across a cell (1500) from which a 
 SLOPE_SIGN = (int(os.environ.get("CHI_SLOPE_SX", "1")), int(os.environ.get("CHI_SLOPE_SZ", "1")))   # sign of the plane's x / z gradient (verified in game)
 SURF_MAX = int(os.environ.get("CHI_SURF_MAX", "896"))   # distinct ROADSURF surfaces (type ids are plain model ids < 900; 120 B each in memory)
 SURF_Q = 64                   # quantisation of plane offsets (fewer distinct surfaces)
+GUARD_Q = int(os.environ.get("CHI_GUARD_Q", "64"))   # neighbour-level planes (guards): coarser, they only need to catch the car
 SLOPE_Q = 128                 # quantisation of plane gradients (/4096): 1.8 deg, <= 23 units at a cell edge
 
 
@@ -1239,6 +1240,114 @@ def road_levels(world):
             grid[(col, row)] = sorted({(int(round(-h * ws.SCALE)), t) for h, t in lv})   # y down
     pickle.dump(grid, open(cache, "wb"))
     return grid
+
+
+TUNNEL_GAP = int(os.environ.get("CHI_TUNNEL_GAP", "12"))   # covered trench stretches (no D2 surface) filled up to this many cells
+END_RAMP = int(os.environ.get("CHI_END_RAMP", "6"))         # cells over which a dead-ending trench rises to the street
+BRIDGE_GAP = 2                # street cells over a trench (D2 gives only the bridge) treated as a bridge
+
+
+def trench_ends(world, grid, choice, kinds):
+    """C20: a sunken freeway (trench, ~1352 down) runs into tunnels. Driver 2 has no
+    surface plane inside them (no-surface cells, read as sea / building blocks) and
+    under a street only the street level, so the trench met a 1352 step: cars were
+    launched or flipped at the portals. (1) Covered stretches between two trench
+    segments (<= TUNNEL_GAP cells, no surface at all) get the trench floor. (2) Where
+    a trench still ends against street level or a longer covered stretch, its last
+    END_RAMP cells rise linearly to the street (sloped ROADSURF planes: no stairs).
+    Returns {cell: (gx, gz)} slopes for surface_planes."""
+    dirs = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    tunnel = set()
+    def trench_set():
+        return {k for k, (y, t) in choice.items()
+                if y >= 600 and t not in (6, 9) and (kinds.get(k) != "inside" or k in tunnel)}
+    nosurf = lambda k: k in grid and kinds.get(k) in ("inside", "void")
+    trench, filled = trench_set(), 0
+    for k in sorted(trench):
+        y0, t0 = choice[k]
+        for d in dirs:
+            n = (k[0] + d[0], k[1] + d[1])
+            if n in trench or not nosurf(n):
+                continue
+            path, c = [], n
+            while nosurf(c) and len(path) <= TUNNEL_GAP:
+                path.append(c); c = (c[0] + d[0], c[1] + d[1])
+            if len(path) <= TUNNEL_GAP and c in trench and abs(choice[c][0] - y0) < 200:
+                for q in path:
+                    if choice[q][0] != y0:
+                        choice[q] = (y0, t0); filled += 1
+                    tunnel.add(q)
+    # a street crossing the trench on a bridge, where Driver 2's surface gives only the
+    # bridge (<= BRIDGE_GAP cells, trench at the same depth on the far side): the trench
+    # runs on underneath (the street stays the cell's upper plane); it is no dead end
+    trench, bridged = trench_set(), 0
+    for k in sorted(trench):
+        y0, t0 = choice[k]
+        for d in dirs:
+            path, c = [], (k[0] + d[0], k[1] + d[1])
+            while c in choice and c not in trench and not nosurf(c) and kinds.get(c) != "water" \
+                    and abs(choice[c][0]) < 300 and len(path) <= BRIDGE_GAP:
+                path.append(c); c = (c[0] + d[0], c[1] + d[1])
+            if path and len(path) <= BRIDGE_GAP and c in trench and abs(choice[c][0] - y0) < 200:
+                for q in path:
+                    choice[q] = (y0, t0); bridged += 1
+                trench.update(path)
+    trench = trench_set()
+    ramps = {}
+    for k in trench:
+        y0 = choice[k][0]
+        for d in dirs:
+            n = (k[0] + d[0], k[1] + d[1])
+            if n in trench or n not in choice:
+                continue
+            ny, nt = choice[n]
+            if kinds.get(n) == "water" or (abs(ny) >= 300 and not nosurf(n)):
+                continue                       # the river, or a different level: not a dead end
+            back = [(k[0] - d[0] * i, k[1] - d[1] * i) for i in range(END_RAMP)]
+            if not all(b in trench and abs(choice[b][0] - y0) < 200 for b in back):
+                continue                       # only along the trench's axis (it is narrower than the ramp)
+            run = {}                           # across the end: a trench is a few cells wide; the long
+            for s in (1, -1):                  # side of a wide sunken area (a beach, a lower road
+                i, c = 0, k                    # beside the river) is no end and keeps its wall
+                while (c[0] + d[1] * s, c[1] + d[0] * s) in trench and abs(choice[(c[0] + d[1] * s, c[1] + d[0] * s)][0] - y0) < 200 and i < END_RAMP:
+                    i += 1; c = (c[0] + d[1] * s, c[1] + d[0] * s)
+                run[s] = i
+            if run[1] + run[-1] + 1 > END_RAMP:
+                continue
+            # a bend (the trench goes on beside the street ahead, wallstop1) or a trench
+            # resuming just ahead is no dead end either
+            if any((n[0] + d[0] * j + d[1] * i, n[1] + d[1] * j + d[0] * i) in trench
+                   and abs(choice[(n[0] + d[0] * j + d[1] * i, n[1] + d[1] * j + d[0] * i)][0] - y0) < 200
+                   for j in range(3) for i in range(-run[-1] - 2, run[1] + 3)):
+                continue
+            g = y0 / float(END_RAMP * ROAD_UNIT)
+            slope = {(1, 0): (-g, 0.0), (-1, 0): (g, 0.0), (0, 1): (0.0, g), (0, -1): (0.0, -g)}[d]
+            for i, b in enumerate(back):       # i = 0: the end cell, next to the street
+                h = int(round(y0 * (i + 0.5) / END_RAMP))
+                if b not in ramps or h < ramps[b][0]:
+                    ramps[b] = (h, slope)
+    slopes = {}
+    for b, (h, slope) in ramps.items():
+        choice[b] = (h, choice[b][1])
+        slopes[b] = slope
+    # cells beside a trench without any D2 surface (a pillar, a building corner): a car
+    # hugging the wall that enters one would be lifted to street level; keep it down.
+    # After the ramps, and only beside cells still at trench depth: a hole next to a
+    # ramp's top stays at street level (it was a 1352 pit before the ramp, C20 p2n).
+    # Not void cells: they are the map's drowning boundary (outside the city)
+    holes = 0
+    for k in sorted(trench_set()):
+        y0, t0 = choice[k]
+        if y0 < 600 or k in ramps:
+            continue
+        for d in dirs:
+            n = (k[0] + d[0], k[1] + d[1])
+            if n in choice and n not in ramps and kinds.get(n) not in ("water", "void") and choice[n][0] < y0 \
+                    and not any(t not in (6, 9) for _, t in grid.get(n, [])):
+                choice[n] = (y0, t0); holes += 1
+    print("road map: trench ends: %d covered cells filled, %d bridge cells, %d holes beside trenches, %d ramp cells"
+          % (filled, bridged, holes, len(ramps)))
+    return slopes
 
 
 def sea_fixed_cells(world):
@@ -1476,10 +1585,12 @@ def surface_planes(world, grid, choice, kinds):
     its 4 neighbours that lies SURF_SEP or more away (deck over street, trench under
     a bridge, ground on a trench wall, lane beside a ramp): with the engine patch the
     wheel takes the plane nearest its height, so cars above and below both keep
-    their road. Lowest plane first (an unpatched engine takes the first hit).
+    their road. The own plane first (the engine takes the first hit while the
+    plugin is idle), then lowest first.
     Returns {cell: [(a, c, d), ...]} with d in y-down units."""
-    land = {k: v for k, v in choice.items() if v[1] not in (6, 9) and kinds.get(k) != "inside"}
-    hw = {k: written_height(v[0]) for k, v in land.items()}
+    xslopes = world.get("extra_slopes", {})          # trench end ramps (C20), also in covered cells
+    land = {k: v for k, v in choice.items() if v[1] not in (6, 9) and (kinds.get(k) != "inside" or k in xslopes)}
+    hw ={k: written_height(v[0]) for k, v in land.items()}
     cand = set()
     for k, h in hw.items():
         for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -1487,6 +1598,7 @@ def surface_planes(world, grid, choice, kinds):
             if hn is not None and 40 <= abs(hn - h) < 450:
                 cand.add(k)
     slopes = cell_slopes(world, cand, choice)
+    slopes.update(xslopes)
     ramps = refine_ramps(world, grid, choice, kinds)
     borrowed = 0                                   # ground beside a sloped ramp that took the ramp's
     for k, h in hw.items():                        # height (wall-top rule): follow its slope too
@@ -1503,25 +1615,21 @@ def surface_planes(world, grid, choice, kinds):
         own = {written_height(y) for y, t in grid[k] if t not in (6, 9)}
         levels = set(own)
         tilt = {}                                   # level -> (a, c) of a sloped neighbour whose plane it is
-        box = {}                                    # level -> footprint (guards: the third next to the neighbour)
         for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             n = (k[0] + d[0], k[1] + d[1])
             if n in land:
-                side = (250, -750, 750, 750) if d == (1, 0) else (-750, -750, -250, 750) if d == (-1, 0) \
-                    else (-750, -750, 750, -250) if d == (0, 1) else (-750, 250, 750, 750)   # row+1 = south = -z
-                for L in [written_height(y) for y, t in grid[n] if t not in (6, 9)]:
-                    levels.add(L); box.setdefault(L, side)
+                levels.update(written_height(y) for y, t in grid[n] if t not in (6, 9))
                 if n in slopes:                     # the neighbour's own plane at OUR centre
                     ngx, ngz = slopes[n]
                     at_centre = hw[n] + int(round((-ngx * d[0] + ngz * d[1]) * ROAD_UNIT))   # we are at (-dx, +dz) cells from n (row+1 = south = -z)
                     levels.add(at_centre)
-                    tilt[at_centre] = (ngx, ngz); box.setdefault(at_centre, side)
+                    tilt[at_centre] = (ngx, ngz)
                 else:
-                    levels.add(hw[n]); box.setdefault(hw[n], side)
+                    levels.add(hw[n])
         if k in ramps:                              # a narrow ramp crossing this ground cell
             ry, rgx, rgz, rbox = ramps[k]
             rw = written_height(ry)
-            levels.add(rw); tilt[rw] = (rgx, rgz); own.add(rw); box[rw] = rbox
+            levels.add(rw); tilt[rw] = (rgx, rgz); own.add(rw)
         stacked = any(abs(L - h) >= SURF_SEP for L in own)
         gx, gz = slopes.get(k, (0.0, 0.0))
         reach = int((abs(gx) + abs(gz)) * 750)               # the own plane's rise within the cell
@@ -1529,8 +1637,11 @@ def surface_planes(world, grid, choice, kinds):
         ds = [0]
         for L in sorted(levels, reverse=True):               # lowest (largest y-down) first
             dd = L - h
-            if dd and (abs(dd) >= sep or L in tilt) and all(abs(dd - e) >= 40 for e in ds):
-                ds.append(dd)                                # sloped continuations may be close
+            # sloped continuations may be close, and so may the cell's own street over a
+            # trench end ramp (a street car there keeps its street, C20; not the trench
+            # level below that the ramp replaced)
+            if dd and (abs(dd) >= sep or L in tilt or (k in xslopes and L in own and dd < 0)) and all(abs(dd - e) >= 40 for e in ds):
+                ds.append(dd)
         if len(ds) == 1 and (gx, gz) == (0.0, 0.0):
             continue
         # priority: 0 = the cell itself is stacked (deck over street, trench under a bridge),
@@ -1540,19 +1651,30 @@ def surface_planes(world, grid, choice, kinds):
         prio = 0 if stacked else (1 if (gx, gz) != (0.0, 0.0) else 2)
         if prio == 0:                                        # stacked: its own levels only
             ds = [dd for dd in ds if dd == 0 or any(abs(L - h - dd) < SURF_Q for L in own)]
-        elif len(ds) > 2:
-            ds = [0, min((dd for dd in ds if dd), key=abs)]
-        for dd in ds:                                        # guards stay flat unless they continue a
-            if dd and (h + dd) in tilt and abs(dd) >= SURF_SEP:   # ramp into this cell (close planes)
-                del tilt[h + dd]
-        ds.sort(reverse=True)
+        elif len(ds) > 2:                                    # nearest level, plus the deepest level below
+            keep = [0, min((dd for dd in ds if dd), key=abs)]  # (a trench beside an embankment's end: a car
+            deep = max(ds)                                       # at trench depth needs that plane, C20 wall)
+            if deep >= 600 and abs(keep[1]) < 300 and "guard_nearest" not in EXPERIMENT:
+                keep.append(deep)
+            ds = keep
+        # the cell's own plane first, then lowest first: while the plugin does not select
+        # (level start, 60 vblanks after a spool) the engine takes the first plane, and
+        # with full-cell guards a lowest-first order spawned cars on the level under a
+        # bridge (hs_lift_6_9: y -2396 instead of the street)
+        ds.sort(key=lambda dd: (dd != 0, -dd))
         pl = []
         for dd in ds:
             tgx, tgz = (gx, gz) if dd == 0 else tilt.get(h + dd, (0.0, 0.0))
             a = int(round(-tgx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
             c = int(round(-tgz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
-            fp = FULL if dd == 0 or (h + dd) in own else box.get(h + dd, FULL)
-            pl.append((a, c, 0 if dd == 0 else int(round(dd / SURF_Q)) * SURF_Q, fp))
+            # every plane covers the whole cell (user, 2026-10-12): the plugin swaps only the
+            # plane words into slot 0, so a third-cell guard it picked took over the full
+            # cell (lift at the slip road beside the trench); with identical footprints its
+            # height rule decides alone: lower levels run under the upper ones, a car keeps
+            # the highest plane not above its wheel (a car leaving a street edge floats to
+            # the end of that cell, then drops). Guards continue the neighbour's road as is
+            q = SURF_Q if dd == 0 or (h + dd) in own else GUARD_Q          # guards: coarser (surface ids are scarce)
+            pl.append((a, c, 0 if dd == 0 else int(round(dd / q)) * q, FULL))
         planes[k] = (prio, pl)
         nmulti += len(ds) > 1
     print("road map: ROADSURF planes on %d cells (%d with several levels, %d sloped of %d candidates, %d borrowed slopes)"
@@ -1598,6 +1720,40 @@ def roadsurf_lump(planes, ids):
         groups[key] += 1
         best[key] = min(best.get(key, 9), pr)
     cap = min(SURF_MAX, len(ids))
+    # over the id cap: a rare surface joins a more common one with the same slopes and
+    # footprints whose plane offsets differ by <= tol (only as coarse as needed). The
+    # cell's own plane (offset 0) stays exact and no guard crosses it (the signature
+    # holds each offset's sign), so only guards move
+    sign = lambda d: (d > 0) - (d < 0)
+    sig = lambda g: tuple((a, c, f, sign(d)) for a, c, d, f in g)
+    merged, used = {}, None
+    for tol in (64, 128, 192, 256):
+        if len(groups) <= cap:
+            break
+        bucket = collections.defaultdict(set)
+        for g in groups:
+            bucket[sig(g)].add(g)
+        for g in sorted(groups, key=lambda g: groups[g]):
+            if len(groups) <= cap:
+                break
+            if g not in groups:
+                continue
+            cand = [h for h in bucket[sig(g)] if h != g and groups[h] >= groups[g]
+                    and all(abs(pd - qd) <= tol for (_, _, pd, _), (_, _, qd, _) in zip(g, h))]
+            if not cand:
+                continue
+            h = max(cand, key=lambda h: groups[h])
+            groups[h] += groups.pop(g)
+            best[h] = min(best[h], best.pop(g))
+            bucket[sig(g)].discard(g)
+            merged[g], used = h, tol
+    if merged:
+        def final(g):
+            while g in merged:
+                g = merged[g]
+            return g
+        canon = {k: (rot, final(key)) for k, (rot, key) in canon.items()}
+        print("road map: %d surfaces merged into similar ones (guard offsets within %d)" % (len(merged), used))
     order = sorted(groups, key=lambda g: (best[g], -groups[g]))
     if len(groups) > cap:
         lost = order[cap:]
@@ -1638,6 +1794,7 @@ def road_values(world):
             choice[k] = (0, 0)
     if "no_trench" not in EXPERIMENT:
         trench_rule(world, grid, choice, kinds)
+    world["extra_slopes"] = trench_ends(world, grid, choice, kinds) if "no_trenchends" not in EXPERIMENT else {}
     raised = {k for k, (gy, t) in choice.items() if t not in (6, 9) and gy <= -HEIGHT_DEADBAND}
     under = {k for k, lv in grid.items() if k not in raised and choice[k][1] not in (6, 9)
              and any(t not in (6, 9) and gy <= -DECK_HEIGHT for gy, t in lv)}

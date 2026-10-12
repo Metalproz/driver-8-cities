@@ -102,7 +102,8 @@ median kerbs in the trench, 1329 beside lanes at 1352, user 02:12).
    with a raised deck as well and sea-fixed river-bank cells keep the old rule.
    ROADSURF (`surface_planes` / `roadsurf_lump`, switch `no_surf`): every cell
    whose own or 4-neighbour levels lie ≥ 300 apart gets a surface with one
-   full-cell polygon per level (lowest first, d relative to the written height,
+   full-cell polygon per level (the cell's own level first, then lowest first: the
+   engine takes the first while the plugin idles; d relative to the written height,
    quantised to 64) and sloped cells (`cell_slopes`) a tilted own plane; surface
    ids are plain model ids < 900 (the type field doubles as the model whose flags
    say water/grass), info = 1 marks them for the plugin selection, ≤ 320 surfaces
@@ -277,6 +278,18 @@ page queue), enabled by `game.toml [recompiler] mod_function_entry_funcs =
 - Trench ends: the col 661-664 freeway runs into river tunnels (rows 733 and
   787 read sea, the surface has no planes in D2 tunnels) and under a street at
   row 878 (reads grass): the car is lifted/wrecked at those portals (C20).
+  `trench_ends` (2026-10-12): covered stretches <= TUNNEL_GAP filled at trench
+  depth; street gaps <= BRIDGE_GAP (2) between trench cells at the same depth =
+  bridge (D2 samples only the bridge; the trench runs under, the street stays a
+  plane); remaining dead ends rise over END_RAMP cells, only where the trench is
+  <= END_RAMP wide across the end (without it 1898 of 2932 ramp cells were side
+  ramps along beaches and wide sunken areas) and no trench cell at that depth
+  lies within 3 cells ahead (+-2 beside the end's width): a bend is no end
+  (wallstop1: a false ramp in the curving trench flipped the car); 346 ramp
+  cells remain, the C20 freeway ends included; holes beside the trench filled at
+  depth except void cells (drowning boundary). A ramp cell keeps its own street
+  plane even inside the widened sep. Review 2026-10-12 (user /code-review): #2
+  was wrong (inside cells have no D2 level, so there is no street to lose).
 - C17 decks/ramps: ramps climb in 135–300 steps (one height per cell; smooth
   slopes need ROADSURF shapes), and the deck flattening drops the car halfway up
   (Live test, spot `rampsink`). Mirror of C16: a deck over a street can keep its

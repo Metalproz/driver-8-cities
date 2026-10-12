@@ -94,22 +94,51 @@ for ($i = 0; $i -lt $lines.Length; $i++) {
 Write-Host "start set to: $name  (Take a Ride -> Los Angeles = Chicago)"
 '''
 
+# every launcher first activates its Chicago package (dev client's or a probe's) from packages_store
+USE_PKG = r'''robocopy "%~dp0packages_store\{slug}\driver.chicago" "%~dp0mods\packages\driver.chicago" /MIR /NJH /NJS /NFL /NDL /NP >nul
+'''
+
 PLAY_BAT = r'''@echo off
 rem Driver with Chicago (dev client copy): normal downtown start. Dev mode: F9 snapshots -> dev\dumps
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" default
+''' + USE_PKG.format(slug="dev") + r'''powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" default
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fixpaths.ps1"
 start "" "%~dp0Driver_Recompiled.exe" --memcard-dir "%~dp0saves"
 '''
 
-SPOT_BAT = r'''@echo off
-rem Driver with Chicago (dev client copy): pick a test spot as the Take a Ride start, then play.
+SPOT_BAT_T = r'''@echo off
+rem Driver with Chicago: {title}. Pick a test spot as the Take a Ride start (Los Angeles = Chicago), then play.
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" %*
+''' + USE_PKG + r'''powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" %*
 if errorlevel 1 (pause & exit /b 1)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fixpaths.ps1"
 start "" "%~dp0Driver_Recompiled.exe" --memcard-dir "%~dp0saves"
 '''
+SPOT_BAT = SPOT_BAT_T.replace("{title}", "dev client copy").replace("{slug}", "dev")
+
+PROBES_FILE = APP / "driver_personal" / "probes.json"
+PROBE_PKG_BUILD = APP / "devtest" / "_probe_pkgs"
+
+
+def probes() -> dict:
+    if not PROBES_FILE.exists():
+        return {}
+    data = json.loads(PROBES_FILE.read_text(encoding="utf-8"))
+    out = {}
+    for name, p in data.items():
+        lev = APP / "driver_personal" / "chicago" / p["lev"] if not name.startswith("_") else None
+        if lev is not None and lev.exists():
+            out[name] = {"slug": "probe_" + "".join(c if c.isalnum() else "_" for c in name), "lev": lev,
+                         "what": p.get("what", "")}
+    return out
+
+
+def copy_tree(src: Path, dst: Path, dry: bool) -> int:
+    n = 0
+    for f in src.rglob("*"):
+        if f.is_file():
+            n += copy_file(f, dst / f.relative_to(src), dry)
+    return n
 
 
 def desktop() -> Path:
@@ -152,9 +181,10 @@ STABLE_S = 120
 
 def source_stamp() -> tuple[str, float]:
     """Fingerprint of what the copy depends on + the newest change time."""
-    files = [DEV / "Driver_Recompiled.exe", DEV / "mods/state.toml", SPOTS,
+    files = [DEV / "Driver_Recompiled.exe", DEV / "mods/state.toml", SPOTS, PROBES_FILE,
              *sorted((DEV / "mods/packages").rglob("manifest.toml")),
-             *sorted((DEV / "mods/packages").rglob("*.lev"))]
+             *sorted((DEV / "mods/packages").rglob("*.lev")),
+             *[p["lev"] for p in probes().values()]]
     files = [f for f in files if f.exists()]
     stamp = "\n".join("%s %d %d" % (f.relative_to(APP), f.stat().st_size, int(f.stat().st_mtime)) for f in files)
     return stamp, max(f.stat().st_mtime for f in files)
@@ -175,10 +205,31 @@ def main():
     for f in RUNTIME_FILES:
         if (DEV / f).exists():
             copied += copy_file(DEV / f, dest / f, dry)
+    chi_pkg = DEV / "mods" / "packages" / "driver.chicago"
     for d in RUNTIME_DIRS:
         for src in (DEV / d).rglob("*"):
-            if src.is_file():
+            if src.is_file() and chi_pkg not in src.parents:      # the Chicago package goes via packages_store
                 copied += copy_file(src, dest / d / src.relative_to(DEV / d), dry)
+    store = dest / "packages_store"
+    copied += copy_tree(chi_pkg, store / "dev" / "driver.chicago", dry)
+    plist = probes()
+    for name, p in plist.items():                           # one complete package per current probe
+        built = PROBE_PKG_BUILD / p["slug"] / "driver.chicago" / "0.1.0"
+        lev_out = built / "assets" / "chicago.lev"
+        if not dry and (not lev_out.exists() or lev_out.stat().st_mtime < p["lev"].stat().st_mtime):
+            sys.path.insert(0, str(APP / "driver_personal" / "chicago" / "devtools"))
+            import dt
+            shutil.rmtree(built.parent, ignore_errors=True)
+            dt.build_package(lev=p["lev"], pkg_dir=built)
+        if built.parent.exists():
+            copied += copy_tree(built.parent, store / p["slug"] / "driver.chicago", dry)
+    if not dry:
+        for old in store.glob("probe_*"):                   # probes no longer in probes.json
+            if old.name not in {p["slug"] for p in plist.values()}:
+                shutil.rmtree(old, ignore_errors=True)
+        for old in dest.glob("Play probe - *.bat"):
+            if old.stem[len("Play probe - "):-len(" at spot")] not in plist:
+                old.unlink()
     for f in DISC_FILES:
         copied += copy_file(APP / "disc" / f, dest / "disc" / f, dry)
     copied += copy_file(BIOS, dest / "bios" / BIOS.name, dry)
@@ -196,15 +247,25 @@ def main():
         (dest / "CLAUDE.md").write_text(LAPTOP_CHAT, encoding="utf-8")
         (dest / "Play Driver.bat").write_text(PLAY_BAT.replace("\n", "\r\n"), encoding="ascii")
         (dest / "Play at spot.bat").write_text(SPOT_BAT.replace("\n", "\r\n"), encoding="ascii")
+        for name, p in plist.items():
+            bat = SPOT_BAT_T.replace("{title}", "PROBE '%s' (%s)" % (name, p["what"][:80])).replace("{slug}", p["slug"])
+            (dest / ("Play probe - %s at spot.bat" % name)).write_text(bat.replace("\n", "\r\n"), encoding="ascii",
+                                                                      errors="replace")
+        # leave the dev client's package active by default
+        active = dest / "mods" / "packages" / "driver.chicago"
+        shutil.rmtree(active, ignore_errors=True)            # may be held by OneDrive: then overwrite in place
+        shutil.copytree(store / "dev" / "driver.chicago", active, dirs_exist_ok=True)
         exe_t = datetime.datetime.fromtimestamp((DEV / "Driver_Recompiled.exe").stat().st_mtime)
         lev = DEV / "mods/packages/driver.chicago/0.1.0/assets/chicago.lev"
         lev_t = datetime.datetime.fromtimestamp(lev.stat().st_mtime).strftime("%Y-%m-%d %H:%M") if lev.exists() else "?"
         (dest / "VERSION.txt").write_text(
             "Published %s from build-dev (the dev client)\ngame exe: %s\nChicago level: %s\n\n"
             "Start: 'Play Driver.bat' (downtown) or 'Play at spot.bat' (pick a test spot; then Take a Ride -> Los Angeles = Chicago).\n"
+            "Probes (test levels that are not in the dev client yet): 'Play probe - NAME at spot.bat'. Current: %s.\n"
             "Dev mode is on: F9 / L3+R3 snapshots and logs go to the dev folder here and sync back to the PC.\n"
             "Don't run it on two PCs at the same time (shared saves).\n"
-            % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), exe_t.strftime("%Y-%m-%d %H:%M"), lev_t),
+            % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), exe_t.strftime("%Y-%m-%d %H:%M"), lev_t,
+               ", ".join("%s (%s)" % (n, p["what"]) for n, p in plist.items()) or "none"),
             encoding="utf-8")
         (dest / STAMP_NAME).write_text(source_stamp()[0], encoding="utf-8")
         if auto:
