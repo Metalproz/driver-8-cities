@@ -4,11 +4,13 @@
     python spotplay.py C4          spot of ROADMAP issue C4 (first spot in its row)
     python spotplay.py blackroofs  spot by name (devtools/spots.json)
     python spotplay.py rampsink --lev work/var_surf.lev   a test level instead of build-dev's
+    python spotplay.py rampsink --auto     drive the menus all the way into the game (old behaviour)
 
 Makes devtest/play_<spot>: a copy of build-dev (same exe, same installed Chicago
 level, your input/keybind settings) whose package starts Take a Ride at the spot.
 Own memory cards and debug port 4377; F9 snapshots land in the shared <app>/dev/dumps; so build-dev and your saves are never touched.
-The menus are driven to Take a Ride automatically; then the game is yours.
+By default the menus are driven only to the Take a Ride city select (user, 2026-10-11:
+"load into the map select as fast as possible, I do the rest"); Chicago is in LA's slot.
 """
 from __future__ import annotations
 
@@ -41,6 +43,8 @@ def resolve(arg, sp):
 def main():
     sp = dt.spots()
     argv = sys.argv[1:]
+    auto = "--auto" in argv
+    argv = [a for a in argv if a != "--auto"]
     lev_override = None
     if "--lev" in argv:                       # a test level (path, relative to chicago/ allowed)
         i = argv.index("--lev")
@@ -75,7 +79,8 @@ def main():
                       "--memcard-dir", str(d / "cards"), "--debug-port", str(PORT)],
                      cwd=d, stdout=log, stderr=subprocess.STDOUT,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-    print("game window starting; driving the menus to Take a Ride (don't press anything for ~1 min) ...")
+    print("game window starting; going to the Take a Ride city select (don't press anything for ~15 s) ..."
+          if not auto else "game window starting; driving the menus to Take a Ride (don't press anything for ~1 min) ...")
     time.sleep(4)
     g = dt.Dbg(port=PORT)
     for _ in range(60):
@@ -83,6 +88,13 @@ def main():
             g.frame(); break
         except Exception:
             time.sleep(1)
+    if not auto:
+        while (g.frame() or 0) < 2300:           # main menu ready
+            time.sleep(0.1)
+        for b in ["right"] * 5 + ["cross"]:      # Take a Ride -> city select
+            g.press(b, hold=0.1, gap=0.35)
+        print("ready: Take a Ride city select. Pick Los Angeles (= Chicago); you start at %s." % name)
+        return
     dt.to_take_a_ride(g)
     try:
         x, _, z = g.pos()

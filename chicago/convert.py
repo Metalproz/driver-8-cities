@@ -288,6 +288,10 @@ def build_models(chi: Lev, base: Lev, res):
         assert len(names) == far_water_index(chi), (len(names), far_water_index(chi))
         names.append("FARWATER")
         data[len(names) - 1] = far_water_model(res, fallback)
+    if SHORE_WALLS:
+        assert len(names) == far_water_index(chi) + FAR_WATER
+        names.append("SHOREWALL")
+        data[len(names) - 1] = shore_wall_model(res, fallback)
     count = len(names)
 
     lump = bytearray(struct.pack("<i", count))
@@ -341,13 +345,22 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                     x, z = cx * CELL + step * i + step // 2 - half_x, cz * CELL + step * j + step // 2 - half_z
                     col, row = (x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT
                     near = [wh[k] for k in ((col, row), (col - 1, row), (col, row - 1), (col - 1, row - 1)) if k in wh]
-                    obj_list.append(CellObject(x, max(near) if near else WATER_Y, z, 0, WATER_MODEL))
+                    if inside_world(x, z, across, down):
+                        obj_list.append(CellObject(x, max(near) if near else WATER_Y, z, 0, WATER_MODEL))
         print("water tiles:", len(wc))
         if FAR_WATER:
             fw = far_water_blocks(across, down)
+            lift = int(os.environ.get("CHI_FAR_LIFT", "0"))     # test: raise the planes into view
+            fw = [(x, y, z) for x, y, z in fw if inside_world(x - FAR_SIZE // 2, z - FAR_SIZE // 2, across, down)
+                  and inside_world(x + FAR_SIZE // 2 - 1, z + FAR_SIZE // 2 - 1, across, down)]
             for x, y, z in fw:
-                obj_list.append(CellObject(x, y, z, 0, far_water_index(chi)))
+                obj_list.append(CellObject(x, y - lift, z, 0, far_water_index(chi)))
             print("far water planes:", len(fw))
+        if SHORE_WALLS:
+            sw = [w for w in shore_walls(across, down) if inside_world(w[0], w[2], across, down)]
+            for x, y, z, yang in sw:
+                obj_list.append(CellObject(x, y, z, yang, far_water_index(chi) + FAR_WATER))
+            print("shore walls:", len(sw))
     # Driver 1 lists ~89% of objects only in their centre cell (measured on LA);
     # only objects larger than a cell are also listed in the cells they cover.
     covered = []
@@ -820,13 +833,16 @@ def build_spooled(world, area_data, res, chi: Lev):
 WATER_MODEL = 683            # free in-memory Chicago slot < 900 (road map ids must be < 900)
 WATER_SRC = 316              # LA's water tile (shape flags 0x04A1, 1500 x 1500, LASEA)
 WATER_SCALE = 2              # LA's 1500 tile stretched to one per 3000 cell (with real corner vertices, see water_model)
-WATER_Y = int(os.environ.get("CHI_WATER_Y", "300"))               # water surface below street level (900 left a gap under D2 quay walls and bridges)
+WATER_Y = int(os.environ.get("CHI_WATER_Y", "1084"))               # water surface below street level: the sand base (one ocean level; quay gaps closed by shore walls)
 WATER_NEAR = 4               # water tiles on water cells within this many cells of land
+WATER_LEVEL = int(os.environ.get("CHI_WATER_LEVEL", "1084"))  # one level for all water: 100 under the sand base (beach_n car y -820 = sand 984;
+                             # at equal height water and sand tiles swapped draw order: water through the sand); 0 = per shore
 WATER_BELOW_SHORE = 100      # water this far under the lowest shore nearby
 WATER_SHORE_RADIUS = 8       # road cells (12000 units)
 WATER_MAX_DEPTH = 2000
 WATER_CLOSE = int(os.environ.get("CHI_WATER_CLOSE", "4"))   # land gaps (bridges) filled between water cells
 WATER_GROW = int(os.environ.get("CHI_WATER_GROW", "0"))     # cells of water under the shore (0: water only where there is water)
+BEACH_GROW = int(os.environ.get("CHI_BEACH_GROW", "2"))     # display-only water this many cells under low land (beaches): gaps show water
 
 
 def surface_grid(across, down):
@@ -865,7 +881,7 @@ def sea_kinds(across, down):
     from d2overlay import Overlay
     world = dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS)
     grid = road_levels(world)
-    key = hashlib.md5((open("d2overlay.py", "rb").read() + repr(sorted(grid.items())[:50]).encode() + b"v3")).hexdigest()[:8]
+    key = hashlib.md5((open("d2overlay.py", "rb").read() + repr((across, down, ws.OFFSET_X, ws.OFFSET_Z, sorted(grid.items())[:50])).encode() + b"v4")).hexdigest()[:8]
     cache = "work/sea_kinds_%s.pkl" % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
@@ -919,6 +935,8 @@ def water_heights(across, down):
     import numpy as np
     from scipy.ndimage import maximum_filter
     kinds = sea_kinds(across, down)
+    if WATER_LEVEL:                            # user (2026-10-11): one ocean level everywhere, at the sand base
+        return {k: WATER_LEVEL for k, v in kinds.items() if v == "water"}
     world = dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS)
     grid = road_levels(world)
     w, h = world["rx_n"] * 60, world["rz_n"] * 60
@@ -958,6 +976,22 @@ def water_cells(across, down):
                     if all((cx + dx * k, cz + dz * k) not in wet for k in range(1, n)):
                         out.update((cx + dx * k, cz + dz * k) for k in range(1, n))
                     break
+    if BEACH_GROW:                             # display-only water under low land next to the water (beaches)
+        world = dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS)
+        grid = road_levels(world)
+        def ground(c):
+            lv = sorted(grid.get(c, [(0, 0)]), key=lambda hl: (hl[1] in (6, 9), abs(hl[0])))
+            return lv[0][0]
+        low = set()
+        for (cx, cz) in land:
+            cells = [(2 * cx + i, rows - 1 - (2 * cz + j)) for i in (0, 1) for j in (0, 1)]
+            if all(kinds.get(c) is not None or ground(c) >= WATER_LEVEL - 500 for c in cells):
+                low.add((cx, cz))
+        front = set(out)
+        for _ in range(BEACH_GROW):
+            front = {(cx + dx, cz + dz) for (cx, cz) in front for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                     if (cx + dx, cz + dz) in low and (cx + dx, cz + dz) not in out}
+            out |= front
     for _ in range(WATER_GROW):                # grow under the shore
         out |= {(cx + dx, cz + dz) for (cx, cz) in out for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
                 if 0 <= cx + dx < across and 0 <= cz + dz < down}
@@ -996,6 +1030,12 @@ def water_model(base: Lev, res, fallback, sub_off: int):
     d = bytearray(remap_polys(bytes(hdr) + b"".join(corners) + poly, "B", res.remap, fallback))
     struct.pack_into("<h", d, 8, min(0x7FFF, abs(m.bounding_sphere) * WATER_SCALE))
     struct.pack_into("<H", d, 2, struct.unpack_from("<H", d, 2)[0] | 0x4000)   # flags2 water: cars sink (like LA's 330)
+    # LA's 316 is an instance (+4 = 7): at load the engine (0x80052434) gave it the vertices
+    # of Chicago's model 7, and far tiles (0x800268FC: first 4 vertices) became skewed
+    # 1364 x 1430 squares per 3000 cell, the chunks to the horizon
+    struct.pack_into("<h", d, 4, -1)
+    if "water_tileflag" not in EXPERIMENT:     # as Miami's sea (0x00A1): no tile flag, so water goes
+        struct.pack_into("<H", d, 0, struct.unpack_from("<H", d, 0)[0] & ~0x0400)   # to the back OT slots
     w = struct.unpack_from("<I", m.data, 0x2C)[0]
     bsub = base.inmem.get(L_SUBDIV).data
     vb, tr = w & 0xFFFF, w >> 16
@@ -1015,10 +1055,16 @@ def water_model(base: Lev, res, fallback, sub_off: int):
     return bytes(d), bytes(grid + rec)
 
 
-FAR_WATER = any(e.startswith("farwater") for e in EXPERIMENT) and "no_water" not in EXPERIMENT   # opt-in until verified
+FAR_WATER = "no_farwater" not in EXPERIMENT and "no_water" not in EXPERIMENT   # user choice C19: far water planes
 FAR_SIZE = 6000              # far water plane: 2 x 2 cells, 2 x 2 quads of the water texture
-FAR_SHORE = 1                # road cells of open water around it (only over water, never over land)
+FAR_SHORE = 4                # road cells of open water around it: 1 put planes under a camera on the beach (no near clipping: overhead sheet)
 FAR_REACH = 24               # road cells from land (36000 units): beyond that it is never seen
+
+
+def inside_world(x, z, across, down) -> bool:
+    """Inside the regions that may hold objects: the outer region ring stays empty."""
+    mx, mz = across // 2 * CELL - REGION_CELLS * CELL, down // 2 * CELL - REGION_CELLS * CELL
+    return -mx <= x < mx and -mz <= z < mz
 
 
 def far_water_model(res, fallback) -> bytes:
@@ -1080,6 +1126,61 @@ def far_water_blocks(across, down):
     return out
 
 
+SHORE_WALLS = "no_walls" not in EXPERIMENT and "no_water" not in EXPERIMENT   # quay walls down to the water (984 level)
+WALL_TEXTURE = ("C", 1, 3)   # Driver 2's RIVER3A: concrete quay wall with a dark waterline (forced resident)
+WALL_DEPTH = 2000            # from the bank down, past the water (WATER_LEVEL)
+WALL_TOP_GAP = 40            # wall top this far under the bank edge: no overlap with the ground at the rim
+WALL_YANG = tuple(int(v) for v in os.environ.get("CHI_WALL_YANG", "48,16,32,0").split(","))   # land +x, -x, below, above (x verified at quaydiag 2026-10-11: 16/48 faced the land)
+
+
+def shore_wall_model(res, fallback) -> bytes:
+    """A 1500-wide vertical quay wall (both faces), top at the model origin."""
+    import d1models
+    h, w = WALL_DEPTH, ROAD_UNIT // 2
+    verts = [(-w, 0, 0), (w, 0, 0), (w, h, 0), (-w, h, 0)]
+    uv = [(128, 64), (223, 64), (223, 127), (128, 127)]
+    _, page, det = WALL_TEXTURE
+    # one face, towards the water (model -z): seen from the street it is a back face and
+    # culled; two-sided, the near side smeared across the street (no near clipping)
+    face = bytes([11, page, det, 0, 0, 1, 2, 3]) + b"".join(bytes(t) for t in uv)
+    if d1models.poly_normal(face, verts)[2] > 0:
+        face = bytes([11, page, det, 0, 3, 2, 1, 0]) + b"".join(bytes(t) for t in uv[::-1])
+    vblock = b"".join(struct.pack("<4h", x, y, z, 0) for x, y, z in verts)
+    p_off = 36 + len(vblock)
+    hdr = struct.pack("<3hBB4h5i", 0x0001, 0, -1, 0, 0, int(w * 1.5), 0, 4, 1, 36, p_off, p_off, p_off, 0)
+    conv, _ = d1models.convert_models({0: hdr + vblock + face})
+    return remap_polys(conv[0], "C", res.remap, fallback)
+
+
+def shore_walls(across, down):
+    """(x, y, z, yang) per water/land edge where the bank stands above the water:
+    the wall hides the gap between the bank's edge and the water below it."""
+    kinds = sea_kinds(across, down)
+    wh = water_heights(across, down)
+    grid = road_levels(dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS))
+    half_x, half_z = across // 2 * CELL, down // 2 * CELL
+    out = []
+    for (col, row), kind in kinds.items():
+        if kind != "water":
+            continue
+        # land at (dc, dr); the face (model -z) must point back at the water: rotation
+        # (64 = 360 degrees) for water towards -x (land +x), +x, +z (land below: row+1), -z
+        for dc, dr, yang in ((1, 0, WALL_YANG[0]), (-1, 0, WALL_YANG[1]), (0, 1, WALL_YANG[2]), (0, -1, WALL_YANG[3])):
+            n = (col + dc, row + dr)
+            if n not in grid or kinds.get(n) is not None:
+                continue
+            if any(kinds.get((n[0] + dc * k, n[1] + dr * k)) == "water" for k in range(1, WATER_CLOSE + 1)):
+                continue                       # bridge deck: water again on the far side, no wall under it
+            lv = sorted(grid[n], key=lambda hl: (hl[1] in (6, 9), abs(hl[0])))
+            gy = 0 if abs(lv[0][0]) < HEIGHT_DEADBAND else lv[0][0]
+            if gy > wh.get((col, row), WATER_Y) - 100:
+                continue                       # beach at or below the water: no wall
+            x = col * ROAD_UNIT - half_x + dc * ROAD_UNIT // 2
+            z = half_z - row * ROAD_UNIT - dr * ROAD_UNIT // 2
+            out.append((x, gy + WALL_TOP_GAP, z, yang))
+    return out
+
+
 ROAD_CELLS_PER_REGION = 3600
 ROAD_TOP = 0xF << 26          # bits 26-29 as on almost all of LA's cells (not read by the height code)
 ROAD_FLAG = 4                 # bit 2, set on 87% of LA's cells
@@ -1091,13 +1192,14 @@ WATER_FLAG = int(os.environ.get("CHI_WATER_FLAG", "4"))   # LA: 0
 HEIGHT_DEADBAND = 100         # |ground y| below this -> 0 (a start on raised grass, -24, ended the game)
 RAMP_STEP = int(os.environ.get("CHI_RAMP_STEP", "0"))     # 0 = a street bridging a trench drops in at the bridge edge; N = stepped ramp (<= N per cell) over 6 cells, which the user found worse (car inside the geometry for a long stretch)
 GROUND_TYPES = (0, 4, 11, 12)  # D2 surface types that are plain ground (not a road); >= 0x4000 = kerb/pavement
-WALLTOP = int(os.environ.get("CHI_WALLTOP", "1"))        # ground cells beside a sunken road follow it (0: off)
+WALLTOP = int(os.environ.get("CHI_WALLTOP", "0"))        # ground cells beside a sunken road follow it (off since the plugin selects the highest plane below the wheel; the trench enters those cells as a guard plane)
 MEDIAN_SNAP = int(os.environ.get("CHI_MEDIAN_SNAP", "40"))  # a cell this little above a neighbour takes the neighbour's level (median kerbs; 0: off)
 SURF_SEP = 300                # levels this far apart in one cell become separate ROADSURF planes (engine patch picks the nearest to the wheel)
 SLOPE_MIN = 30                # height change across a cell (1500) from which a sloped plane is written
 SLOPE_SIGN = (int(os.environ.get("CHI_SLOPE_SX", "1")), int(os.environ.get("CHI_SLOPE_SZ", "1")))   # sign of the plane's x / z gradient (verified in game)
-SURF_MAX = int(os.environ.get("CHI_SURF_MAX", "320"))   # distinct ROADSURF surfaces (type ids are plain model ids < 900; 120 B each in memory)
-SURF_Q = 64                   # quantisation of plane offsets and gradients (fewer distinct surfaces)
+SURF_MAX = int(os.environ.get("CHI_SURF_MAX", "896"))   # distinct ROADSURF surfaces (type ids are plain model ids < 900; 120 B each in memory)
+SURF_Q = 64                   # quantisation of plane offsets (fewer distinct surfaces)
+SLOPE_Q = 128                 # quantisation of plane gradients (/4096): 1.8 deg, <= 23 units at a cell edge
 
 
 def road_levels(world):
@@ -1244,15 +1346,17 @@ def plain_model_ids(models_lump: bytes, limit=900):
     flags2 0x4000): usable as ROADSURF surface ids (the road map's type field is
     both; the engine reads the model's flags for water/waves)."""
     n, = struct.unpack_from("<i", models_lump, 0)
-    p, ids = 4, []
+    p, ids, empty = 4, [], []
     for i in range(min(n, limit)):
         size, = struct.unpack_from("<i", models_lump, p)
         if size >= 4:
             f1, f2 = struct.unpack_from("<2H", models_lump, p + 4)
             if not (f1 & 0x80) and not (f2 & 0x4000) and i not in (GRASS_ID, WATER_MODEL):
                 ids.append(i)
+        elif i not in (GRASS_ID, WATER_MODEL):
+            empty.append(i)            # driver_chicago.c points empty models at a plain placeholder
         p += 4 + size
-    return ids
+    return ids + empty
 
 
 def cell_slopes(world, cells, choice):
@@ -1282,6 +1386,80 @@ def cell_slopes(world, cells, choice):
     return out
 
 
+FULL = (-750, -750, 750, 750)             # a plane's footprint inside the cell (px0, pz0, px1, pz1)
+
+
+def refine_ramps(world, grid, choice, kinds):
+    """Narrow or diagonal ramps (D2 ramp/deck surfaces) are missed by the cell-centre
+    sample: the cell reads as the ground beside them and the car drives at ground
+    level inside the ramp. For ground cells that carry or neighbour a level 100..1400
+    away from their own, the 3 x 3 cells around them are sampled at 9 points each and
+    the non-ground samples of the nearest such level are fitted with a plane; it is
+    added to the cell as an extra sloped plane (the plugin takes the highest plane
+    below the wheel, so a car on the ramp follows it, a car on the ground beside it
+    stays down). Returns {cell: (height at the centre, gx, gz)}."""
+    from d2surface import Surface
+    surf = Surface("work/d2_CHICAGO.LEV")
+    half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+    land = lambda k: k in choice and choice[k][1] not in (6, 9) and kinds.get(k) != "inside"
+    cand = set()
+    for k, (y, t) in choice.items():
+        if not land(k) or t not in GROUND_TYPES:
+            continue
+        near = []
+        for dc in range(-2, 3):                          # a 5 x 5 window: narrow ramps are missed
+            for dr in range(-2, 3):                      # by every centre sample along their run
+                n = (k[0] + dc, k[1] + dr)
+                if land(n):
+                    near += [L for L, tt in grid[n] if tt not in (6, 9) and tt not in GROUND_TYPES]
+        if any(100 <= abs(L - y) <= 1400 for L in near):
+            cand.add(k)
+    samples = {}
+
+    def cell_samples(col, row):
+        if (col, row) not in samples:
+            x0, z0 = col * ROAD_UNIT - half_x, half_z - row * ROAD_UNIT
+            pts = []
+            for ox in (-500, 0, 500):
+                for oz in (-500, 0, 500):
+                    dx, dz = ws.to_d2(x0 + ox, z0 + oz)
+                    for h, t in surf.levels(dx, dz):
+                        if t not in (6, 9) and t not in GROUND_TYPES:
+                            pts.append((ox, oz, int(round(-h * ws.SCALE))))
+            samples[(col, row)] = pts
+        return samples[(col, row)]
+
+    out = {}
+    for (col, row) in cand:
+        y0 = choice[(col, row)][0]
+        pts = []
+        for dc in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                pts += [(ox + dc * ROAD_UNIT, oz - dr * ROAD_UNIT, y) for ox, oz, y in cell_samples(col + dc, row + dr)]
+        ramp = sorted((p for p in pts if 100 <= abs(p[2] - y0) <= 1400), key=lambda p: p[2])
+        if len(ramp) < 4:
+            continue
+        best, cur = [], [ramp[0]]                     # the largest cluster of heights within 450
+        for p in ramp[1:]:
+            if p[2] - cur[-1][2] <= 450:
+                cur.append(p)
+            else:
+                best = max(best, cur, key=len); cur = [p]
+        best = max(best, cur, key=len)
+        if len(best) < 4:
+            continue
+        n = len(best)
+        mx = sum(p[0] for p in best) / n; mz = sum(p[1] for p in best) / n; my = sum(p[2] for p in best) / n
+        sxx = sum((p[0] - mx) ** 2 for p in best); szz = sum((p[1] - mz) ** 2 for p in best)
+        sxy = sum((p[0] - mx) * (p[2] - my) for p in best); szy = sum((p[1] - mz) * (p[2] - my) for p in best)
+        gx = sxy / sxx if sxx > 1e-6 else 0.0
+        gz = szy / szz if szz > 1e-6 else 0.0
+        yc = int(round(my - gx * mx - gz * mz))       # the ramp plane at the cell centre
+        out[(col, row)] = (yc, gx, gz, FULL)
+    print("road map: %d ground cells get a fitted ramp plane (of %d candidates)" % (len(out), len(cand)))
+    return out
+
+
 def surface_planes(world, grid, choice, kinds):
     """ROADSURF planes per cell, relative to the cell's written height: the cell's
     own level (sloped where the D2 surface slopes) plus every level of its own or
@@ -1299,36 +1477,102 @@ def surface_planes(world, grid, choice, kinds):
             if hn is not None and 40 <= abs(hn - h) < 450:
                 cand.add(k)
     slopes = cell_slopes(world, cand, choice)
+    ramps = refine_ramps(world, grid, choice, kinds)
+    borrowed = 0                                   # ground beside a sloped ramp that took the ramp's
+    for k, h in hw.items():                        # height (wall-top rule): follow its slope too
+        if k in slopes or any(abs(written_height(y) - h) < SURF_SEP for y, t in grid[k] if t not in (6, 9)):
+            continue
+        for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (k[0] + d[0], k[1] + d[1])
+            if n in slopes and hw.get(n) == h:
+                slopes[k] = slopes[n]
+                borrowed += 1
+                break
     planes, nmulti = {}, 0
     for k, h in hw.items():
-        levels = {written_height(y) for y, t in grid[k] if t not in (6, 9)}
+        own = {written_height(y) for y, t in grid[k] if t not in (6, 9)}
+        levels = set(own)
+        tilt = {}                                   # level -> (a, c) of a sloped neighbour whose plane it is
+        box = {}                                    # level -> footprint (guards: the third next to the neighbour)
         for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             n = (k[0] + d[0], k[1] + d[1])
             if n in land:
-                levels |= {written_height(y) for y, t in grid[n] if t not in (6, 9)}
-                levels.add(hw[n])
+                side = (250, -750, 750, 750) if d == (1, 0) else (-750, -750, -250, 750) if d == (-1, 0) \
+                    else (-750, -750, 750, -250) if d == (0, 1) else (-750, 250, 750, 750)   # row+1 = south = -z
+                for L in [written_height(y) for y, t in grid[n] if t not in (6, 9)]:
+                    levels.add(L); box.setdefault(L, side)
+                if n in slopes:                     # the neighbour's own plane at OUR centre
+                    ngx, ngz = slopes[n]
+                    at_centre = hw[n] + int(round((-ngx * d[0] + ngz * d[1]) * ROAD_UNIT))   # we are at (-dx, +dz) cells from n (row+1 = south = -z)
+                    levels.add(at_centre)
+                    tilt[at_centre] = (ngx, ngz); box.setdefault(at_centre, side)
+                else:
+                    levels.add(hw[n]); box.setdefault(hw[n], side)
+        if k in ramps:                              # a narrow ramp crossing this ground cell
+            ry, rgx, rgz, rbox = ramps[k]
+            rw = written_height(ry)
+            levels.add(rw); tilt[rw] = (rgx, rgz); own.add(rw); box[rw] = rbox
+        stacked = any(abs(L - h) >= SURF_SEP for L in own)
+        gx, gz = slopes.get(k, (0.0, 0.0))
+        reach = int((abs(gx) + abs(gz)) * 750)               # the own plane's rise within the cell
+        sep = SURF_SEP + 2 * reach                           # a ramp must not see the street beside it
         ds = [0]
         for L in sorted(levels, reverse=True):               # lowest (largest y-down) first
             dd = L - h
-            if abs(dd) >= SURF_SEP and all(abs(dd - e) >= SURF_SEP for e in ds):
-                ds.append(dd)
-        gx, gz = slopes.get(k, (0.0, 0.0))
+            if dd and (abs(dd) >= sep or L in tilt) and all(abs(dd - e) >= 40 for e in ds):
+                ds.append(dd)                                # sloped continuations may be close
         if len(ds) == 1 and (gx, gz) == (0.0, 0.0):
             continue
+        # priority: 0 = the cell itself is stacked (deck over street, trench under a bridge),
+        # 1 = sloped own plane (ramps), 2 = only neighbour levels (guards beside decks/trenches).
+        # Surface ids are scarce (plain model ids < 900): guards and ramps keep only the
+        # nearest neighbour level, stacked cells keep every level.
+        prio = 0 if stacked else (1 if (gx, gz) != (0.0, 0.0) else 2)
+        if prio == 0:                                        # stacked: its own levels only
+            ds = [dd for dd in ds if dd == 0 or any(abs(L - h - dd) < SURF_Q for L in own)]
+        elif len(ds) > 2:
+            ds = [0, min((dd for dd in ds if dd), key=abs)]
+        for dd in ds:                                        # guards stay flat unless they continue a
+            if dd and (h + dd) in tilt and abs(dd) >= SURF_SEP:   # ramp into this cell (close planes)
+                del tilt[h + dd]
         ds.sort(reverse=True)
         pl = []
         for dd in ds:
-            if dd == 0:
-                a = int(round(-gx * 4096 / SURF_Q)) * SURF_Q * SLOPE_SIGN[0]
-                c = int(round(-gz * 4096 / SURF_Q)) * SURF_Q * SLOPE_SIGN[1]
-                pl.append((a, c, 0))
-            else:
-                pl.append((0, 0, int(round(dd / SURF_Q)) * SURF_Q))
-        planes[k] = pl
+            tgx, tgz = (gx, gz) if dd == 0 else tilt.get(h + dd, (0.0, 0.0))
+            a = int(round(-tgx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
+            c = int(round(-tgz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
+            fp = FULL if dd == 0 or (h + dd) in own else box.get(h + dd, FULL)
+            pl.append((a, c, 0 if dd == 0 else int(round(dd / SURF_Q)) * SURF_Q, fp))
+        planes[k] = (prio, pl)
         nmulti += len(ds) > 1
-    print("road map: ROADSURF planes on %d cells (%d with several levels, %d sloped of %d candidates)"
-          % (len(planes), nmulti, len(slopes), len(cand)))
+    print("road map: ROADSURF planes on %d cells (%d with several levels, %d sloped of %d candidates, %d borrowed slopes)"
+          % (len(planes), nmulti, len(slopes), len(cand), borrowed))
     return planes
+
+
+def _rot_plane(pl, k):
+    """Plane (a, c, d, (x0, z0, x1, z1)) in world-local coords expressed in the surface
+    frame of rotation k (the engine maps the point (X, Z) to R_k(X, Z) before testing)."""
+    a, c, d, (x0, z0, x1, z1) = pl
+    pts = [(x0, z0), (x0, z1), (x1, z1), (x1, z0)]
+    if k == 1:
+        a, c = -c, a; pts = [(-z, x) for x, z in pts]
+    elif k == 2:
+        a, c = -a, -c; pts = [(-x, -z) for x, z in pts]
+    elif k == 3:
+        a, c = c, -a; pts = [(z, -x) for x, z in pts]
+    xs, zs = [p[0] for p in pts], [p[1] for p in pts]
+    return (a, c, d, (min(xs), min(zs), max(xs), max(zs)))
+
+
+def _canonical(pl):
+    """The rotation k (0-3) and plane list whose representation is smallest."""
+    best = None
+    for k in range(4):
+        r = tuple(_rot_plane(p, k) for p in pl)
+        if best is None or r < best[1]:
+            best = (k, r)
+    return best
 
 
 def roadsurf_lump(planes, ids):
@@ -1337,21 +1581,29 @@ def roadsurf_lump(planes, ids):
     distinct plane list; info = 1 marks them for the height-aware engine patch.
     Returns (bytes, {cell: type id}). Plane (a, b, c) is the unit normal x 4096."""
     import collections, math
-    groups = collections.Counter(tuple(p) for p in planes.values())
+    groups, best, canon = collections.Counter(), {}, {}
+    for k, (pr, p) in planes.items():
+        rot, key = _canonical(p)
+        canon[k] = (rot, key)
+        groups[key] += 1
+        best[key] = min(best.get(key, 9), pr)
     cap = min(SURF_MAX, len(ids))
+    order = sorted(groups, key=lambda g: (best[g], -groups[g]))
     if len(groups) > cap:
-        print("road map: %d distinct surfaces, keeping the %d most used" % (len(groups), cap))
-    keep = [g for g, _ in groups.most_common(cap)]
+        lost = order[cap:]
+        print("road map: %d distinct surfaces, keeping %d (dropped: %d cells, worst priority %d)"
+              % (len(groups), cap, sum(groups[g] for g in lost), min(best[g] for g in lost)))
+    keep = order[:cap]
     sid = {g: ids[i] for i, g in enumerate(keep)}
     out = bytearray(struct.pack("<i", len(keep)))
     for g in keep:
         out += struct.pack("<4h", sid[g], 1, 0, len(g))
-        for a, c, d in g:
+        for a, c, d, (x0, z0, x1, z1) in g:
             n = math.sqrt(a * a + 4096.0 * 4096.0 + c * c)
-            out += struct.pack("<8i", -750, -750, -750, 750, 750, 750, 750, -750)
+            out += struct.pack("<8i", x0, z0, x0, z1, x1, z1, x1, z0)
             out += struct.pack("<4i", int(round(a * 4096 / n)), int(round(4096 * 4096 / n)), int(round(c * 4096 / n)), d)
             out += struct.pack("<hxx", 4)
-    cells = {k: sid[tuple(p)] for k, p in planes.items() if tuple(p) in sid}
+    cells = {k: (sid[key], rot) for k, (rot, key) in canon.items() if key in sid}
     return bytes(out), cells
 
 
@@ -1412,7 +1664,7 @@ def road_values(world):
                     # a region's block holds its 60 x 60 cells with row 0 at its top (max z)
                     cell = (rx * 60 + b, (world["rz_n"] - 1 - rz) * 60 + a)
                     gy, t = choice[cell]
-                    sid = surf_ids.get(cell, GRASS_ID if t in ROAD_TYPES_GRASS else 0)
+                    sid, ang = surf_ids.get(cell, (GRASS_ID if t in ROAD_TYPES_GRASS else 0, 0))
                     if abs(gy) < HEIGHT_DEADBAND:                # kerbs / raised grass: street level
                         gy = 0
                     low = gy & 0xFFF8
@@ -1421,7 +1673,7 @@ def road_values(world):
                         sid, low = WATER_MODEL, wy & 0xFFF8          # water surface: waves, sinking
                         vals.append(ROAD_TOP | (sid << 16) | (low & 0xFFFF) | WATER_FLAG)
                         continue
-                    vals.append(ROAD_TOP | (sid << 16) | (low & 0xFFFF) | ROAD_FLAG)
+                    vals.append((ang << 30) | ROAD_TOP | (sid << 16) | (low & 0xFFFF) | ROAD_FLAG)
             out[(rx, rz)] = vals
     return out
 
@@ -1496,6 +1748,9 @@ def convert(out_path: str):
                 world["model_vis"][tgt] |= world["model_vis"][i]
                 world["model_near"][tgt] |= world["model_near"][i]
     print("area model sets (D1 visibility):", {a: len(v) for a, v in world["area_model_ids"].items()})
+    import texrepack
+    texrepack.FORCED_AREAS = set(world["model_vis"].get(far_water_index(chi) + FAR_WATER, set())) if SHORE_WALLS else set()
+    print("shore wall texture areas:", sorted(texrepack.FORCED_AREAS))
     res = repack(chi, base, world["model_vis"], None if "no_near" in EXPERIMENT else world["model_near"])
     print("\n".join(res.report))
 
@@ -1597,6 +1852,11 @@ def convert(out_path: str):
         Lump(L_CHAIR, base.inmem.get(L_CHAIR).data),
         Lump(L_LOD, lod_lump),
     ])
+    # in-memory section budget: the engine keeps these lumps resident (LA ~100 KB; the
+    # 02:40 Chicago level 243,712 B; 286,720 B with the first ROADSURF was fine in
+    # sequential tests, no hard limit verified yet) - logged so growth is never silent
+    print("inmem section: %d bytes (%s)" % (sum(8 + len(l.data) for l in inmem.lumps),
+          ", ".join("%d:%d" % (l.type, len(l.data)) for l in inmem.lumps)))
     lev = Lev(d1=True, loadtime=load, tpages=tpages, inmem=inmem, spooled=spooled)
     out = lev.build(keep_layout=False)
     tmp = out_path + ".tmp"                 # atomic: test copies must never see a half-written level

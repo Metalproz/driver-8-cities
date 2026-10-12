@@ -63,7 +63,9 @@ An update replaces `CMakeLists.txt` and `game.toml`. Re-apply:
    add `driver_personal/driver_personal.c` and `driver_personal/driver_gameplay.c`
    to `CODEGEN_SETUP_SOURCES`; append the POST_BUILD step that copies
    `mods/preloaded/packages` into `$<TARGET_FILE_DIR:psx-runtime>/mods/packages`.
-2. In `game.toml`: `disc = "disc/disc1.cue"`.
+2. In `game.toml`: `disc = "disc/disc1.cue"`, and under `[recompiler]`:
+   `mod_function_entry_funcs = ["0x80033B10"]` (C33 area-switch hook in `driver_chicago.c`;
+   without it the hook is never called and area switches can freeze).
 3. Rebuild (from this folder's parent):
    `python psxrecomp/psxrecomp_cli.py rebuild --project-root . --config game.toml --build-dir build-release --target psx-runtime --exe-basename Driver_Recompiled --disc disc/disc1.cue --no-pgo --prune-after build-intermediates`
 

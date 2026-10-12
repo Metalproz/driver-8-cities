@@ -589,124 +589,15 @@ def area_patches(exe_path):
     return out
 
 
-# --- height-aware road surface lookup (C16/C17) -------------------------------------
-# 0x8001EEB4(position, plane out, point out, flag): road-map cell -> ROADSURF surface of
-# the cell's type id; its polygon loop at 0x8001F274 takes the FIRST polygon containing
-# the point (2D) and returns that plane's height. Chicago's generated surfaces carry
-# several planes at different heights in one cell (trench under a bridge, street under
-# a deck, ground on a trench wall, lane beside a ramp), marked by SURFACEINFO.info = 1.
-# The loop below (in a dead library function) keeps the polygon whose height is nearest
-# the wheel point's y for marked surfaces; unmarked surfaces (all four original cities,
-# info = 0) take the first hit exactly as before. Stack slots 0x18/0x1c/0x24/0x2c of the
-# function's 0x58 frame are unused by it.
-CAVE3 = 0x8006C078            # unreferenced function (no jal/j/pointer to it in the exe)
-SURF_LOOP, SURF_FINISH, SURF_NOHIT = 0x8001F274, 0x8001F2F8, 0x8001F34C
-QUAD2D, TRI2D = 0x80024418, 0x80024370
-
-SURF_CODE = [
-    "lh v0, 2(a1)",               # SURFACEINFO.info: 1 = pick the plane nearest the wheel
-    "lw v1, 4(t2)",               # wheel point y (position arg, still in t2 here)
-    "sw v0, 0x24(sp)",
-    "sw v1, 0x2c(sp)",
-    "lui v0, 0x7fff",
-    "sw v0, 0x18(sp)",            # best |dy|
-    "sw zero, 0x1c(sp)",          # best plane (0 = none)
-    "LOOP:",
-    "lh v1, 4(s0)",               # nverts
-    "addiu v0, zero, 4",
-    "bne v1, v0, TRI",
-    "move a0, s3",
-    "move a1, s4",
-    "move a2, s2",
-    "jal %#x" % QUAD2D,
-    "sw t1, 0x28(sp)",
-    "j JOIN",
-    "nop",
-    "TRI:",
-    "move a1, s4",
-    "move a2, s2",
-    "jal %#x" % TRI2D,
-    "sw t1, 0x28(sp)",
-    "JOIN:",
-    "lw t1, 0x28(sp)",
-    "beq v0, zero, NEXT",
-    "nop",
-    "HIT:",                       # height of this plane, as the original code computes it
-    "lw a0, -0xc(s0)",
-    "nop",
-    "mult s3, a0",
-    "mflo v0",
-    "lw a1, -4(s0)",
-    "nop",
-    "mult s4, a1",
-    "lw a3, -8(s0)",
-    "mflo v1",
-    "addu v0, v0, v1",
-    "bgez v0, POS",
-    "nop",
-    "addiu v0, v0, 0xfff",
-    "POS:",
-    "lw v1, 0(s0)",
-    "sra v0, v0, 12",
-    "subu a2, v0, v1",            # the original's delay slot at 0x8001F2FC subtracts the cell height
-    "lw v0, 0x24(sp)",
-    "subu t3, a2, s7",            # full height for the comparison
-    "beq v0, zero, FINISH",       # unmarked surface: first hit wins (original behaviour)
-    "nop",
-    "lw v1, 0x2c(sp)",
-    "nop",
-    "subu v0, t3, v1",
-    "sra v1, v0, 31",
-    "xor v0, v0, v1",
-    "subu v0, v0, v1",            # |height - y|
-    "lw v1, 0x18(sp)",
-    "nop",
-    "slt v1, v0, v1",
-    "beq v1, zero, NEXT",
-    "nop",
-    "sw v0, 0x18(sp)",
-    "sw s0, 0x1c(sp)",
-    "NEXT:",
-    "addiu s1, s1, -1",
-    "addiu s0, s0, 0x34",
-    "bgtz s1, LOOP",
-    "addiu s2, s2, 0x34",
-    "lw s0, 0x1c(sp)",
-    "nop",
-    "bne s0, zero, BEST",
-    "nop",
-    "j %#x" % SURF_NOHIT,         # nothing contained the point: flat cell height (and the SF box)
-    "nop",
-    "BEST:",
-    "sw zero, 0x24(sp)",          # recompute the nearest plane with the gate off -> FINISH
-    "j HIT",
-    "nop",
-    "FINISH:",
-    "j %#x" % SURF_FINISH,        # original: rotate the normal, store plane + height, exit
-    "nop",
-]
-
-
-def surface_patches(exe_path):
-    img, base = load_exe(exe_path)
-    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
-    if (word(SURF_LOOP), word(SURF_LOOP + 4)) != (0x86030004, 0x24020004):
-        raise RuntimeError("unexpected polygon loop at %08X" % SURF_LOOP)
-    if word(SURF_FINISH) != 0x12C00004 or word(SURF_FINISH + 4) != 0x00D73023:
-        raise RuntimeError("unexpected finish at %08X" % SURF_FINISH)
-    code = asm(CAVE3, SURF_CODE)
-    assert len(code) <= 145, len(code)
-    out = [(SURF_LOOP, 0x86030004, _j(CAVE3), "surface loop -> j height-aware loop (CAVE3)"),
-           (SURF_LOOP + 4, 0x24020004, 0, "delay slot (redone in the cave)")]
-    for k, new in enumerate(code):
-        out.append((CAVE3 + 4 * k, word(CAVE3 + 4 * k), new, "surface loop %d" % k))
-    return out
+# Height-aware road surface selection (C16/C17) is NOT an exe patch any more: the exe has
+# no spare words (the "unreferenced" function 0x8006C078 is reached via 0x8006C964 -> C22
+# crash) and the recomp fail-fasts on code outside its image. driver_chicago.c reorders the
+# marked ROADSURF planes around the player every vblank instead (see NOTES.md).
 
 
 def all_patches(exe_path):
     return (patches(exe_path) + cell_patches(exe_path) + prim_guard_patches(exe_path) + area_patches(exe_path)
-            + tile_guard_patches(exe_path) + area_switch_patches(exe_path) + road_decoder_patches(exe_path)
-            + (surface_patches(exe_path) if os.environ.get("CHI_NO_SURF_PATCH") is None else []))
+            + tile_guard_patches(exe_path) + area_switch_patches(exe_path) + road_decoder_patches(exe_path))
 
 
 def apply(exe_in, exe_out):

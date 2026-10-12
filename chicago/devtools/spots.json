@@ -43,10 +43,10 @@
  },
  "shards": {
   "d2": [
-   127706,
-   -402342
+   19175,
+   141247
   ],
-  "note": "Meigs Field planes (were shards before palette fix)"
+  "note": "white untextured debris shards when smashing props at speed (user 142358); C18 family?"
  },
  "north": {
   "d2": [
@@ -187,5 +187,110 @@
    519542
   ],
   "note": "north city edge by the lake (outside normal play): grass at street level next to single cells 912-1135 below street (D2 lower lakefront path?) + water 2703; car falls into pits and flips (user snapshots 025029-025051). Low priority"
+ },
+ "unevenedge": {
+  "d2": [
+   -245968,
+   -217257
+  ],
+  "note": "C16/C17 touch-up: road/grass edge near underbridge, car ~50 below street, tilted (user 134936-134952)"
+ },
+ "rampwedge": {
+  "d2": [
+   -239753,
+   -239068
+  ],
+  "note": "C16/C17 touch-up: trench exit ramp, car wedged nose-up ~26 deg, pushing up, barely moving (user 135041-135048)"
+ },
+ "wallstop1": {
+  "d2": [
+   -186138,
+   -318392
+  ],
+  "note": "curved trench wall: car stops dead at full speed between wall segments instead of sliding (user 135321)"
+ },
+ "wallstop2": {
+  "d2": [
+   -223542,
+   -281755
+  ],
+  "note": "curved wall on trench floor: dead stop at the wall (user 135434)"
+ },
+ "deckfall": {
+  "d2": [
+   34152,
+   220014
+  ],
+  "note": "C16/C17: car on elevated freeway deck (y 1501) falls through (vy -250k) to grass y -243 and flips (user 142817-142823); deck cell without a deck plane?"
+ },
+ "beachsheet": {
+  "d2": [
+   88330,
+   148444
+  ],
+  "note": "water: car on beach sand y -819 while the water (WATER_Y 300) is drawn as a tilted sheet overhead (user 142711/142713)"
+ },
+ "kernelnorth": {
+  "d2": [
+   -136417,
+   684875
+  ],
+  "note": "C25: kernel exception vector zeroed (0x00-0xFC) -> freeze; reproduces 2/2 on spawn here (area 0, region 332, loading stuck 1). Writer pc 0x8008160C (sw through ptr *0x800955B0) via 0x80081560 <- 0x8007A504 (libcd area). User snapshots 143132 ok -> 143140 BAD"
+ },
+ "kernelbad": {
+  "d2": [
+   -136417,
+   684875
+  ],
+  "note": "C25: kernel memory overwritten + freezes near the north map edge (user snapshots 143140-143253, regions 332/333, last_store_pc 0x8002CD94) on build-dev 13:38 (plugin selection + ROADSURF level)"
+ },
+ "shorewall": {
+  "d2": [
+   -186205,
+   580536
+  ],
+  "note": "build-dev 18:45: grey slab (probably a new shore wall) stretched across a street near the north-west lakeshore; car hits it, launched, falls under the map into a 1177 pit next to the street at D1 -82392,674051 (user 191036-191054)"
+ },
+ "blueboxes": {
+  "d2": [
+   -83825,
+   343524
+  ],
+  "note": "build-dev 18:45 regression: huge solid blue boxes floating above the street at building height + turquoise strips at building bases, inland (area 2, region 232); likely the new far water planes placed over land / untextured (user 191511-191519)"
+ },
+ "flicker": {
+  "d2": [
+   -185728,
+   539940
+  ],
+  "note": "facade details (shop windows, trim, window frames) flicker frame to frame on building walls; coplanar decal polys inside a model swap depth order (no duplicate objects in the cell buffer). Common across the map (user 192622-192624)"
+ },
+ "purpleshops": {
+  "d2": [
+   -146545,
+   474738
+  ],
+  "note": "shopfront textures drawn purple/cyan (wrong palette/CLUT) on building ground floors (user 192700/192703)"
+ },
+ "flicker2": {
+  "d2": [
+   -163442,
+   246333
+  ],
+  "note": "facade flicker, 2nd example: grey trim slivers on building corner/window columns appear/vanish frame to frame (user burst 193110-193113, area 9)"
+ },
+ "areafreeze": {
+  "d2": [
+   -283471,
+   324946
+  ],
+  "note": "freeze: driving west (hdg ~270) at moderate speed in region 229, the area switches 9 -> 1 near D1 -231083,341528 and the world renderer loops forever (0x80030A44, t7 0xFF7, a2 0x7FFFFFFF), loading stuck, 16 sectors left (user 193305-193318)"
+ },
+ "quaydiag": {
+  "d2": [
+   -97770,
+   587545
+  ],
+  "note": "user 19:52: quay walls on a diagonal shore (sawtooth, white wall face seen from land)"
  }
 }

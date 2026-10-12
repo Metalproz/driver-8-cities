@@ -119,7 +119,8 @@ def spots():
 
 
 def lev_path():
-    return CHI / "work" / "chicago_d1.lev"
+    """The level test copies get: work/chicago_d1.lev, or CHI_LEV=path for soaks/spots on a variant."""
+    return Path(os.environ["CHI_LEV"]) if os.environ.get("CHI_LEV") else CHI / "work" / "chicago_d1.lev"
 
 
 def model_sigs(lev=None):
@@ -233,6 +234,16 @@ def prepare(name, start=None, lev=None):
                 shutil.copytree(s, t)
         elif not t.exists() or s.stat().st_mtime > t.stat().st_mtime or s.stat().st_size != t.stat().st_size:
             shutil.copy2(s, t)
+    # Without bios.cfg the runtime silently boots OpenBIOS (LLE) instead of the retail
+    # SCPH1001 that build-dev uses (2026-10-11: every build-test copy did). Take
+    # build-dev's when the source build has none; refuse to run without a usable one.
+    bc = d / "bios.cfg"
+    if not (src / "bios.cfg").exists() and (APP / "build-dev" / "bios.cfg").exists():
+        shutil.copy2(APP / "build-dev" / "bios.cfg", bc)
+    bios = bc.read_text(encoding="utf-8", errors="replace").strip() if bc.exists() else ""
+    if not bios or not Path(bios).exists():
+        raise SystemExit("%s: no usable bios.cfg (%r); copy build-dev/bios.cfg into %s" % (name, bios, src))
+    print("%s: BIOS %s" % (name, bios))
     gt = (d / "game.toml").read_text(encoding="utf-8")
     base = str(APP).replace("\\", "/")
     for key in ('exe = "disc/', 'disc = "disc/'):
@@ -251,6 +262,8 @@ def prepare(name, start=None, lev=None):
 
 def launch(name, port):
     d = TEST / name
+    for stale in ("psx_cps_exit_trace.json", "psx_last_run_report.json"):   # from an earlier run of this copy
+        (d / stale).unlink(missing_ok=True)
     log = open(d / "run.log", "w")
     p = subprocess.Popen([str(d / "Driver_Recompiled.exe"), "--headless", "--no-launcher",
                           "--memcard-dir", str(d / "cards"), "--debug-port", str(port)],
@@ -265,6 +278,27 @@ def to_take_a_ride(d: Dbg):
     for b in ["right"] * 5 + ["cross", "down", "down", "cross", "cross"]:
         d.press(b, hold=0.12, gap=0.8)
     time.sleep(35)
+
+
+DAMAGE, MAX_DAMAGE = 0x8009B220, 0x80096E7C   # player damage (u16); wrecked at >= max
+
+
+def wrecked(d: Dbg):
+    dmg, mx = d.word(DAMAGE) & 0xFFFF, d.word(MAX_DAMAGE) & 0xFFFF
+    return mx > 0 and dmg >= mx
+
+
+def play_again(d: Dbg, wait=4.0):
+    """Game Over menu -> Play Again (checked 2026-10-11): the cursor starts on Film Director,
+    Play Again is 3 down. A possible "Are You Sure?" is confirmed with left (= Yes) + cross;
+    in game that is only a short steer + throttle tap. Pressing cross 3x used to pick Film
+    Director / Exit and leave Chicago (the C26 "hangs")."""
+    time.sleep(wait)                                     # wreck/drown message -> menu
+    for b in ("down", "down", "down", "cross"):
+        d.press(b, hold=0.12, gap=0.5)
+    time.sleep(1.0)
+    d.press("left", hold=0.12, gap=0.3)
+    d.press("cross", hold=0.12, gap=0.5)
 
 
 def poke(d: Dbg, pokes: dict):
@@ -316,8 +350,55 @@ def fatal_of(name):
     return None
 
 
+def bios_kind(d: Dbg):
+    """'retail' (Sony ROM, e.g. SCPH1001) or 'other' (OpenBIOS / HLE); cached per connection."""
+    if not hasattr(d, "_bios"):
+        d._bios = "retail" if d.ram(0xBFC00108, 27) == b"Sony Computer Entertainment" else "other"
+    return d._bios
+
+
 def kernel_ok(d: Dbg):
+    """Kernel A0 vector intact: True/False on the retail BIOS; None (unknown) on any other
+    BIOS, whose layout differs (OpenBIOS read as 'BAD' from the main menu on)."""
+    if bios_kind(d) != "retail":
+        return None
     return d.ram(0x800000A0, 4) == bytes.fromhex("0000083c")
+
+
+def exit_info(name, p):
+    """If the game process has ended on its own: exit code, final PC/ra (run.log
+    'execution completed, PC=..' + psx_cps_exit_trace.json) and the code
+    addresses found on its stack. None while it is still running."""
+    if p.poll() is None:
+        return None
+    d = TEST / name
+    info = {"code": p.returncode, "pc": None, "ra": None, "callers": []}
+    log = d / "run.log"
+    if log.exists():
+        for line in log.read_text(errors="replace").splitlines():
+            if "execution completed" in line and "PC=" in line:
+                info["pc"] = line.split("PC=")[1].split()[0].rstrip(",")
+    tr = d / "psx_cps_exit_trace.json"
+    if tr.exists():
+        try:
+            t = json.loads(tr.read_text())
+            info["pc"] = t.get("final_pc", info["pc"])
+            info["ra"] = t.get("final_ra")
+            seen = []
+            for e in t.get("stack", []):
+                v = int(e.get("val", "0"), 16)
+                if 0x80010000 <= v < 0x80080000 and v not in seen:
+                    seen.append(v)
+            info["callers"] = ["0x%08X" % v for v in seen[:6]]
+        except Exception:
+            pass
+    return info
+
+
+def exit_text(info):
+    return "game exited: PC=%s ra=%s exit code %s%s" % (
+        info.get("pc"), info.get("ra"), info.get("code"),
+        (" stack " + " ".join(info["callers"])) if info.get("callers") else "")
 
 
 def cmd_capture(name, port, out, cams, pokes=None):
@@ -348,6 +429,9 @@ def cmd_capture(name, port, out, cams, pokes=None):
     except Exception as e:
         info["error"] = repr(e)
     finally:
+        info["exited"] = exit_info(name, p)
+        if info["exited"]:
+            info["error"] = exit_text(info["exited"]) + (" [%s]" % info["error"][:80] if info.get("error") else "")
         p.kill()
         info["fatal"] = fatal_of(name)
         (out / "info.json").write_text(json.dumps(info))
@@ -390,6 +474,10 @@ def cmd_soak_one(name, port, steps, seed, out, pokes=None):
         sig = model_sigs(copy_lev(name)); rnd = random.Random(seed)
         moves = [("cross", "left"), ("cross", "right"), ("cross",), ("cross",)]
         for k in range(steps):
+            if wrecked(d):                         # Game Over: restart instead of random menu presses
+                play_again(d)
+                res["restarts"] = res.get("restarts", 0) + 1
+                time.sleep(3)
             before = d.pos()
             d.press(*rnd.choice(moves), hold=rnd.choice((0.5, 1.0, 2.0)), gap=0.0)
             after = d.pos()
@@ -413,7 +501,7 @@ def cmd_soak_one(name, port, steps, seed, out, pokes=None):
                     res["bad_state"] = {"area": d.word(AREA), "loading": d.word(LOADING), "mode": d.word(0x800967F4),
                                         "pos": d.pos(), "frame": d.frame()}
                 res["table_bad"].append((k, bad[:4]))
-            if k % 5 == 0 and not kernel_ok(d):
+            if k % 5 == 0 and kernel_ok(d) is False:
                 res["kernel_bad_step"] = k
                 break
             if not alive(d) and not alive(d, 5.0):
@@ -426,6 +514,9 @@ def cmd_soak_one(name, port, steps, seed, out, pokes=None):
     except Exception as e:
         res["error"] = repr(e)
     finally:
+        res["exited"] = exit_info(name, p)
+        if res["exited"]:
+            res["error"] = exit_text(res["exited"]) + (" [%s]" % res["error"][:80] if res.get("error") else "")
         p.kill()
         res["fatal"] = fatal_of(name)
         (out / "result.json").write_text(json.dumps(res))
@@ -502,7 +593,8 @@ def cmd_live(port):
         "pc %s epc %s ra %s" % (r.get("pc"), r.get("cop0_epc"), r["gpr"][31]),
         "pos %s area %d region %d loading %d" % (list(struct.unpack_from("<3i", ram, POS & 0x1FFFFF)), W(AREA), W(REGION), W(LOADING)),
         "kernel %s  table_bad %d  primbuf0 used 0x%X (limit 0x1E000)" % (
-            "ok" if ram[0xA0:0xA4] == bytes.fromhex("0000083c") else "BAD", len(table_check(ram, mod)), (pp - base) & 0xFFFFFF),
+            {True: "ok", False: "BAD", None: "unknown (not the retail BIOS)"}[kernel_ok(d)],
+            len(table_check(ram, mod)), (pp - base) & 0xFFFFFF),
         "gpu entries %d  last report: %s" % (len(g.get("entries", [])), reason or "-"),
         "dumps: %s" % run,
     ]

@@ -23,10 +23,11 @@ Stage B (roads → traffic/cops) not started. Open issues: see the end.
 | frozen release | `build-release` (Quiver launches it); updated only when the user declares a release |
 | tests | `devtools/dt.py` (snaps, live, spots, soak, addspot, dis) on copies in `<app>/devtest/`; issue spots in `devtools/spots.json`; results `devtest/_out/` |
 | user spot play | `Driver (spot).bat` / `devtools/spotplay.py C4|spotname`: windowed copy `devtest/play_<spot>` of build-dev (same exe + installed level, user's input settings, own memcards, port 4377) starting Take a Ride at the spot; menus driven automatically |
-| lab | `devtools/lab.py run` (continuous, 6 slots, ports 4400+): job queue `lab.py add capture|soak SPOT experiment=.. env={..} pokes={..}`, converter variants cached as `work/var_*.lev`, idle soaks, regression captures on a new build-dev exe; events in `devtest/_lab/events.log` |
+| lab | `devtools/lab.py run` (continuous, 6 slots, ports 4400+): job queue `lab.py add capture|soak SPOT experiment=.. env={..} pokes={..}`, converter variants cached as `work/var_*.lev`, idle soaks, regression captures on a new build-dev exe; events in `devtest/_lab/events.log`; **health alert**: 3 failures of one kind in a row or >50% of the last 15 min → `LAB ALERT` line in WORKLOG.md + idle rotation paused (resumes after 3 passes or a new exe); a game that exits (crash, PC=0) is reported as `GAME EXITED PC=.. ra=.. stack ..` (`dt.exit_info`, from run.log + psx_cps_exit_trace.json) instead of ConnectionRefused |
 | quiet runner | `devtools/run.py -- CMD` (full log in `devtest/_out/logs/`, capped output) for converter/package/soak/export runs |
 | independent LEV check | `devtools/levcheck.py LEV [--world] [--vs OTHER]` → DriverLevelTool parse + texture/OBJ export + counts (2026-10-11: converted 195,243 objects / 847,769 faces / 34 pages; D2 original 220,664 / 1,158,100; LA 63,927 / 323,781) |
 | drive test | `devtools/drivetest.py NAME D2X D2Z DIRX DIRZ [--secs N] [--lev LEV] [--port P]`: holds a direction on a test copy and samples the car's height, damage and upside-down counter (lifts, drops, wrecks; the soak/capture jobs don't see those). The car spawns facing north (west at some street spots), its 90° turns are unreliable: test north-bound or straight. Car y is UP (street ≈ 164 at the centre, trench floor 1352 → -1188) |
+| restart loop | `devtools/restartloop.py NAME SPOT [--lev LEV] [--port P] [--loops N] [--dir DX,DZ]`: drives straight (into the water at beach_n), waits for Game Over, presses Play Again, then checks alive / kernel / model table / city per loop (C26 reproduction: hangs after a restart at beach_n, pc 0 epc 0x8002D260, with and without the plugin selector) |
 | OpenDriver2Tools | binaries `D:/recomps/refs/OpenDriver2Tools-bin/` (DriverLevelTool: D1/D2 viewer with D1 road overlay, OBJ/TGA/overmap export; DriverImageTool: D1 PSX sky unpack, D2 SKYn.RAW; DriverSoundTool: D2 MUSIC.BIN→XM, BLK→WAV); source `D:/recomps/refs/OpenDriver2Tools/` (`regions_d1.cpp`, `d2_types.h`: D1 ROADS 16 B, JUNCTIONS 44 B, ROADBOUNDS 20 B, road-map cell = height s16 \| type 10 bits \| angle 2 bits, roadm = road index per cell) |
 | reference source | `D:/recomps/refs/REDRIVER2` (Driver 2 decompiled to C; same engine family), psx-spx for hardware |
 | Claude Code | `D:/recomps/CLAUDE.md` (rules, read order), skills `/chi-status /chi-build /chi-spot /chi-levcheck /chi-wrapup`, subagents `chi-investigator` (game runs) / `lev-analyst` (offline), guard hook `D:/recomps/.claude/hooks/guard.py`; `driver_personal/` is a git repo (work/ ignored) |
@@ -98,18 +99,30 @@ median kerbs in the trench, 1329 beside lanes at 1352, user 02:12).
    cells on top of a trench wall take the trench height (`CHI_WALLTOP`; the
    car's centre crosses the cell border before the wall box stops it). Cells
    with a raised deck as well and sea-fixed river-bank cells keep the old rule.
-   Raised decks that continue over streets are flattened to the street (else
-   the car falls off the deck end; C17: the car sinks into decks and ramps);
-   water = model 683 at y 300 (LA: 1544, flag bit 2 clear).
-7. Water (`sea_kinds`, `water_cells`): D2 has no water surface (lake, river,
-   building blocks and outside-city all read "no surface"). D2's overhead map
-   (`d2overlay.py`, LUMP 24, RNC2 tiles, +48 px window offset, lake = palette
-   12, river = 1) classifies connected no-surface areas: water (≥30% map water;
-   the edge area per cell), inside (enclosed → plain ground), void (outside the
-   city, drowns as a boundary). Water tiles (LA's tile, Miami's SEA texture) on
-   3000 cells with water, bridge gaps closed (CHI_WATER_CLOSE 4), none under
-   land; surface y 300 (CHI_WATER_Y; 900 left gaps under D2 quay walls).
-   Tiles draw only within 9000 units.
+   ROADSURF (`surface_planes` / `roadsurf_lump`, switch `no_surf`): every cell
+   whose own or 4-neighbour levels lie ≥ 300 apart gets a surface with one
+   full-cell polygon per level (lowest first, d relative to the written height,
+   quantised to 64) and sloped cells (`cell_slopes`) a tilted own plane; surface
+   ids are plain model ids < 900 (the type field doubles as the model whose flags
+   say water/grass), info = 1 marks them for the plugin selection, ≤ 320 surfaces
+   (43 KB). With `no_surf`, raised decks that continue over streets are flattened
+   to the street as before (else the car falls off the deck end; C17).
+   Water = model 683 at y 300 (LA: 1544, flag bit 2 clear).
+7. Water (`sea_kinds`, `water_cells`, `water_heights`, `far_water_*`): D2 has
+   no water surface; D2's overhead map (`d2overlay.py`, LUMP 24, RNC2 tiles,
+   +48 px window offset, lake = palette 12, river = 1) classifies connected
+   no-surface areas: water / inside (enclosed → plain ground) / void (outside the
+   city, drowns as a boundary). Water tiles: LA's tile with real corner vertices
+   (LA's has none: far tiles, shape 0x20 via 0x800274B8, read 4 corners from +0x10,
+   so stretched tiles shrank to 1500 squares), one per 3000 cell (4 per cell
+   overflowed the tile list cap 640 → far gaps); bridge gaps closed (CLOSE 4);
+   texture = Miami's SEA, renamed "SEA" (the engine's GetTextureInfo("SEA") at
+   0x8004219C gives the near-water page/palette; LA has none → pink water).
+   Height: river y 300, lake just under the lowest shore within 12000 (beaches
+   sit up to ~2000 below the streets). Beyond the 9000-unit tile range: far
+   water planes (model 1214 appended, 6000 units, 2 x 2 quads, only over open
+   lake one cell from land; switch no_farwater). Known limit: the narrow river
+   beyond 9000 stays thin (planes there would come under the camera).
 
 ## Engine patches (`exe_patches.py`, 278 words)
 
@@ -125,6 +138,23 @@ road map RLE decoder rewrite 0x800354D8 (30: bad runs fill the rest, always
 ends; old one looped forever on stale buffers after Play Again).
 Caves: dead overflow block 0x80051440.., cellsize error block 0x8002E1A0 (both
 full); `asm()` in exe_patches.py assembles rewritten routines.
+Height-aware road surface selection (C16/C17) is **not an exe patch**: it is done by
+`driver_chicago.c` (`surface_select_vblank`): every vblank, for the 3 × 3 cells
+around the player (road-map cell via the lookup's own ring addressing: header
+0x8009E714, tables 0x8009D8F4, parity 0x80097374; surface pointers 0x8009D904),
+a marked surface (SURFACEINFO.info = 1, written by the converter) gets the plane
+whose height is nearest the car's ground (player y − 160) moved to slot 0 (only
+the 4 plane words are swapped: a torn read during the engine's loop costs tens of
+units, never the other level); the unchanged engine loop then takes it as its first
+2D hit. info = 0 (the original cities) is never touched. Limits: player car only;
+with traffic/cops (Stage B) each car needs its own selection (or the engine loop);
+replays replay the player car, so they follow. Tried and ruled out: a cave in the
+exe (no 72 spare words; the "unreferenced" function 0x8006C078 is reached via
+0x8006C964 from 0x80025190 → C22 crash: the loop ran in a foreign frame and
+returned to address 1) and a cave in mod memory 0x9F082000 (`j` cannot leave the
+0x8xxxxxxx segment and the recomp fail-fasts on dispatch outside its image).
+build_package.py checks that disc/SLUS_008.42 carries every current patch word
+(no hard-coded count); a stale disc exe = "run --apply, generate, rebuild".
 
 ## Runtime changes (`driver_personal/runtime_patches/`, originals in `orig/`)
 
@@ -133,10 +163,27 @@ mod memory (memory, boot_state), CD DMA into mod memory (dma), write guard
 (debug_server), L3+R3 snapshot helper (main.cpp), watchdog underflow fix
 (starvation_ring). Plugin `driver_chicago.c`: model table + cell buffer
 allocation, empty model (1 culled group, 1 zero polygon), area-switch guard,
-size-0 placeholder redirect.
+size-0 placeholder redirect, ROADSURF plane selection (C16/C17), C33 area-switch
+entry hook: psxrecomp function-entry plugin on 0x80033B10 (the switch's texture
+page queue), enabled by `game.toml [recompiler] mod_function_entry_funcs =
+["0x80033B10"]` (re-apply after updates; `generate` emits the call). Chicago
+(city 3) only.
 
 ## Resolved (cause → fix)
 
+- C25 kernel zeroed + freeze at the north map edge → the engine loads a 2 × 2
+  window of regions and, in the top region row, asks for the row above the map.
+  LA's SPOOLINFO has a ring of empty regions (265 of 324 entries 0xFFFF); Chicago
+  filled all 342 of the engine's 350-entry table, so above-map indices ≥ 350
+  (column 8 on) read past the table into the spool records → garbage offset →
+  CD read into address 0. Fix: an empty ring: `CHI_WORLD=480x630` (16 × 21
+  regions = 336; `worldscale.py`; D1 coordinates unchanged, only the grid).
+  Verified 2026-10-11 15:1x on build-test (retail BIOS): alive, kernel intact,
+  all-spot captures clean. Not the default yet (resume: soaks, flip, combined run).
+  Side findings: build-test had no `bios.cfg` → its copies ran OpenBIOS; and
+  `dt.kernel_ok` reads "kernel BAD" from the menu on under OpenBIOS (false
+  positive). A 5-parallel `dt.py spots` run can spawn with area 0 (loading race)
+  and then report wrong models: rerun sequentially before believing it.
 - C16 car lifted onto the bridge when driving under it (sunken freeway) → D2
   trenches lie 1352 below street level (y 1352 down); where a street bridges them
   the cell has levels 0 and 1352 and "nearest street level" chose the bridge, so
@@ -145,13 +192,29 @@ size-0 placeholder redirect.
   bridging road (8 crossings: trench cols 429-434 at rows 552-554, 716-718, 826-830;
   cols 661-664 at 734-735, 770-772, 826-830, 876-877; E-W trench rows 506-510 at
   cols 405-408), ~2900 wall-top cells. Driving under the bridges works (user,
-  02:09). Trade-off on the 8 bridging streets, still open: see Open issues.
+  02:09). The street over the bridge (and every other two-level cell: decks over
+  streets, wall tops, lanes beside ramps) → ROADSURF planes (`surface_planes`:
+  every level of the cell and its 4 neighbours ≥ 300 apart, lowest first, info = 1,
+  ~14.5k cells, 320 surfaces) + `driver_chicago.c` moving the plane nearest the
+  player's height first each vblank (see Engine patches). Verified 2026-10-11 13:10
+  on build-test: under and over the bridge at full speed, soaks clean.
 - Crashes in some streets → stale models: Driver 1 only switches areas in
   border regions → switch entries everywhere + visibility-based area sets.
 - Frozen picture (music on) → placeholder (size-0) models drawn while loading →
   redirect to the empty model.
 - Picture freeze + music stop, kernel overwritten → empty model had 0 polygons,
   tile loop decrements first → 1 zero polygon.
+- C33 freeze at an area switch (hang 193318, 9 → 1): I_MASK and timer-1 mode both
+  0x071A → vblank masked, VSync waits forever (heartbeat: raise count runs, deliver
+  stops). The kernel TCB (0x0E200) keeps the last exception's registers: vertex loop
+  0x80030A44, count 0x4F8D, GTE stores past the scratchpad into the I/O area = a
+  model read from texel data. The switch queues the new area's texture pages staged
+  at spool buffer + 0xA000 (block 20, `ori a1,0xa000` 0x80033B2C, request queue
+  0x800A7BA4: 7 × 17 blocks type 1, then models type 3); the old area's models
+  (area 9: 36 blocks) sit there and the first sector lands ~13 ms after the
+  request, often before the vblank hook's redirect → function-entry hook at
+  0x80033B10 redirects the spool entries before any request (see Runtime changes).
+  12 Chicago areas have > 20 model blocks (LA too, max 49).
 - Play Again crash / scrambled textures → spool reset left the CD reader
   running → reset fixes (+ loading flag, else deadlock).
 - Wrong models (DIESEL street, fragments) → second area switch during a load →
@@ -181,6 +244,9 @@ size-0 placeholder redirect.
   own single-polygon tiles (vertex pointer = polygon block, size 2120 / sphere
   1060), they carry real vertex arrays. fn tracing (fn_filter/fn_entry_dump)
   records only part of the calls; GPU dump "pc" = running code, not the emitter.
+- Far water as separate squares → shrinking corner-less tiles + tile list cap →
+  real corner vertices, one tile per cell, far planes (2026-10-11).
+- Pink water near a sinking car → missing "SEA" texture → renamed (2026-10-11).
 - Water inside building blocks / smear beside bridges → D2 "no surface" read
   as sea → D2 overhead map classification, water y 300 (2026-10-11).
 - Black/missing buildings at some starts → start inside the 5-cell band kept
@@ -197,32 +263,16 @@ size-0 placeholder redirect.
 - Minimap still LA; damaged wheel textures; LA with engine patches but without
   chicago-la hangs while loading (0x80035524, older).
 - Stage B (roads/traffic/cops), D2 cars and music, 5th city.
-- Trench crossings (C16, the street over the bridge): with one level per cell
-  the bridge street inherits the trench height. Plain drop (`CHI_RAMP_STEP=0`):
-  the user's car fell through the deck and flipped (02:09). Stepped ramp (200,
-  default now): 6 cells of 193 down, the car reaches the trench floor and is on
-  the freeway (drive test 02:13; an earlier run stopped against the wall box
-  under the bridge, so the wall segments are not solid everywhere); one run
-  flipped on the first step while turning hard. Blocked crossing = new barrier
-  objects in the cell lists (not built). Data-only options end here.
-  **Proposed engine patch** (not implemented, user decision): make the
-  0x8001F274 shape loop height-aware: on a 2D hit compute the plane height
-  (a2 = ((a·px + c·pz) >> 12) − d − cellheight, 0x8001F2B8-0x8001F2F4) and
-  keep the polygon whose height is nearest the car's y (the input position; the
-  output vector is at 0x28(sp)/t1) instead of taking the first hit
-  (0x8001F2B0 → 0x8001F31C exits on the first), falling back to the cell height
-  when nothing hits. Data side: generate ROADSURF (lump 10, SURFACEINFO
-  {type, info, heading, numpolys} + SIPOLY 52 B {xz[4] s32 pairs, plane a b c d,
-  nverts}) with two full-cell polygons per crossing cell (bridge plane at 0,
-  trench plane at 1352) and give those ~113 cells a type id < 900 whose model
-  has no water/grass flags; sloped planes in the same lump give C17's ramps a
-  smooth surface (one surface per distinct slope, rotated by the cell's 2 angle
-  bits). Ruled out: ROADSURF alone (first 2D hit wins, no height test).
-  Also only fixable that way: the trench's own 1-cell entry/exit ramps beside
-  the lanes (cols 429 / 434, types 120 / 143, 1352 → 0 over 8 rows): a car
-  scraping the barrier gets its centre into the ramp cell and is lifted up to
-  900 (spot `wallclimb`, user 02:18); any per-cell rule that stops that would
-  flatten the ramps themselves.
+- Two-level cells (C16/C17), remaining limits of the plugin selection: it follows
+  the player only; traffic and cops (Stage B) will need per-car selection or a
+  real engine loop (no spare exe words; see Engine patches). Data-only history:
+  plain drop (`CHI_RAMP_STEP=0`, the user's car fell through the deck and
+  flipped), stepped ramps (200: car inside the geometry over 6 cells, "worse"),
+  a blocked crossing (barrier objects, not built). C17 ramps now get sloped
+  ROADSURF planes (`cell_slopes`: D2 heights 300 off the centre, per-axis planar
+  test) and decks are no longer flattened; smoothness at `rampsink` and the
+  launch at the top of the trench exit ramps (full speed: the car jumps and may
+  land on its roof, drive test 03:06) are for the user's test.
 - Trench ends: the col 661-664 freeway runs into river tunnels (rows 733 and
   787 read sea, the surface has no planes in D2 tunnels) and under a street at
   row 878 (reads grass): the car is lifted/wrecked at those portals (C20).

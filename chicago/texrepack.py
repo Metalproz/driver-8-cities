@@ -194,6 +194,8 @@ def pack_group(items: list, group) -> list[PackedPage]:
     return pages
 
 
+FORCE_PERM = {b"RIVER3A"}   # Chicago textures of generated models (convert.shore_wall_model), kept in FORCED_AREAS
+FORCED_AREAS = set()        # set by convert.py: areas in which the shore walls are seen
 WATER_TEXTURE = (b"LASEA", "work/d1_MIAMI.lev", b"SEA")   # LA's 16x16 sea -> Miami's 64x64 (calmer, darker)
 
 
@@ -243,6 +245,11 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
                 if model_near is not None:
                     tex_near[t] |= model_near.get(i, set())
     cused = {t for t in cused if t[0] < cti.num_pages and t[1] < len(cti.details[t[0]]) and t[0] in cpages}
+    import os
+    walls = not any(e in ("no_walls", "no_water") for e in os.environ.get("CHI_EXPERIMENT", "").split(","))
+    forced = {(p, k) for p in cpages for k, d in enumerate(cti.details[p])
+              if walls and name_at(cnames, d[1]) in FORCE_PERM}
+    cused |= forced
 
     csp = SpoolInfo.parse(chicago.inmem.get(SPOOLINFO).data)
     member = collections.defaultdict(set)
@@ -294,6 +301,8 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
         it.near = frozenset(tex_near.get(t, ()))
         if it.name.decode("latin-1") in EXE_TEXTURE_NAMES:
             it.name = b"_" + it.name[1:]          # the base city's version must win lookups
+        if t in forced:                       # generated models (shore walls): the areas they are seen in
+            tex_areas[t] |= FORCED_AREAS      # (forcing it permanent added a page: wrong area textures, C29)
         if model_areas is not None:
             # residency from where each texture's models are visible (convert.build_world)
             if len(tex_areas.get(t, ())) >= SHARED_TO_PERM:
