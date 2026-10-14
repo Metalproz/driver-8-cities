@@ -34,6 +34,23 @@ L_OVERLAY, L_PALLET, L_SPOOL, L_CARMODELS, L_CHAIR, L_TEXINFO = 24, 25, 26, 28, 
 
 CELL = 3000
 EXPERIMENT = set(os.environ.get('CHI_EXPERIMENT', '').split(','))
+D2_LEV = os.environ.get("CHI_D2_LEV", "work/d2_CHICAGO.LEV")
+# Car set (car models, car palettes, car texture pages, police car) by D2 city and time of day
+# (user R19, 13.10.: Chicago by day takes Miami's day-designed cars, by night LA's); CHI_CARS
+# overrides (la, miami, sf, ny). C42 (Driver 2's own cars) can add its set here.
+CAR_SET_LEVS = {"la": "work/d1_LA.lev", "miami": "work/d1_MIAMI.lev", "sf": "work/d1_FRISCO.lev",
+                "ny": "work/d1_NEWYORK.lev"}
+CAR_SETS = {("CHICAGO", "day"): "miami", ("CHICAGO", "night"): "la"}
+
+
+def car_set() -> str:
+    if os.environ.get("CHI_POLISH_D2CARS") == "1":     # Polish C42: Driver 2's own cars (polish_cars.py)
+        return "d2"
+    if os.environ.get("CHI_CARS"):
+        return os.environ["CHI_CARS"]
+    day = os.path.normcase(os.path.abspath(D2_LEV)) == os.path.normcase(os.path.abspath("work/d2_CHICAGO.LEV"))
+    return CAR_SETS.get(("CHICAGO", "day" if day else "night"), "la")
+ROADS = os.environ.get("CHI_ROADS") == "1"   # D1 road network for traffic (d1roads.py; Stage B, 2026-10-13)   # D2 source city (night Chicago: work/d2_CHICAGO_night.lev)
 BIG_OBJECT = 3000      # bounding radius above which an object spans cells
 BIG_TILE = int(os.environ.get("CHI_BIG_TILE", "3000"))   # same for ground tiles (tried 1500
                        # for the ground holes: no visible change, 9x the straddlers)
@@ -214,6 +231,9 @@ def build_models(chi: Lev, base: Lev, res):
     # Driver 2 models -> Driver 1 polygon groups (d1models.py), converted as one
     # set so instances follow their source's polygon order.
     chi_all = {i: ws.scale_model(remap_c(m)) for i, m in {**carea, **cmem}.items()}
+    for i, q in light_turns(chi, {**carea, **cmem}).items():
+        if i in chi_all:
+            chi_all[i] = turn_model(chi_all[i], q)
     conv, stats = convert_models(chi_all)
     print("models: %(models)d converted (%(groups)d groups), %(tiles)d tiles kept, %(instances)d instances, "
           "%(deinstanced)d de-instanced" % stats)
@@ -221,6 +241,10 @@ def build_models(chi: Lev, base: Lev, res):
     # flags2 0x4000 is Driver 2's GRASS but Driver 1's WATER (waves, sinking: 0x8001F074,
     # 0x8001F410); a start among Chicago's grass tiles sank the car and ended the game
     conv = {i: d[:2] + struct.pack("<H", struct.unpack_from("<H", d, 2)[0] & ~0x4000) + d[4:] for i, d in conv.items()}
+    # shape flag 0x0004 is Driver 1's "light" mark (set at load for the named light models,
+    # 0x80052B38; objects of such models fill the 11-entry glow list 0x800A663C); Driver 2
+    # models carry it for other reasons (21 in Chicago), which crowded the real lights out
+    conv = {i: struct.pack("<H", struct.unpack_from("<H", d, 0)[0] & ~0x0004) + d[2:] for i, d in conv.items()}
     if "tile_novtx" in EXPERIMENT:               # D1 layout: single-polygon tiles point +0x10 at the polygons
         def novtx(d):
             fl, n = struct.unpack_from("<H", d, 0)[0], struct.unpack_from("<H", d, 0x0E)[0]
@@ -257,6 +281,8 @@ def build_models(chi: Lev, base: Lev, res):
 
     names = list(cnames)
     for k, n in enumerate(names):
+        if n in LIGHT_RENAME and "keep_lightmodels" not in EXPERIMENT:
+            names[k] = LIGHT_RENAME[n]
         if n in ENGINE_MODEL_NAMES:
             names[k] = "_" + n[1:]           # the base city's version must win lookups
 
@@ -334,13 +360,17 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
     # surface; our water is drawn behind everything (Miami's sea flags), so they hid it
     kinds = sea_kinds(across, down) if "no_water" not in EXPERIMENT and "keep_rivertiles" not in EXPERIMENT else {}
     dropped = 0
+    turns = light_turns(chi, models_all)
     for o in objects.values():
         x, z = ws.to_d1(o.x, o.z)
         m = models_all.get(o.model)
         if kinds and m is not None and m.shape_flags & 0x0400 and abs(ws.s(o.y)) < 200 and                 kinds.get(((x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT)) == "water":
             dropped += 1
             continue
-        obj_list.append(CellObject(x, ws.s(o.y), z, o.yang, o.model))
+        yang = (o.yang - turns[o.model]) & 63 if o.model in turns else o.yang
+        obj_list.append(CellObject(x, ws.s(o.y), z, yang, o.model))
+    if turns:
+        print("light models turned a quarter (glow facing):", sorted(turns))
     if dropped:
         print("Driver 2 river tiles dropped:", dropped)
     if "no_water" not in EXPERIMENT and "water_noobj" not in EXPERIMENT:
@@ -519,9 +549,24 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                    if region_area.get((rx + dx, rz + dz), a) != a]
             if nbs:
                 nb, d = nbs[0]
+                if corridor_edges is not None:       # Polish C45: the neighbour the streets cross to most
+                    nb, d = max(nbs, key=lambda e: corridor_edges.get(tuple(sorted(((rx, rz), (rx + dirs[e[1]][0], rz + dirs[e[1]][1])))), 0))
                 connected[(rx, rz)] = [(nb, d), (a, opposite[d])]
             else:
                 connected[(rx, rz)] = [(a, 0), (a, 2)] if (rx + rz) % 2 else [(a, 1), (a, 3)]
+        if corridor_edges is not None:               # CHI_POLISH_CORRIDOR=1 (Polish, C45): load 30 cells earlier
+            borders = {r for r, e in connected.items() if e[0][0] != e[1][0]}
+            for (rx, rz), entries in list(connected.items()):
+                (nb, d), (a, _back) = entries
+                if nb == a:
+                    continue
+                dx, dz = dirs[d]
+                w = corridor_edges.get(tuple(sorted(((rx, rz), (rx + dx, rz + dz)))), 0)
+                prev = (rx - dx, rz - dz)
+                if w >= polish_areas.CORRIDOR_MIN_EDGES and region_area.get(prev) == a and prev not in borders:
+                    connected[prev] = [(nb, d), (a, opposite[d])]   # the border region becomes the corridor
+        if polish_areas.pingpong_enabled():          # Polish C45: no edge switches back and forth
+            polish_areas.fix_pingpong(connected, region_area, corridor_edges if corridor_edges is not None else street_edges)
         return connected
 
     def loadable_areas(connected):
@@ -568,6 +613,15 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
             out[(cx // REGION_CELLS, cz // REGION_CELLS)].add(loaded)
         return out
 
+    import polish_areas                              # CHI_POLISH_AREAS=1|2 (Polish, C45): areas along the streets
+    street_edges = polish_areas.region_edges(D2_LEV, rx_n, rz_n, REGION_CELLS * CELL, half_x, half_z)[0]         if (polish_areas.enabled() or polish_areas.corridor()) else None
+    corridor_edges = street_edges if polish_areas.corridor() else None
+    if not polish_areas.enabled():
+        street_edges = None
+    if street_edges is not None and polish_areas.mode() == "2":
+        region_area.update(polish_areas.agglomerate(sorted(region_area), lambda r: textures_of(region_seen.get(r, set())),
+                                                    street_edges, polish_areas.LIMIT_SHARE * AREA_TEXTURE_LIMIT))
+        print("areas: street-merged start layout, %d areas" % len(set(region_area.values())))
     while True:
         connected = switch_entries()
         loadable = loadable_areas(connected)
@@ -586,15 +640,19 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
             raise RuntimeError("area %d: one region already needs %d textures (loadable in %d regions; %.2f areas per region)" % (
                 a, counts[a], len(area_regions[a]), sum(map(len, loadable.values())) / len(loadable)))
         new_id = min(set(range(64)) - set(region_area.values()))
-        xs = sorted(r[0] for r in regs)
-        zs = sorted(r[1] for r in regs)
-        axis = 0 if xs[-1] - xs[0] >= zs[-1] - zs[0] else 1
-        mid = sorted(r[axis] for r in regs)[len(regs) // 2]
-        moved = [r for r in regs if r[axis] >= mid]
-        if len(moved) == len(regs):
-            moved = regs[len(regs) // 2:]
+        moved = polish_areas.best_split(regs, street_edges) if street_edges is not None else None
+        if not moved:
+            xs = sorted(r[0] for r in regs)
+            zs = sorted(r[1] for r in regs)
+            axis = 0 if xs[-1] - xs[0] >= zs[-1] - zs[0] else 1
+            mid = sorted(r[axis] for r in regs)[len(regs) // 2]
+            moved = [r for r in regs if r[axis] >= mid]
+            if len(moved) == len(regs):
+                moved = regs[len(regs) // 2:]
         for r in moved:
             region_area[r] = new_id
+    if street_edges is not None:
+        print("areas: street edges crossing an area boundary: %d" % polish_areas.crossing_cost(region_area, street_edges))
     print("areas:", len(counts), "textures per area:", counts,
           "loadable areas per region: %.2f" % (sum(map(len, loadable.values())) / len(loadable)))
 
@@ -634,7 +692,7 @@ _d2_cache = {}
 
 def d2_extract_cached():
     if "v" not in _d2_cache:
-        _d2_cache["v"] = d2_extract("work/d2_CHICAGO.LEV")
+        _d2_cache["v"] = d2_extract(D2_LEV)
     return _d2_cache["v"]
 
 
@@ -659,6 +717,61 @@ def pack_cell_pointers(ptrs: list[int]) -> bytes:
 
 def cell_object(o) -> bytes:
     return struct.pack("<3iBBH", o.x, o.y, o.z, 0, o.yang, o.model)
+
+
+# Traffic light glows (Infrastructure 2026-10-13): Driver 1 draws them on models found by NAME
+# (CITY 3 = LA's table: TLIGHT00 kind 0, TLIGHT01 kind 1, SLIGHT01 kind 3) at offsets that
+# assume the signal faces -z (LA's lights; 0x80053764 / 0x8004343C pick the glow's visibility
+# and the NS/WE state from the object's yang). D2's TLIGHT01 faces -x, so it (and the
+# instances that borrow its vertices) is turned a quarter (model' = R(48): (x, z) -> (-z, x))
+# and its objects get yang + 16, which leaves the world unchanged. D2's TLIGHT02 (an arm,
+# facing -z) becomes TLIGHT00 so it gets kind 0. The plugin sets Chicago's glow offsets.
+LIGHT_TURN = {"TLIGHT01": 48}                  # model name -> quarter-turn steps (of 64)
+LIGHT_RENAME = {"TLIGHT02": "TLIGHT00"}
+
+
+def light_turns(chi: Lev, models_all: dict) -> dict:
+    """{model index: q} for the turned light models and their instances."""
+    if "keep_lightmodels" in EXPERIMENT:
+        return {}
+    names = model_names(chi)
+    src = {i: LIGHT_TURN[n] for i, n in enumerate(names) if n in LIGHT_TURN}
+    out = dict(src)
+    for i, m in models_all.items():
+        if m is not None and m.instance_number in src:
+            out[i] = src[m.instance_number]
+    return out
+
+
+def turn_model(data: bytes, q: int) -> bytes:
+    """Vertices (own ones) and collision boxes turned by q (multiple of 16) yang steps:
+    R(16) maps (x, z) -> (z, -x) (the engine's quadrant rule, 0x80043544)."""
+    d = bytearray(data)
+    k = (q // 16) % 4
+
+    def rot(x, z):
+        for _ in range(k):
+            x, z = z, -x
+        return x, z
+    inst, = struct.unpack_from("<h", d, 4)
+    nverts, = struct.unpack_from("<h", d, 0x0C)
+    verts, coll = struct.unpack_from("<i", d, 0x10)[0], struct.unpack_from("<i", d, 0x20)[0]
+    if inst < 0 and verts + 8 * nverts <= len(d):
+        for j in range(nverts):
+            x, y, z = struct.unpack_from("<3h", d, verts + 8 * j)
+            x, z = rot(x, z)
+            struct.pack_into("<3h", d, verts + 8 * j, x, y, z)
+    if coll and coll + 4 <= len(d):
+        n, = struct.unpack_from("<i", d, coll)
+        for j in range(max(0, n)):
+            p = coll + 4 + 20 * j
+            if p + 20 > len(d):
+                break
+            typ, x, y, z, flags, yang, empty, xs, ys, zs = struct.unpack_from("<10h", d, p)
+            x, z = rot(x, z)
+            # box yang is in 64ths (0..63, D1 and D2 data), like q (Polish's note, 14.10.; was (yang + 64q) & 4095)
+            struct.pack_into("<10h", d, p, typ, x, y, z, flags, (yang + q) & 63, empty, xs, ys, zs)
+    return bytes(d)
 
 
 def instance_order(ids, area_data, inmem_ids, area):
@@ -801,7 +914,7 @@ def build_spooled(world, area_data, res, chi: Lev):
         conn = tuple(world["connected"][reg])
         full_view = all(int(r) >= pvs.MAX_RADIUS for r in world["radii"][reg[1] * REGION_CELLS:(reg[1] + 1) * REGION_CELLS,
                                                                            reg[0] * REGION_CELLS:(reg[0] + 1) * REGION_CELLS].flatten())
-        shareable = not any(cells) and full_view
+        shareable = not any(cells) and full_view and reg not in world.get("road_ids", {})
         if shareable and empty_block is not None:
             if conn not in empty_records:
                 empty_records[conn] = len(spool_records)
@@ -809,7 +922,8 @@ def build_spooled(world, area_data, res, chi: Lev):
             region_offsets[reg[1] * rx_n + reg[0]] = empty_records[conn]
             continue
         start = len(spooled) // BLOCK
-        roadm = pad(struct.pack("<hH", ROAD_CELLS_PER_REGION, 0xFFFF) + struct.pack("<hH", -1, 0))
+        ids = world.get("road_ids", {}).get(reg)
+        roadm = pad(rle_roadm(ids) if ids else struct.pack("<hH", ROAD_CELLS_PER_REGION, 0xFFFF) + struct.pack("<hH", -1, 0))
         roadh = pad(rle_roadh(world["road_values"][reg]) if "flat_ground" not in EXPERIMENT
                     else struct.pack("<II", ROAD_CELLS_PER_REGION, FLAT_GROUND))
         ptrs, celldata = [], []
@@ -827,8 +941,17 @@ def build_spooled(world, area_data, res, chi: Lev):
         ptr_blob = pad(pack_cell_pointers(ptrs))
         cell_blob = pad(b"".join(struct.pack("<HH", *c) for c in celldata) or bytes(4))
         objs_blob = pad(b"".join(cell_object(obj_list[oi]) for oi in world["local"].get(reg, [])) or bytes(16))
-        pvs_blob = pad(pvs.region_block([int(world["radii"][reg[1] * REGION_CELLS + cz, reg[0] * REGION_CELLS + cx])
-                                         for cz in range(REGION_CELLS) for cx in range(REGION_CELLS)]))
+        reg_radii = [int(world["radii"][reg[1] * REGION_CELLS + cz, reg[0] * REGION_CELLS + cx])
+                     for cz in range(REGION_CELLS) for cx in range(REGION_CELLS)]
+        pvs_masks = polish_pvs_masks(world)          # CHI_POLISH_PVS=d2 (Polish, C40): Driver 2's own PVS
+        if pvs_masks is None:
+            pvs_blob = pad(pvs.region_block(reg_radii))
+        else:
+            import polish_pvs
+            limit = polish_pvs.barrels()[b] - len(roadm) - len(roadh) - BLOCK   # stays within LA's buffers
+            pvs_blob = pad(polish_pvs.region_block(reg_radii, [pvs_masks.get((reg[0] * REGION_CELLS + cx, reg[1] * REGION_CELLS + cz))
+                                                              for cz in range(REGION_CELLS) for cx in range(REGION_CELLS)],
+                                                   limit=limit - BLOCK))
         spooled += roadm + roadh + ptr_blob + cell_blob + objs_blob + pvs_blob
         fields = (start, len(pvs_blob) // BLOCK, len(cell_blob) // BLOCK, len(ptr_blob) // BLOCK,
                   len(objs_blob) // BLOCK, len(roadm) // BLOCK, len(roadh) // BLOCK)
@@ -852,7 +975,7 @@ WATER_SHORE_RADIUS = 8       # road cells (12000 units)
 WATER_MAX_DEPTH = 2000
 WATER_CLOSE = int(os.environ.get("CHI_WATER_CLOSE", "4"))   # land gaps (bridges) filled between water cells
 WATER_GROW = int(os.environ.get("CHI_WATER_GROW", "0"))     # cells of water under the shore (0: water only where there is water)
-BEACH_GROW = int(os.environ.get("CHI_BEACH_GROW", "2"))     # display-only water this many cells under low land (beaches): gaps show water
+BEACH_GROW = int(os.environ.get("CHI_BEACH_GROW", "0"))     # display-only water this many cells under low land (beaches): gaps show water; 0 since R12 (user 2026-10-13: seen from below while drowning; was 2)
 
 
 def surface_grid(across, down):
@@ -864,7 +987,7 @@ def surface_grid(across, down):
     cache = "work/surface_grid4_%d_%d_%s.pkl" % (across, down, key)
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
-    surf = Surface("work/d2_CHICAGO.LEV")
+    surf = Surface(D2_LEV)
     half_x, half_z = across // 2 * CELL, down // 2 * CELL
     grid = {}
     for cz in range(down):
@@ -895,7 +1018,7 @@ def sea_kinds(across, down):
     cache = "work/sea_kinds_%s.pkl" % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
-    ov = Overlay("work/d2_CHICAGO.LEV")
+    ov = Overlay(D2_LEV)
     half_x, half_z = across // 2 * CELL, down // 2 * CELL
     sea = {k for k, lv in grid.items() if all(t in (6, 9) for _, t in lv)}
     w, h = world["rx_n"] * 60, world["rz_n"] * 60
@@ -1205,10 +1328,13 @@ GROUND_TYPES = (0, 4, 11, 12)  # D2 surface types that are plain ground (not a r
 WALLTOP = int(os.environ.get("CHI_WALLTOP", "0"))        # ground cells beside a sunken road follow it (off since the plugin selects the highest plane below the wheel; the trench enters those cells as a guard plane)
 MEDIAN_SNAP = int(os.environ.get("CHI_MEDIAN_SNAP", "40"))  # a cell this little above a neighbour takes the neighbour's level (median kerbs; 0: off)
 SURF_SEP = 300                # levels this far apart in one cell become separate ROADSURF planes (engine patch picks the nearest to the wheel)
+SLOPE_MAX = 0.4               # steeper fits are embankments (0.66-1.06 vs ramps <= 0.31): the cell stays flat
 SLOPE_MIN = 30                # height change across a cell (1500) from which a sloped plane is written
 SLOPE_SIGN = (int(os.environ.get("CHI_SLOPE_SX", "1")), int(os.environ.get("CHI_SLOPE_SZ", "1")))   # sign of the plane's x / z gradient (verified in game)
 SURF_MAX = int(os.environ.get("CHI_SURF_MAX", "896"))   # distinct ROADSURF surfaces (type ids are plain model ids < 900; 120 B each in memory)
 SURF_Q = 64                   # quantisation of plane offsets (fewer distinct surfaces)
+OWN_Q = 8                     # the cell's own levels: exact (the road map's height step)
+OWN_TOL = int(os.environ.get("CHI_OWN_TOL", "32"))   # the surface merge may move own levels by this much at most
 GUARD_Q = int(os.environ.get("CHI_GUARD_Q", "64"))   # neighbour-level planes (guards): coarser, they only need to catch the car
 SLOPE_Q = 128                 # quantisation of plane gradients (/4096): 1.8 deg, <= 23 units at a cell edge
 
@@ -1223,7 +1349,7 @@ def road_levels(world):
     cache = "work/road_levels_%s.pkl" % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
-    surf = Surface("work/d2_CHICAGO.LEV")
+    surf = Surface(D2_LEV)
     half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
     grid = {}
     for row in range(world["rz_n"] * 60):
@@ -1277,6 +1403,7 @@ def trench_ends(world, grid, choice, kinds):
                     if choice[q][0] != y0:
                         choice[q] = (y0, t0); filled += 1
                     tunnel.add(q)
+                    world.setdefault("filled", set()).add(q)
     # a street crossing the trench on a bridge, where Driver 2's surface gives only the
     # bridge (<= BRIDGE_GAP cells, trench at the same depth on the far side): the trench
     # runs on underneath (the street stays the cell's upper plane); it is no dead end
@@ -1294,7 +1421,8 @@ def trench_ends(world, grid, choice, kinds):
                 trench.update(path)
     trench = trench_set()
     ramps = {}
-    for k in trench:
+    # user R10: no ramps where Driver 2 has none (only its own ramps stay drivable)
+    for k in (trench if "keep_trenchramps" in EXPERIMENT else ()):
         y0 = choice[k][0]
         for d in dirs:
             n = (k[0] + d[0], k[1] + d[1])
@@ -1342,12 +1470,50 @@ def trench_ends(world, grid, choice, kinds):
             continue
         for d in dirs:
             n = (k[0] + d[0], k[1] + d[1])
-            if n in choice and n not in ramps and kinds.get(n) not in ("water", "void") and choice[n][0] < y0 \
+            if n in choice and n not in ramps and kinds.get(n) not in ("water", "void") and n not in world.get("bed", ()) and choice[n][0] < y0 \
                     and not any(t not in (6, 9) for _, t in grid.get(n, [])):
                 choice[n] = (y0, t0); holes += 1
+                world.setdefault("filled", set()).add(n)
     print("road map: trench ends: %d covered cells filled, %d bridge cells, %d holes beside trenches, %d ramp cells"
           % (filled, bridged, holes, len(ramps)))
     return slopes
+
+
+# Driver 2 surfaces of rail inclines (not marked as such in the data, found by the user):
+# col 369 rows 873-879 climbs from the trench (1352) to street level (R8, the user's
+# 19:14 track), rows 860-866 is its twin to the north (one 1-cell V with the floor between)
+RAIL_INCLINES = {(369, r) for r in list(range(860, 867)) + list(range(873, 880))}
+RAIL_CUTS = [(602, 796)]       # seeds of rail trenches (user R10: under c20_p2n's bridge)
+RAIL_FLOOR = 1352
+EDGE_WATER_MIN = int(os.environ.get("CHI_EDGE_WATER_MIN", "6"))   # of 9 samples water: a water-edge cell becomes water
+BED_DEPTH = 1700               # land levels this deep next to water are D2's river / lake bed
+GUARD_MIN_BELOW = int(os.environ.get("CHI_GUARD_MIN_BELOW", "300"))   # a neighbour's level becomes a guard plane only this far below (a sunken road / trench floor: a car along its wall must not be pushed up)
+NO_SWITCH = -0x8000            # SIPOLY pad: no Driver 2 switch height (the plugin uses the midpoint)
+
+
+def level_switches(world):
+    """Driver 2's own level switch heights (d2surface.switches) at every road cell centre
+    with several D2 levels: {cell: {level y down: switch y down}}; the wheel leaves that
+    level for the next lower one once it is deeper than the switch. Cached."""
+    import pickle, hashlib
+    from d2surface import Surface
+    key = hashlib.md5(open("d2surface.py", "rb").read() + repr(
+        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE, "switch1")).encode()).hexdigest()[:8]
+    cache = "work/level_switches_%s.pkl" % key
+    if os.path.exists(cache):
+        return pickle.load(open(cache, "rb"))
+    surf = Surface(D2_LEV)
+    half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+    out = {}
+    for row in range(world["rz_n"] * 60):
+        for col in range(world["rx_n"] * 60):
+            dx, dz = ws.to_d2(col * ROAD_UNIT - half_x, half_z - row * ROAD_UNIT)
+            lv = surf.switches(dx, dz)
+            if lv:
+                out[(col, row)] = {int(round(-h * ws.SCALE)): int(round((256 + t) * ws.SCALE))
+                                   for h, t in lv if t is not None}
+    pickle.dump(out, open(cache, "wb"))
+    return out
 
 
 def sea_fixed_cells(world):
@@ -1360,7 +1526,7 @@ def sea_fixed_cells(world):
     cache = "work/sea_fixed_%s.pkl" % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
-    surf = Surface("work/d2_CHICAGO.LEV")
+    surf = Surface(D2_LEV)
     half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
     out = set()
     for row in range(world["rz_n"] * 60):
@@ -1483,16 +1649,20 @@ def cell_slopes(world, cells, choice):
     along +x / +z (Driver 1 world axes), from Driver 2 surface samples 600 units off
     the centre; only where the four samples lie on one plane (not a step)."""
     from d2surface import Surface
-    surf = Surface("work/d2_CHICAGO.LEV")
+    surf = Surface(D2_LEV)
     half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
     out = {}
     for (col, row) in cells:
         gy0 = choice[(col, row)][0]
+        gy0 = 0 if abs(gy0) < HEIGHT_DEADBAND else gy0
         x0, z0 = col * ROAD_UNIT - half_x, half_z - row * ROAD_UNIT
         s = []
         for ox, oz in ((300, 0), (-300, 0), (0, 300), (0, -300)):
             dx, dz = ws.to_d2(x0 + ox, z0 + oz)
             lv = [int(round(-h * ws.SCALE)) for h, t in surf.levels(dx, dz) if t not in (6, 9)]
+            # kerbs / raised sidewalks (-22) are street level, as in the written heights:
+            # they tilted the street cells beside them by ~23 (user R8, 604,794)
+            lv = [0 if abs(y) < HEIGHT_DEADBAND else y for y in lv]
             lv = [y for y in lv if abs(y - gy0) < 450]
             s.append(min(lv, key=lambda y: abs(y - gy0)) if lv else None)
         g = []
@@ -1500,6 +1670,8 @@ def cell_slopes(world, cells, choice):
             ok = p is not None and m is not None and abs(p + m - 2 * gy0) <= 40
             g.append((p - m) / 600.0 if ok else 0.0)
         gx, gz = g
+        if max(abs(gx), abs(gz)) > SLOPE_MAX:
+            continue                     # an embankment / wall face (45 deg at 7_16 rolled cars), not a road
         if max(abs(gx), abs(gz)) * ROAD_UNIT >= SLOPE_MIN:
             out[(col, row)] = (gx, gz)
     return out
@@ -1518,7 +1690,7 @@ def refine_ramps(world, grid, choice, kinds):
     below the wheel, so a car on the ramp follows it, a car on the ground beside it
     stays down). Returns {cell: (height at the centre, gx, gz)}."""
     from d2surface import Surface
-    surf = Surface("work/d2_CHICAGO.LEV")
+    surf = Surface(D2_LEV)
     half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
     land = lambda k: k in choice and choice[k][1] not in (6, 9) and kinds.get(k) != "inside"
     cand = set()
@@ -1588,8 +1760,14 @@ def surface_planes(world, grid, choice, kinds):
     their road. The own plane first (the engine takes the first hit while the
     plugin is idle), then lowest first.
     Returns {cell: [(a, c, d), ...]} with d in y-down units."""
+    switches = world.get("switches", {}) if "no_d2switch" not in EXPERIMENT else {}
+    if world.get("deck_switch"):                         # C17 deck fix: the deck only for a car already near it
+        switches = {k: dict(v) for k, v in switches.items()}
+        for k, sw in world["deck_switch"].items():
+            switches.setdefault(k, {}).update(sw)
     xslopes = world.get("extra_slopes", {})          # trench end ramps (C20), also in covered cells
-    land = {k: v for k, v in choice.items() if v[1] not in (6, 9) and (kinds.get(k) != "inside" or k in xslopes)}
+    filled = world.get("filled", set())            # covered / hole cells the trench pass made floor
+    land = {k: v for k, v in choice.items() if v[1] not in (6, 9) and (kinds.get(k) != "inside" or k in xslopes or k in filled)}
     hw ={k: written_height(v[0]) for k, v in land.items()}
     cand = set()
     for k, h in hw.items():
@@ -1599,6 +1777,15 @@ def surface_planes(world, grid, choice, kinds):
                 cand.add(k)
     slopes = cell_slopes(world, cand, choice)
     slopes.update(xslopes)
+    if "keep_rampfoot" not in EXPERIMENT:
+        # a ramp's end cell centred at the flat level beside it: its slope only dips under
+        # / rises over that level (the foot of underbridge2's slip road, ~90 under the
+        # trench floor): flat. Cells part-way up keep their slope (deckramp_w)
+        for k in [k for k in slopes if k in hw]:
+            reach_k = (abs(slopes[k][0]) + abs(slopes[k][1])) * 750
+            if any(n in hw and n not in slopes and abs(hw[n] - hw[k]) < min(reach_k, 40)
+                   for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1))):
+                del slopes[k]
     ramps = refine_ramps(world, grid, choice, kinds)
     borrowed = 0                                   # ground beside a sloped ramp that took the ramp's
     for k, h in hw.items():                        # height (wall-top rule): follow its slope too
@@ -1610,15 +1797,34 @@ def surface_planes(world, grid, choice, kinds):
                 slopes[k] = slopes[n]
                 borrowed += 1
                 break
+    bed = world.get("bed", set())
+    rail = world.get("rail", set())                 # rail cuts feed no guard planes
+    # a bank by the water (not deeper than the water itself: a trench / lower road along
+    # the river stays a guard source)
+    wet = lambda n: hw[n] < WATER_LEVEL + 100 and (n in bed or any(
+        kinds.get((n[0] + i, n[1] + j)) in ("water", "void") for i in range(-2, 3) for j in range(-2, 3)))
     planes, nmulti = {}, 0
     for k, h in hw.items():
         own = {written_height(y) for y, t in grid[k] if t not in (6, 9)}
         levels = set(own)
         tilt = {}                                   # level -> (a, c) of a sloped neighbour whose plane it is
+        dry_levels = set()                          # neighbour levels away from the water's edge
         for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             n = (k[0] + d[0], k[1] + d[1])
-            if n in land:
+            if n in land and n in slopes and "keep_rampext" not in EXPERIMENT:
+                # a ramp's plane only on the ramp's own cells (user R8: no second Y plane
+                # over other drivable ground; an invisible ramp beside underbridge's real
+                # one): of a sloped neighbour only its other real levels (a deck above it)
+                other = [L for L in (written_height(y) for y, t in grid[n] if t not in (6, 9))
+                         if abs(L - hw[n]) >= SURF_SEP]
+                levels.update(other)
+                if not wet(n) and n not in rail:
+                    dry_levels.update(other)
+            elif n in land:
                 levels.update(written_height(y) for y, t in grid[n] if t not in (6, 9))
+                if not wet(n) and n not in rail:
+                    dry_levels.update(written_height(y) for y, t in grid[n] if t not in (6, 9))
+                    dry_levels.add(hw[n])
                 if n in slopes:                     # the neighbour's own plane at OUR centre
                     ngx, ngz = slopes[n]
                     at_centre = hw[n] + int(round((-ngx * d[0] + ngz * d[1]) * ROAD_UNIT))   # we are at (-dx, +dz) cells from n (row+1 = south = -z)
@@ -1626,7 +1832,8 @@ def surface_planes(world, grid, choice, kinds):
                     tilt[at_centre] = (ngx, ngz)
                 else:
                     levels.add(hw[n])
-        if k in ramps:                              # a narrow ramp crossing this ground cell
+        if k in ramps and "keep_rampext" in EXPERIMENT:   # a narrow ramp crossing this ground cell
+            # (off, user R8: as a full-cell plane it reached far beyond the ramp's footprint)
             ry, rgx, rgz, rbox = ramps[k]
             rw = written_height(ry)
             levels.add(rw); tilt[rw] = (rgx, rgz); own.add(rw)
@@ -1640,7 +1847,25 @@ def surface_planes(world, grid, choice, kinds):
             # sloped continuations may be close, and so may the cell's own street over a
             # trench end ramp (a street car there keeps its street, C20; not the trench
             # level below that the ramp replaced)
+            if dd and L not in own and "keep_guards" not in EXPERIMENT and (
+                    dd < GUARD_MIN_BELOW or L not in dry_levels or (gx, gz) != (0.0, 0.0)):
+                # (a ramp cell carries its own plane only: user R10, underbridge2)
+                # user rule (R9): no stacked drivable planes unless a bridge (the cell's own
+                # D2 levels) or needed to drive: only a sunken road's floor beside this cell
+                # (a car along a trench wall), not levels above it, nor banks by the water
+                continue
             if dd and (abs(dd) >= sep or L in tilt or (k in xslopes and L in own and dd < 0)) and all(abs(dd - e) >= 40 for e in ds):
+                if L in tilt and L not in own and "keep_lifttilt" not in EXPERIMENT:
+                    # a sloped neighbour's plane continued over this cell: the plugin takes a
+                    # plane up to 100 above the wheel, so a part above the own plane and within
+                    # 128 of it (a ramp that meets this street, extended past its end) lifts
+                    # every car here: 70-90 above the street at c20_p2n (user, 2026-10-12).
+                    # Continuations wholly below (a lower road running under) or far above
+                    # (a deck ramp's) stay
+                    tgx, tgz = tilt[L]
+                    ext = (abs(tgx - gx) + abs(tgz - gz)) * 750
+                    if -dd + ext > 0 and -dd - ext < 128:
+                        continue
                 ds.append(dd)
         if len(ds) == 1 and (gx, gz) == (0.0, 0.0):
             continue
@@ -1662,7 +1887,8 @@ def surface_planes(world, grid, choice, kinds):
         # with full-cell guards a lowest-first order spawned cars on the level under a
         # bridge (hs_lift_6_9: y -2396 instead of the street)
         ds.sort(key=lambda dd: (dd != 0, -dd))
-        pl = []
+        pl, ex = [], []
+        swr = {written_height(L): (h - sw) or 1 for L, sw in switches.get(k, {}).items()}   # pad = switch y up + cell height (0 = none: older levels)
         for dd in ds:
             tgx, tgz = (gx, gz) if dd == 0 else tilt.get(h + dd, (0.0, 0.0))
             a = int(round(-tgx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
@@ -1673,28 +1899,222 @@ def surface_planes(world, grid, choice, kinds):
             # height rule decides alone: lower levels run under the upper ones, a car keeps
             # the highest plane not above its wheel (a car leaving a street edge floats to
             # the end of that cell, then drops). Guards continue the neighbour's road as is
-            q = SURF_Q if dd == 0 or (h + dd) in own else GUARD_Q          # guards: coarser (surface ids are scarce)
-            pl.append((a, c, 0 if dd == 0 else int(round(dd / q)) * q, FULL))
-        planes[k] = (prio, pl)
+            # the cell's own levels exact (8 = the road map's height step: a street over a
+            # trench end ramp rounded to 64 sat 16 off = kerb steps at C20, user 175535);
+            # guards coarser (surface ids are scarce); the merge moves only guards
+            exact = dd == 0 or (h + dd) in own
+            q = (OWN_Q if exact else GUARD_Q) if "own_q64" not in EXPERIMENT else (SURF_Q if exact else GUARD_Q)
+            pl.append((a, c, 0 if dd == 0 else int(round(dd / q)) * q, FULL, swr.get(h + dd, NO_SWITCH) if exact else NO_SWITCH))
+            ex.append(exact)
+        planes[k] = (prio, pl, tuple(ex))
         nmulti += len(ds) > 1
     print("road map: ROADSURF planes on %d cells (%d with several levels, %d sloped of %d candidates, %d borrowed slopes)"
           % (len(planes), nmulti, len(slopes), len(cand), borrowed))
+    if "keep_fullcells" not in EXPERIMENT:
+        split_cells(world, grid, hw, land, slopes, planes)
     return planes
 
 
+SPLIT_TOL = 150               # a sample's D2 level matches a cell's level within this (plus a ramp's rise)
+SPLIT_SAMPLES = (-562, -187, 187, 562)   # 4 x 4 points inside the cell (local px east, pz north)
+
+
+SPLIT_STACK = os.environ.get("CHI_POLISH_SPLITSTACK", "1") == "1"   # Polish C23 (default since b15): stacked own level counts as own (trench under a cover)
+
+
+def split_samples(world, keys):
+    """Top D2 levels (y down, scaled) at 4 x 4 points of each cell (cached)."""
+    import pickle, hashlib
+    from d2surface import Surface
+    key = hashlib.md5(open("d2surface.py", "rb").read() + repr((sorted(keys), world["across"], world["down"],
+                                                                 ws.SCALE, SPLIT_SAMPLES, D2_LEV)).encode()).hexdigest()[:8]
+    cache = "work/split_samples_%s.pkl" % key
+    if os.path.exists(cache):
+        return pickle.load(open(cache, "rb"))
+    surf = Surface(D2_LEV)
+    half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+    out = {}
+    for col, row in keys:
+        smp = {}
+        for px in SPLIT_SAMPLES:
+            for pz in SPLIT_SAMPLES:
+                dx, dz = ws.to_d2(col * ROAD_UNIT - half_x + px, half_z - row * ROAD_UNIT + pz)
+                smp[(px, pz)] = sorted({int(round(-h * ws.SCALE)) for h, t in surf.levels(dx, dz) if t not in (6, 9)})
+        out[(col, row)] = smp
+    pickle.dump(out, open(cache, "wb"))
+    return out
+
+
+# C37 (14.10.): diagonal level boundaries (embankments, trench walls, deck edges) as a straight cut
+# through the cell instead of whole-cell steps: the neighbour's part as 1-3 triangles (the engine's
+# 3-vertex test works at any angle; 4-vertex polygons are boxes), the cell's own level as a full-cell
+# box after them. Angle in 15-degree steps, offset on a 250-unit grid where it fits, heights in
+# 100-unit steps (fewer distinct surfaces: ids are scarce). CHI_DIAG=1.
+DIAG = os.environ.get("CHI_DIAG", "") == "1"
+DIAG_Q = 100
+
+
+def diagonal_cut(cls):
+    """cls: {(px, pz): "O" | "N"} for the cell's sample points. The neighbour part of the best straight
+    cut that separates O from N, as triangles (6-tuples, local coordinates), or None."""
+    import math
+    if "O" not in cls.values() or "N" not in cls.values():
+        return None
+    best = None
+    for th in range(0, 180, 15):
+        cx, cz = math.cos(math.radians(th)), math.sin(math.radians(th))
+        proj = {pt: pt[0] * cx + pt[1] * cz for pt in cls}
+        o = [v for pt, v in proj.items() if cls[pt] == "O"]
+        nn = [v for pt, v in proj.items() if cls[pt] == "N"]
+        for sgn in (1, -1):                               # N on the + side (sgn 1) or the - side
+            lo, hi = (max(o), min(nn)) if sgn > 0 else (max(nn), min(o))
+            if lo >= hi:
+                continue
+            gap = hi - lo
+            if th % 90 == 0:
+                continue                                  # axis cuts are the plain split's job
+            if best is None or gap > best[0]:
+                best = (gap, th, sgn, lo, hi)
+    if best is None:
+        return None
+    gap, th, sgn, lo, hi = best
+    mid = (lo + hi) / 2
+    snap = round(mid / 250) * 250
+    off = snap if lo < snap < hi else round(mid / 50) * 50
+    cx, cz = math.cos(math.radians(th)), math.sin(math.radians(th))
+    # clip the cell square to the neighbour's side: sgn * (p . n - off) > 0
+    sq = [(-750, -750), (750, -750), (750, 750), (-750, 750)]
+    f = lambda p: sgn * (p[0] * cx + p[1] * cz - off)
+    poly = []
+    for i in range(4):
+        p, q = sq[i], sq[(i + 1) % 4]
+        if f(p) >= 0:
+            poly.append(p)
+        if (f(p) >= 0) != (f(q) >= 0):
+            t = f(p) / (f(p) - f(q))
+            poly.append((int(round(p[0] + t * (q[0] - p[0]))), int(round(p[1] + t * (q[1] - p[1])))))
+    if len(poly) < 3:
+        return None
+    tris = []
+    for i in range(1, len(poly) - 1):
+        (x0, z0), (x1, z1), (x2, z2) = poly[0], poly[i], poly[i + 1]
+        if (x1 - x0) * (z2 - z0) - (z1 - z0) * (x2 - x0) > 0:   # same winding as the verified prototype
+            (x1, z1), (x2, z2) = (x2, z2), (x1, z1)
+        tris.append((x0, z0, x1, z1, x2, z2))
+    return tris
+
+
+def split_cells(world, grid, hw, land, slopes, planes):
+    """User rule (R12, 2026-10-13): only what is visible may be drivable. A road-map cell is
+    1500 units wide; where a level step runs through it (a narrow ramp beside the ground under
+    a bridge, a bridge deck whose edge ends inside a rail cut's cell) one full-cell level made
+    invisible ground drivable or left a visible deck edge without a floor. Such a cell gets two
+    side-by-side planes instead, each over the part where D2 shows that level: its own level
+    and its neighbour's. The parts do not overlap, so the engine picks the plane by position
+    (4-vertex polygons: box test) and the plugin's height rule stays out (surface info 2).
+    Only clean splits along the axis towards that neighbour; cells with their own stacked
+    levels keep the height rule."""
+    cands = {}
+    for k, h in hw.items():
+        if k in planes and planes[k][0] == 0:
+            continue                                   # stacked (bridge over street): height rule
+        for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            n = (k[0] + d[0], k[1] + d[1])
+            if n in land and abs(hw[n] - h) >= SURF_SEP:
+                cands.setdefault(k, []).append((d, n))
+    samples = split_samples(world, list(cands))
+    nsplit = ndiag = ntri = 0
+    for k, nbrs in cands.items():
+        h = hw[k]
+        gx, gz = slopes.get(k, (0.0, 0.0))
+        smp = samples[k]
+        own_at = lambda px, pz: h + gx * px + gz * pz               # gx, gz: y-down gradients (+x east, +z north)
+        for d, n in nbrs:
+            hn = hw[n]
+            ngx, ngz = slopes.get(n, (0.0, 0.0))
+            # the neighbour's plane in our local frame: n's centre is at (d0 * 1500, -d1 * 1500)
+            cx, cz = d[0] * ROAD_UNIT, -d[1] * ROAD_UNIT
+            nb_at = lambda px, pz: hn + ngx * (px - cx) + ngz * (pz - cz)
+            tol = SPLIT_TOL + int((abs(gx) + abs(gz) + abs(ngx) + abs(ngz)) * 750)
+            cls = {}
+            for (px, pz), lv in smp.items():
+                if not lv:
+                    cls[(px, pz)] = "X"; continue
+                top = min(lv)                           # the visible level from above
+                o, m = abs(top - own_at(px, pz)) <= tol, abs(top - nb_at(px, pz)) <= tol
+                if SPLIT_STACK and not o and any(abs(l - own_at(px, pz)) <= tol for l in lv):
+                    o = True                            # Polish C23: own level runs on under a cover (stacked): not the neighbour's part
+                cls[(px, pz)] = "O" if o and not m else "N" if m and not o else "X"
+            if "X" in cls.values():
+                continue
+            ax = 0 if d[0] else 1                       # axis of the step: px for east/west, pz for north/south
+            sgn = d[0] if d[0] else -d[1]               # +1: the neighbour lies at +px / +pz
+            on = [pt[ax] * sgn for pt, c in cls.items() if c == "O"]
+            nn = [pt[ax] * sgn for pt, c in cls.items() if c == "N"]
+            if not on or not nn or max(on) >= min(nn):
+                if DIAG and not any(c == "X" for c in cls.values()):
+                    tri = diagonal_cut(cls)             # C37: a straight diagonal boundary instead
+                    if tri:
+                        a = int(round(-gx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
+                        c = int(round(-gz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
+                        na = int(round(-ngx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
+                        nc = int(round(-ngz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
+                        dn = int(round((nb_at(0, 0) - h) / DIAG_Q)) * DIAG_Q
+                        # neighbour part as triangles first (first match wins), then the cell's own
+                        # level over the whole cell for the rest
+                        pl = [(na, nc, dn, t, NO_SWITCH) for t in tri] + [(a, c, 0, FULL, NO_SWITCH)]
+                        planes[k] = (0, pl, (True,) * len(pl))
+                        ndiag += 1
+                        ntri += len(tri)
+                        if os.environ.get("CHI_DIAG_LIST") and (ndiag <= 40 or os.environ["CHI_DIAG_LIST"] == "all"):
+                            half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+                            x1, z1 = k[0] * ROAD_UNIT - half_x, half_z - k[1] * ROAD_UNIT
+                            rc = world.get("road_cells", set())
+                            nroad = sum((k[0] + i, k[1] + j) in rc for i in (-1, 0, 1) for j in (-1, 0, 1))
+                            print("C37 cell %s D1 %d,%d D2 %s step %d road %d" % (k, x1, z1, tuple(int(v) for v in ws.to_d2(x1, z1)), dn, nroad))
+                        if os.environ.get("CHI_DIAG_CELL") == "%d,%d" % k:
+                            print("C37 cell %s h %d own slope %s nb %s hn %d dn %d tri %s" % (k, h, (gx, gz), d, hn, dn, tri))
+                            for (px, pz) in sorted(cls, key=lambda p: (-p[1], p[0])):
+                                print("  %6d %6d %s %s" % (px, pz, cls[(px, pz)], sorted(smp[(px, pz)])))
+                        break
+                continue                                # not separable along the axis
+            cut = (max(on) + min(nn)) // 2 * sgn        # boundary in local coordinates
+            lo, hi = (-750, cut) if sgn > 0 else (cut, 750)
+            olo, ohi = lo, hi
+            nlo, nhi = (cut, 750) if sgn > 0 else (-750, cut)
+            foot = lambda a0, a1: (a0, -750, a1, 750) if ax == 0 else (-750, a0, 750, a1)
+            a = int(round(-gx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
+            c = int(round(-gz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
+            na = int(round(-ngx * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[0]
+            nc = int(round(-ngz * 4096 / SLOPE_Q)) * SLOPE_Q * SLOPE_SIGN[1]
+            # the neighbour plane's offset at OUR centre (y down, relative to our height)
+            dn = int(round(nb_at(0, 0) - h))
+            dn = int(round(dn / OWN_Q)) * OWN_Q
+            planes[k] = (0, [(a, c, 0, foot(olo, ohi), NO_SWITCH), (na, nc, dn, foot(nlo, nhi), NO_SWITCH)], (True, True))
+            nsplit += 1
+            break
+    print("road map: %d cells split between two levels (visible parts only; %d candidates)" % (nsplit, len(cands)))
+    if DIAG:
+        print("road map: C37 %d cells split diagonally (%d triangles)" % (ndiag, ntri))
+
+
 def _rot_plane(pl, k):
-    """Plane (a, c, d, (x0, z0, x1, z1)) in world-local coords expressed in the surface
+    """Plane (a, c, d, (x0, z0, x1, z1), switch) in world-local coords expressed in the surface
     frame of rotation k (the engine maps the point (X, Z) to R_k(X, Z) before testing)."""
-    a, c, d, (x0, z0, x1, z1) = pl
-    pts = [(x0, z0), (x0, z1), (x1, z1), (x1, z0)]
+    a, c, d, foot, sw = pl
+    tri = len(foot) == 6                                # C37: triangle (x0, z0, x1, z1, x2, z2)
+    pts = [foot[0:2], foot[2:4], foot[4:6]] if tri else \
+        [(foot[0], foot[1]), (foot[0], foot[3]), (foot[2], foot[3]), (foot[2], foot[1])]
     if k == 1:
         a, c = -c, a; pts = [(-z, x) for x, z in pts]
     elif k == 2:
         a, c = -a, -c; pts = [(-x, -z) for x, z in pts]
     elif k == 3:
         a, c = c, -a; pts = [(z, -x) for x, z in pts]
+    if tri:
+        return (a, c, d, tuple(v for p in pts for v in p), sw)
     xs, zs = [p[0] for p in pts], [p[1] for p in pts]
-    return (a, c, d, (min(xs), min(zs), max(xs), max(zs)))
+    return (a, c, d, (min(xs), min(zs), max(xs), max(zs)), sw)
 
 
 def _canonical(pl):
@@ -1707,26 +2127,35 @@ def _canonical(pl):
     return best
 
 
-def roadsurf_lump(planes, ids):
+def roadsurf_lump(planes, ids, force=None):
     """Driver 1 ROADSURF lump (int count; SURFACEINFO {type, info, heading, numpolys}
     + SIPOLY 52 B {xz[4] int pairs, plane a b c d, nverts, pad}) with one surface per
     distinct plane list; info = 1 marks them for the height-aware engine patch.
     Returns (bytes, {cell: type id}). Plane (a, b, c) is the unit normal x 4096."""
     import collections, math
     groups, best, canon = collections.Counter(), {}, {}
-    for k, (pr, p) in planes.items():
-        rot, key = _canonical(p)
+    exact = {}                                 # per surface: which planes are the cells' own levels
+    force = force or {}
+    for k, v in planes.items():
+        pr, p = v[0], v[1]
+        if k in force:                         # road cell: the rotation is its lane's direction
+            rot = force[k]
+            key = tuple(_rot_plane(q, rot) for q in p)
+        else:
+            rot, key = _canonical(p)           # (rotation keeps the plane order)
         canon[k] = (rot, key)
         groups[key] += 1
         best[key] = min(best.get(key, 9), pr)
+        m = v[2] if len(v) > 2 else (False,) * len(p)
+        exact[key] = tuple(x or y for x, y in zip(exact.get(key, m), m))
     cap = min(SURF_MAX, len(ids))
     # over the id cap: a rare surface joins a more common one with the same slopes and
     # footprints whose plane offsets differ by <= tol (only as coarse as needed). The
-    # cell's own plane (offset 0) stays exact and no guard crosses it (the signature
-    # holds each offset's sign), so only guards move
+    # cells' own levels move by <= OWN_TOL at most and no guard crosses the own plane
+    # (the signature holds each offset's sign); guards move by <= tol
     sign = lambda d: (d > 0) - (d < 0)
-    sig = lambda g: tuple((a, c, f, sign(d)) for a, c, d, f in g)
-    merged, used = {}, None
+    sig = lambda g: tuple((a, c, f, sign(d), e, w) for (a, c, d, f, w), e in zip(g, exact[g]))
+    merged, used, per_tol = {}, None, {}
     for tol in (64, 128, 192, 256):
         if len(groups) <= cap:
             break
@@ -1739,7 +2168,8 @@ def roadsurf_lump(planes, ids):
             if g not in groups:
                 continue
             cand = [h for h in bucket[sig(g)] if h != g and groups[h] >= groups[g]
-                    and all(abs(pd - qd) <= tol for (_, _, pd, _), (_, _, qd, _) in zip(g, h))]
+                    and all(abs(pd - qd) <= (min(tol, OWN_TOL) if e else tol)
+                            for (_, _, pd, _, _), (_, _, qd, _, _), e in zip(g, h, exact[g]))]
             if not cand:
                 continue
             h = max(cand, key=lambda h: groups[h])
@@ -1747,13 +2177,14 @@ def roadsurf_lump(planes, ids):
             best[h] = min(best[h], best.pop(g))
             bucket[sig(g)].discard(g)
             merged[g], used = h, tol
+            per_tol[tol] = per_tol.get(tol, 0) + 1
     if merged:
         def final(g):
             while g in merged:
                 g = merged[g]
             return g
         canon = {k: (rot, final(key)) for k, (rot, key) in canon.items()}
-        print("road map: %d surfaces merged into similar ones (guard offsets within %d)" % (len(merged), used))
+        print("road map: %d surfaces merged into similar ones (guard offsets within %d; per step %s)" % (len(merged), used, per_tol))
     order = sorted(groups, key=lambda g: (best[g], -groups[g]))
     if len(groups) > cap:
         lost = order[cap:]
@@ -1763,13 +2194,28 @@ def roadsurf_lump(planes, ids):
     sid = {g: ids[i] for i, g in enumerate(keep)}
     out = bytearray(struct.pack("<i", len(keep)))
     for g in keep:
-        out += struct.pack("<4h", sid[g], 1, 0, len(g))
-        for a, c, d, (x0, z0, x1, z1) in g:
+        out += struct.pack("<4h", sid[g], 1 if all(f == FULL for _, _, _, f, _ in g) else 2, 0, len(g))
+        for a, c, d, foot, sw in g:
             n = math.sqrt(a * a + 4096.0 * 4096.0 + c * c)
-            out += struct.pack("<8i", x0, z0, x0, z1, x1, z1, x1, z0)
+            if len(foot) == 6:                              # C37 triangle: 3 points (last repeated), nverts 3
+                out += struct.pack("<8i", *foot, foot[4], foot[5])
+            else:
+                x0, z0, x1, z1 = foot
+                out += struct.pack("<8i", x0, z0, x0, z1, x1, z1, x1, z0)
             out += struct.pack("<4i", int(round(a * 4096 / n)), int(round(4096 * 4096 / n)), int(round(c * 4096 / n)), d)
-            out += struct.pack("<hxx", 4)
+            out += struct.pack("<hh", 3 if len(foot) == 6 else 4, sw)   # pad: the D2 level switch height (plugin)
     cells = {k: (sid[key], rot) for k, (rot, key) in canon.items() if key in sid}
+    proto = os.environ.get("CHI_PROTO_TRI")        # C37 prototype: "col,row" gets two triangles
+    if proto and len(keep) < len(ids):              # split along the cell's diagonal, one raised by 150
+        k = tuple(int(v) for v in proto.split(","))
+        x0, z0, x1, z1 = FULL
+        out[0:4] = struct.pack("<i", len(keep) + 1)
+        out += struct.pack("<4h", ids[len(keep)], 0, 0, 2)          # info 0: the plugin leaves it alone
+        for tri, d in ((((x0, z0), (x0, z1), (x1, z1)), 0), (((x0, z0), (x1, z1), (x1, z0)), -150)):
+            out += struct.pack("<8i", *[v for p in tri + (tri[-1],) for v in p])
+            out += struct.pack("<4i", 0, 4096, 0, d) + struct.pack("<hh", 3, 0)
+        cells[k] = (ids[len(keep)], 0)
+        print("road map: C37 prototype: cell %s gets two triangles (surface %d)" % (k, ids[len(keep)]))
     return bytes(out), cells
 
 
@@ -1786,12 +2232,152 @@ def road_values(world):
     grid = road_levels(world)
     kinds = sea_kinds(world["across"], world["down"])
     wheights = water_heights(world["across"], world["down"])
+    if "keep_bed" not in EXPERIMENT:
+        # Driver 2's river / lake bed and quay slopes run down under the water (1700 to
+        # 4500 below the street, type 0) next to water: as road the car drove down
+        # them under the water surface instead of drowning (QA-2 region 7,2: slow
+        # slide to y -2082; hs_lift_6_9's "lower road" under the bridge, 2583). The
+        # deepest road is the trench (1352). Such levels go; a cell with none left is water
+        grid, bed = dict(grid), 0
+        world["bed"] = set()                       # (the trench holes pass keeps them water)
+        for k, lv in list(grid.items()):
+            if any(t not in (6, 9) and y >= BED_DEPTH for y, t in lv) and any(
+                    kinds.get((k[0] + i, k[1] + j)) in ("water", "void") for i in range(-3, 4) for j in range(-3, 4)):
+                grid[k] = [(y, t) for y, t in lv if t in (6, 9) or y < BED_DEPTH] or [(WATER_Y, 9)]
+                bed += 1
+                world["bed"].add(k)
+        print("road map: %d cells lose a river/lake bed level (water there)" % bed)
+    if os.environ.get("CHI_BANK_WATER", "1") != "0":     # default since b16 (14.10.)
+        # C28 (14.10.): D2's shore banks lie a little BELOW the water surface (NW lakeshore: a strip at
+        # 1176 between the street and the lake at 1080). As ground the car dropped into them and sat
+        # under the water line without drowning (stuck, FAN r14 shorewall y -997). Ground cells whose
+        # levels all lie under the water surface but above the trench floor (1352: Lower Wacker, rail
+        # trenches stay) become water, flooding outward from water cells through such cells only
+        lo, hi = WATER_Y + 40, RAIL_FLOOR - 100
+        wet = {k for k, v in kinds.items() if v == "water"} | {
+            k for k, lv in grid.items() if lv and all(t in (6, 9) for y, t in lv)}
+        bank = lambda k: bool(grid.get(k)) and all(t not in (6, 9) and lo <= y < hi for y, t in grid[k])
+        front = [k for k in grid if bank(k) and any((k[0] + i, k[1] + j) in wet for i in (-1, 0, 1) for j in (-1, 0, 1))]
+        seen, depth, nb = set(front), dict.fromkeys(front, 0), 0
+        while front:
+            k = front.pop()
+            grid[k] = [(WATER_Y, 9)]
+            nb += 1
+            for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1)):
+                if n not in seen and bank(n):
+                    seen.add(n); depth[n] = depth[k] + 1; front.append(n)
+        world.setdefault("bank_water", set()).update(seen)
+        print("road map: C28 %d shore-bank cells under the water surface become water (max %d cells from the water)"
+              % (nb, max(depth.values() or [0])))
+    if "keep_edgecentre" not in EXPERIMENT:
+        # a road cell is one level, taken at its centre: at a quay or bridge edge a cell
+        # that is mostly river read street and the car drove at street height over the
+        # water (user R10, hs_lift_6_9). Land cells beside water whose 3 x 3 samples are
+        # mostly water (>= EDGE_WATER_MIN of 9) become water, unless land runs straight
+        # through the centre (a bridge / causeway across the cell)
+        from d2surface import Surface
+        surf = Surface(D2_LEV)
+        half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+        water_k = {k for k, v in kinds.items() if v == "water"}
+        flipped = 0
+        for k, lv in list(grid.items()):
+            if not any(t not in (6, 9) for y, t in lv) or not any(
+                    (k[0] + i, k[1] + j) in water_k for i in (-1, 0, 1) for j in (-1, 0, 1)):
+                continue
+            x0, z0 = k[0] * ROAD_UNIT - half_x, half_z - k[1] * ROAD_UNIT
+            land = {}
+            for i in (-1, 0, 1):
+                for j in (-1, 0, 1):
+                    lvs = surf.levels(*ws.to_d2(x0 + 500 * i, z0 + 500 * j))
+                    land[(i, j)] = any(t not in (6, 9) for h, t in lvs)
+            if sum(not v for v in land.values()) < EDGE_WATER_MIN:
+                continue
+            if all(land[(i, 0)] for i in (-1, 0, 1)) or all(land[(0, j)] for j in (-1, 0, 1)):
+                continue                           # a strip through the centre: a bridge
+            grid[k] = [(WATER_Y, 9)]
+            world.setdefault("bed", set()).add(k)  # (stays water in the trench holes pass)
+            flipped += 1
+        print("road map: %d water-edge cells taken as water (mostly water inside)" % flipped)
+    if os.environ.get("CHI_DECK_FIX", "1") != "0":       # default since b16 (14.10.)
+        # C17 deck lift (14.10., after the water-edge rule, which would flip filled gaps back): D2's elevated Lake Shore Drive (curved planes, -1352) crosses the shore water
+        # diagonally, so its deck-only cells touch only at their corners (a car on the deck dropped through the
+        # gaps) and a car from the street entering one was snapped up 1352 (one level per cell). (1) Corner gaps:
+        # of the two cells beside a diagonal deck-to-deck step without deck, the one on the x side gets the deck
+        # level (water -> deck-only, land -> deck + its own level). (2) Deck-only cells beside land get that
+        # land's levels as lower planes, so the plane selection keeps a car from the street low (under the deck
+        # it reaches the next water cell and drowns, DROWN_EDGE) instead of lifting it onto the deck
+        is_wet = lambda lv: bool(lv) and all(t in (6, 9) for y, t in lv)
+        deck_of = lambda lv: min((y, t) for y, t in lv) if lv and not is_wet(lv) and min(y for y, t in lv) <= -500 else None
+        deck_only = lambda lv: bool(lv) and not is_wet(lv) and all(y <= -500 for y, t in lv)
+        has_deck = lambda k, dy: any(abs(y - dy) <= 300 for y, t in grid.get(k, []) if t not in (6, 9))
+        filled, gaps = 0, set()
+        for k in sorted(k for k, lv in grid.items() if deck_only(lv)):
+            dy, dt_ = deck_of(grid[k])
+            for sx, sz in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                n = (k[0] + sx, k[1] + sz)
+                if not (deck_only(grid.get(n, [])) and has_deck(n, dy)):
+                    continue
+                a, b = (k[0] + sx, k[1]), (k[0], k[1] + sz)
+                if has_deck(a, dy) or has_deck(b, dy):
+                    continue
+                if is_wet(grid.get(a, [])) or not grid.get(a):
+                    grid[a] = [(dy, dt_)]
+                else:
+                    grid[a] = sorted(set(grid[a]) | {(dy, dt_)})
+                filled += 1
+                gaps.add(a)
+        lowered, inland = 0, 0
+        for k in sorted(k for k, lv in grid.items() if deck_only(lv)):
+            if not any(is_wet(grid.get((k[0] + i, k[1] + j), [])) for i in (-1, 0, 1) for j in (-1, 0, 1)):
+                inland += 1                         # over land (building blocks): no invisible ground under it
+                continue
+            low = set()
+            for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1)):
+                for y, t in grid.get(n, []):
+                    if t not in (6, 9) and y > -500 and not any(abs(y - q) < 100 for q, _ in low):
+                        low.add((y, t))
+            if low:
+                grid[k] = sorted(set(grid[k]) | low)
+                lowered += 1
+                # its deck plane switches only 300 under the deck (the midpoint between the deck and a strip
+                # 968 down lay just 190 above the street: a street car with a bounce took the deck, FAN r19)
+                dy = min(y for y, t in grid[k])
+                world.setdefault("deck_switch", {})[k] = {dy: dy + 300}
+        print("road map: C17 deck fix: %d corner gaps filled, %d deck-only cells at the water get lower planes "
+              "(%d deck-only cells inland left alone)" % (filled, lowered, inland))
     choice = {}
     for k, lv in grid.items():
         lv = sorted(lv, key=lambda hl: (hl[1] in (6, 9), abs(hl[0])))
         choice[k] = lv[0]
         if kinds.get(k) == "inside":           # building block: plain ground, no drowning
             choice[k] = (0, 0)
+    if "keep_rail" not in EXPERIMENT:
+        # rail cuts (user R10: the trench under c20_p2n's bridge is railway): a bridge
+        # over it keeps only its street, the rail floor stays but feeds no guard planes
+        world["rail"] = set()
+        for seed in RAIL_CUTS:
+            todo = [seed] if seed in grid else []
+            seen = set(todo)
+            while todo:
+                k = todo.pop()
+                for dd_ in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    n = (k[0] + dd_[0], k[1] + dd_[1])
+                    if n not in seen and any(t not in (6, 9) and y >= 600 for y, t in grid.get(n, [])):
+                        seen.add(n); todo.append(n)
+            world["rail"] |= seen
+        for k in world["rail"]:
+            top = [(y, t) for y, t in grid[k] if t not in (6, 9) and y < 600]
+            if top:                                    # a bridge across the cut
+                grid[k] = top
+        print("road map: %d rail cut cells (bridges over them keep the street only)" % len(world["rail"]))
+        # rail inclines (the L leaving the freeway trench): Driver 2 has a surface there but
+        # fences them off; here they connected the trench with the street (user R8,
+        # 19:14 snapshots). Their cells become trench floor: no way up, no way down
+        for k in RAIL_INCLINES:
+            if k in choice:
+                grid[k] = [(RAIL_FLOOR, 0)]
+                choice[k] = (RAIL_FLOOR, 0)
+        print("road map: %d rail incline cells blocked" % sum(k in choice for k in RAIL_INCLINES))
     if "no_trench" not in EXPERIMENT:
         trench_rule(world, grid, choice, kinds)
     world["extra_slopes"] = trench_ends(world, grid, choice, kinds) if "no_trenchends" not in EXPERIMENT else {}
@@ -1820,9 +2406,20 @@ def road_values(world):
           % (len(raised), flat, len(under)))
     surf_ids, world["roadsurf"] = {}, struct.pack("<i", 0)
     if SURF:
+        world["switches"] = level_switches(world)
         planes = surface_planes(world, grid, choice, kinds)
-        world["roadsurf"], surf_ids = roadsurf_lump(planes, world["plain_ids"])
+        world["roadsurf"], surf_ids = roadsurf_lump(planes, world["plain_ids"], world.get("lane_rot"))
+    if os.environ.get("CHI_POLISH_CELLDUMP"):     # Polish debug: col,row,radius,file -> pickle of the cells' levels
+        import pickle
+        c0, r0, rad, fn = os.environ["CHI_POLISH_CELLDUMP"].split(",")
+        c0, r0, rad = int(c0), int(r0), int(rad)
+        win = {(c, r): {"grid": grid.get((c, r)), "choice": choice.get((c, r)), "kind": kinds.get((c, r)),
+                        "plane": (planes.get((c, r)) if SURF else None), "sid": surf_ids.get((c, r)),
+                        "slope": world["extra_slopes"].get((c, r))}
+               for c in range(c0 - rad, c0 + rad + 1) for r in range(r0 - rad, r0 + rad + 1)}
+        pickle.dump(win, open(fn, "wb"))
     out = {}
+    road_cells = world.get("road_cells", set())
     for rz in range(world["rz_n"]):
         for rx in range(world["rx_n"]):
             vals = []
@@ -1831,7 +2428,8 @@ def road_values(world):
                     # a region's block holds its 60 x 60 cells with row 0 at its top (max z)
                     cell = (rx * 60 + b, (world["rz_n"] - 1 - rz) * 60 + a)
                     gy, t = choice[cell]
-                    sid, ang = surf_ids.get(cell, (GRASS_ID if t in ROAD_TYPES_GRASS else 0, 0))
+                    sid, ang = surf_ids.get(cell, (GRASS_ID if t in ROAD_TYPES_GRASS else 0,
+                                                   world.get("lane_rot", {}).get(cell, 0)))
                     if abs(gy) < HEIGHT_DEADBAND:                # kerbs / raised grass: street level
                         gy = 0
                     low = gy & 0xFFF8
@@ -1840,9 +2438,24 @@ def road_values(world):
                         sid, low = WATER_MODEL, wy & 0xFFF8          # water surface: waves, sinking
                         vals.append(ROAD_TOP | (sid << 16) | (low & 0xFFFF) | WATER_FLAG)
                         continue
-                    vals.append((ang << 30) | ROAD_TOP | (sid << 16) | (low & 0xFFFF) | ROAD_FLAG)
+                    if cell in road_cells:              # Miami: road / junction cells 0 in bits 26-29, bit 0 set
+                        vals.append((ang << 30) | (sid << 16) | (low & 0xFFFF) | 1)
+                    else:
+                        vals.append((ang << 30) | ROAD_TOP | (sid << 16) | (low & 0xFFFF) | ROAD_FLAG)
             out[(rx, rz)] = vals
     return out
+
+
+def rle_roadm(ids):
+    """roadm block: (s16 run length, u16 road id) runs over the region's 3600 cells, then -1."""
+    runs, k = bytearray(), 0
+    while k < len(ids):
+        j = k
+        while j < len(ids) and ids[j] == ids[k]:
+            j += 1
+        runs += struct.pack("<hH", j - k, ids[k])
+        k = j
+    return bytes(runs) + struct.pack("<hH", -1, 0)
 
 
 def rle_roadh(vals):
@@ -1879,7 +2492,7 @@ def spoolinfo_lump(base_sp_raw: bytes, base_sp: SpoolInfo, world, areas, slots, 
     # The per-barrel "PVS" buffer also receives the region's road data (roadm +
     # unpacked roadh = 3600 x (2 + 4) bytes), so it must be far bigger than our
     # empty PVS block (LA uses ~45 KB per barrel).
-    out += struct.pack("<4i", *slots) + struct.pack("<4i", *objs) + struct.pack("<4i", *([PVS_BUFFER] * 4))
+    out += struct.pack("<4i", *slots) + struct.pack("<4i", *objs) + struct.pack("<4i", *(__import__("polish_pvs").barrels() if __import__("polish_pvs").enabled() else [PVS_BUFFER] * 4))
     out += struct.pack("<i", len(offsets)) + struct.pack("<%dH" % len(offsets), *offsets)
     out += struct.pack("<i", len(records)) + records
     return bytes(out)
@@ -1896,8 +2509,40 @@ def map_lump(world, total_cell_data, chi_hdr: MapHeader, base_hdr: MapHeader):
 
 # ---------------------------------------------------------------------------
 
+_POLISH_PVS = {}
+
+
+def polish_pvs_masks(world):
+    """CHI_POLISH_PVS=d2: per-cell window masks from Driver 2's PVS (polish_pvs.py), else None."""
+    import polish_pvs
+    if not polish_pvs.enabled():
+        return None
+    if "masks" not in _POLISH_PVS:
+        d2 = polish_pvs.D2Pvs(D2_LEV)
+        across, down = ws.CELLS_ACROSS, ws.CELLS_DOWN
+        masks, st = polish_pvs.masks_for_grid(d2, world["radii"], CELL, across // 2 * CELL, down // 2 * CELL)
+        print("pvs: Driver 2 PVS on %d cells, window entries %d of %d kept (%.0f%%)" % (
+            st["cells"], st["kept_entries"], st["radius_entries"], 100.0 * st["kept_entries"] / max(st["radius_entries"], 1)))
+        _POLISH_PVS["masks"] = masks
+    return _POLISH_PVS["masks"]
+
+
+STABLE_PAGES = []           # stable shared texture pages of this conversion (polish_pages)
+
+
+def polish_overlay(base_lump: bytes) -> bytes:
+    """CHI_POLISH_MAP=1: Driver 2's Chicago map as the minimap (polish_map.py, C12; needs the
+    plugin to write polish_map.params into the CITY 3 entry of the exe table 0x8008B080)."""
+    import polish_map
+    if not polish_map.enabled():
+        return base_lump
+    data, prm = polish_map.lump(D2_LEV, base_lump)
+    print("minimap: Driver 2 overlay map, %d bytes, exe table words for CITY 3: %s" % (len(data), prm[:6]))
+    return data
+
+
 def convert(out_path: str):
-    chi = Lev.parse(open("work/d2_CHICAGO.LEV", "rb").read())
+    chi = Lev.parse(open(D2_LEV, "rb").read())
     base = Lev.parse(open("work/d1_LA.lev", "rb").read())
     cmem0, _ = inmem_models(chi)
     models0 = {**area_models(chi), **cmem0}
@@ -1918,13 +2563,28 @@ def convert(out_path: str):
     import texrepack
     texrepack.FORCED_AREAS = set(world["model_vis"].get(far_water_index(chi) + FAR_WATER, set())) if SHORE_WALLS else set()
     print("shore wall texture areas:", sorted(texrepack.FORCED_AREAS))
-    res = repack(chi, base, world["model_vis"], None if "no_near" in EXPERIMENT else world["model_near"])
+    cset = car_set()
+    cars = base if cset == "la" else (chi if cset == "d2" else Lev.parse(open(CAR_SET_LEVS[cset], "rb").read()))
+    csrc = "B" if cars is base else "K"           # texture source key of the car set (texrepack)
+    print("car set:", cset)
+    res = repack(chi, base, world["model_vis"], None if "no_near" in EXPERIMENT else world["model_near"], cars)
+    import polish_pages                              # CHI_POLISH_SHAREDPAGES=1 (Polish, C45)
+    if polish_pages.enabled():
+        STABLE_PAGES[:] = polish_pages.stable_indices(res)
+        print("stable pages: %s (%d); per-area pages: %s" % (STABLE_PAGES, len(STABLE_PAGES),
+              sorted({i for (_a, i) in res.area_page_content})))
     print("\n".join(res.report))
 
     # special (car) pages: renumber right after the repacked pages, keep content
+    if cset == "d2":                                 # Polish C42: Driver 1's pair order for the player cars
+        import polish_cars
+        order = polish_cars.special_order(chi, [p for p, _ in res.special])
+        blobs = dict(res.special)
+        res.special = [(p, blobs[p]) for p in order]
+        print("d2 cars: special pages in pair order %s (of %s)" % (order, sorted(blobs)))
     from texpages import read_pages
-    bti, _ = read_pages(base)
-    bnames = base.loadtime.get(5).data
+    bti, _ = read_pages(cars)
+    bnames = cars.loadtime.get(5).data
     res.special_details = {}
     special_new = {}
     nxt = max(res.pages) + 1
@@ -1934,7 +2594,7 @@ def convert(out_path: str):
                                     for d in bti.details[old]]
         for k, d in enumerate(bti.details[old]):
             w, h = d[4] or 256, d[5] or 256
-            res.remap[("B", old, k)] = (nxt, k, d[2], d[3], d[2], d[3], w, h, w, h)
+            res.remap[(csrc, old, k)] = (nxt, k, d[2], d[3], d[2], d[3], w, h, w, h)
         nxt += 1
 
     texnames, texinfo, tpages, num_pages = texture_lumps(res, special_new)
@@ -1954,6 +2614,26 @@ def convert(out_path: str):
     hist = collections.Counter(world["radii"].flatten().tolist())
     print("view radius per cell:", dict(sorted(hist.items())))
     world["plain_ids"] = plain_model_ids(models_lump)
+    road_lumps = {}
+    if ROADS:
+        import d1roads
+        # a first road map (no roads yet) says where the water is: roads there are left out
+        water = set()
+        for (rx, rz), vals in road_values(world).items():
+            for idx, v in enumerate(vals):
+                if (v >> 16) & 0x3FF == WATER_MODEL:
+                    water.add((rx * 60 + idx % 60, (world["rz_n"] - 1 - rz) * 60 + idx // 60))
+        net = d1roads.build(D2_LEV, world["across"] * CELL // ROAD_UNIT, world["down"] * CELL // ROAD_UNIT, water)
+        print("roads:", net["stats"])
+        road_lumps = net["lumps"]
+        # d1roads' cells are this grid's (col, row); a region block (rx, rz) holds rows
+        # (rz_n - 1 - rz) * 60 + a at index a * 60 + b (as road_values writes roadh)
+        rz_n = world["rz_n"]
+        world["lane_rot"] = net["rot"]
+        world["road_cells"] = set(net["cells"])
+        world["road_ids"] = {}
+        for (i, j), v in net["cells"].items():
+            world["road_ids"].setdefault((i // 60, rz_n - 1 - j // 60), [0xFFFF] * ROAD_CELLS_PER_REGION)[(i % 60) + (j % 60) * 60] = v
     world["road_values"] = road_values(world)
     vals = [v for vs in world["road_values"].values() for v in vs]
     hs = collections.Counter((((v & 0xFFF8) ^ 0x8000) - 0x8000) // 500 * 500 for v in vals)
@@ -1969,27 +2649,69 @@ def convert(out_path: str):
     spool = spoolinfo_lump(base_sp_raw, SpoolInfo.parse(base_sp_raw), world, areas, slots, objs, offsets, records, model_buf)
     mapl = map_lump(world, total_cd, MapHeader.parse(chi.loadtime.get(L_MAP).data), MapHeader.parse(base.loadtime.get(L_MAP).data))
 
-    # car models: base city's, with texture pages remapped
+    # car models: the car set's, with texture pages remapped
     fallback = res.remap[next(iter(res.remap))]
-    cm = bytearray(base.loadtime.get(L_CARMODELS).data)
+    cm = bytearray(cars.loadtime.get(L_CARMODELS).data)
+    if cset == "d2":
+        cm = bytearray(polish_cars.lump28(chi.loadtime.get(L_CARMODELS).data))
+    import polish_carmix                             # Polish C42 step 1: mixed set (D2 traffic/cop + the set's player cars)
+    slot_src = {}
+    if polish_carmix.enabled():
+        raw, slot_src = polish_carmix.lump28(chi.loadtime.get(L_CARMODELS).data, cars.loadtime.get(L_CARMODELS).data)
+        cm = bytearray(raw)
     ents = [struct.unpack_from("<3i", cm, 4 + 12 * i) for i in range(13)]
     cbase = 4 + 12 * 13
-    for e in ents:
+    for slot, e in enumerate(ents):
         for off in e:
             if off == -1:
                 continue
             size = struct.unpack_from("<i", cm, cbase + off)[0]
             a = cbase + off + 4
-            cm[a: a + size] = remap_polys(bytes(cm[a: a + size]), "B", res.remap, fallback)
-    # palettes: base city's, tpage field remapped for renumbered pages
-    pal = bytearray(base.loadtime.get(L_PALLET).data)
+            cm[a: a + size] = remap_polys(bytes(cm[a: a + size]), slot_src.get(slot) or csrc, res.remap, fallback)
+    # palettes: the car set's, tpage field remapped for renumbered pages
+    pal = bytearray(cars.loadtime.get(L_PALLET).data)
+    base_tex_by_name = {}
+    if cars is not base:
+        lti, _ = read_pages(base)
+        lnames = base.loadtime.get(5).data
+        for pg, dl in enumerate(lti.details):
+            for k, d in enumerate(dl):
+                base_tex_by_name.setdefault(lnames[d[1]: lnames.index(b"\0", d[1])], (pg, k))
+
+    def name_of_car_tex(pg, k):
+        if pg < 0 or pg >= len(bti.details) or k < 0 or k >= len(bti.details[pg]):
+            return None
+        d = bti.details[pg][k]
+        return bnames[d[1]: bnames.index(b"\0", d[1])]
     total = struct.unpack_from("<i", pal, 0)[0]
+    if cset == "d2" or polish_carmix.enabled():      # Polish C42: Driver 2 palettes -> Driver 1 format
+        from texrepack import model_texrefs
+        import polish_cars
+        mixed = polish_carmix.enabled()
+        keep = {tp for m in (polish_carmix.civ_models(chi) if mixed else polish_cars.models_for(chi))
+                for tp, _k in model_texrefs(m, {})}
+        def _r(tp, tn):
+            r = res.remap.get(("D" if mixed else csrc, tp, tn))
+            return (r[0], r[1]) if r else None
+        bpal = base.loadtime.get(L_PALLET).data      # the base city's pedestrian palettes (ARM1, JEANS1, ...)
+        peds = []
+        for q in range(4, 4 + 44 * struct.unpack_from("<i", bpal, 0)[0], 44):
+            a_, t_, tp_ = struct.unpack_from("<3i", bpal, q)
+            r = res.remap.get(("B", tp_, t_))
+            if r:
+                peds.append(struct.pack("<3i", a_, r[1], r[0]) + bpal[q + 12: q + 44])
+        pal = bytearray(polish_cars.palettes(chi.loadtime.get(L_PALLET).data, keep, _r, peds))
+        print("d2 cars: %d pedestrian palette entries kept" % len(peds))
+        total = 0
+        print("d2 cars: %d palette entries" % struct.unpack_from("<i", pal, 0)[0])
     p = 4
     for _ in range(total):
         palette, texnum, tpage = struct.unpack_from("<3i", pal, p)
         if palette == -1:
             break
-        r = res.remap.get(("B", tpage, texnum))
+        r = res.remap.get((csrc, tpage, texnum))
+        if r is None and cars is not base:        # pedestrian palettes (ARM1, CHEST1, ...): the base city's textures
+            r = res.remap.get(("B",) + base_tex_by_name.get(name_of_car_tex(tpage, texnum), (-1, -1)))
         if r:
             struct.pack_into("<3i", pal, p, palette, r[1], r[0])
         p += 12 + 32
@@ -2008,14 +2730,14 @@ def convert(out_path: str):
     inmem = LumpList(kind=36, d1=True, lumps=[
         Lump(L_MODELS, models_lump),
         Lump(L_SPOOL, spool),
-        Lump(L_ROADS, struct.pack("<i", 0)),
-        Lump(L_JUNCS, struct.pack("<i", 0)),
-        Lump(L_ROADBOUNDS, struct.pack("<i", 0)),
-        Lump(L_JUNCBOUNDS, struct.pack("<i", 0)),
+        Lump(L_ROADS, road_lumps.get(L_ROADS, struct.pack("<i", 0))),
+        Lump(L_JUNCS, road_lumps.get(L_JUNCS, struct.pack("<i", 0))),
+        Lump(L_ROADBOUNDS, road_lumps.get(L_ROADBOUNDS, struct.pack("<i", 0))),
+        Lump(L_JUNCBOUNDS, road_lumps.get(L_JUNCBOUNDS, struct.pack("<i", 0))),
         # far ground tiles index this table from model +0x2C (d1models.py)
         Lump(L_SUBDIV, subdiv_lump + water_sub),
         Lump(L_ROADSURF, world["roadsurf"]),
-        Lump(L_OVERLAY, base.inmem.get(L_OVERLAY).data),
+        Lump(L_OVERLAY, polish_overlay(base.inmem.get(L_OVERLAY).data)),
         Lump(L_CHAIR, base.inmem.get(L_CHAIR).data),
         Lump(L_LOD, lod_lump),
     ])
@@ -2029,6 +2751,15 @@ def convert(out_path: str):
     tmp = out_path + ".tmp"                 # atomic: test copies must never see a half-written level
     open(tmp, "wb").write(out)
     os.replace(tmp, out_path)
+    if STABLE_PAGES:                                 # Polish C45: stable page indices for the skip-resident patch
+        import json
+        open(out_path + ".stable.json", "w").write(json.dumps({"stable_pages": STABLE_PAGES}))
+    import polish_carmix
+    if polish_carmix.enabled():                      # Polish C42 step 1: civ damage rows (slots 0-2) for build_package
+        den = os.path.splitext(D2_LEV)[0] + ".DEN"
+        den = den if os.path.exists(den) else "work/d2_CHICAGO.DEN"     # night LEV: same cars, same DEN
+        open(out_path + ".dmg.bin", "wb").write(polish_carmix.damage_civ(den))
+        print("mixed car set: damage rows (civ verts 900 + civ polys 1260) ->", out_path + ".dmg.bin")
     print("wrote %s: %d bytes; models %d, objects %d (straddlers %d), regions %d, areas %d, pages %d"
           % (out_path, len(out), count, len(world["obj_list"]), len(world["straddlers"]),
              sum(1 for o in offsets if o != 0xFFFF), len(areas), num_pages))

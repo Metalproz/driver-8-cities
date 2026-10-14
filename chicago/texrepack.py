@@ -95,6 +95,9 @@ class Item:
 
     def halve(self):
         """Halve the longer side (nearest-neighbour). UVs are rescaled via remap."""
+        import polish_tex                     # CHI_POLISH_TEX=filter: box-filtered halving (Polish, C7)
+        if polish_tex.FILTER:
+            return polish_tex.halve(self)
         if self.w >= self.h and self.w > 1:
             self.rows = [row[::2] for row in self.rows]
             self.w = len(self.rows[0])
@@ -172,6 +175,9 @@ class Skyline:
 
 
 def pack_group(items: list, group) -> list[PackedPage]:
+    if group == "perm" and any(getattr(it, "twin", None) is not None for it in items):
+        import polish_cars                    # CHI_POLISH_CARPAGES=2 (Polish, C49): car damage twins at u+128
+        return polish_cars.pack_twins(items, group, pack_group, _free_spot, MAX_CLUTS, PAGE)
     order = sorted(items, key=lambda it: (-it.h, -it.w))
     pages: list[PackedPage] = []
     packers: list[Skyline] = []
@@ -199,9 +205,14 @@ FORCED_AREAS = set()        # set by convert.py: areas in which the shore walls 
 WATER_TEXTURE = (b"LASEA", "work/d1_MIAMI.lev", b"SEA")   # LA's 16x16 sea -> Miami's 64x64 (calmer, darker)
 
 
-def water_from_miami(items):
+NIGHT_WATER = 0.17            # night: Miami Night's rendered sea / Chicago night's (measured 0.161-0.181 per channel, no tint)
+
+
+def water_from_miami(items, night=False):
     """Give the water tile Miami's sea texture: the item keeps LA's source rectangle
-    (UVs are remapped from it); pixels, palette, size and name (SEA) change."""
+    (UVs are remapped from it); pixels, palette, size and name (SEA) change. At night the
+    palette is darkened (CHI_NIGHT_WATER): Miami Night dims its sea through Driver 1's night
+    flag, which Chicago's night leaves off (D2's night textures are dark already)."""
     import os
     if not WATER_TEXTURE or "la_water" in os.environ.get("CHI_EXPERIMENT", ""):
         return
@@ -217,6 +228,10 @@ def water_from_miami(items):
             if p in pages and names[noff: names.index(b"\0", noff)] == new_name:
                 it.rows, it.w, it.h = pages[p].rect(x, y, w, h), w, h
                 it.clut = pages[p].cluts[k]
+                f = float(os.environ.get("CHI_NIGHT_WATER", NIGHT_WATER))
+                if night and f < 1.0:
+                    it.clut = darken_clut(it.clut, f, rnd=True)
+                    print("night: water (SEA) darkened x%.2f" % f)
                 # the engine finds the sea by name (GetTextureInfo("SEA"), 0x8004219C) and
                 # draws water near the camera with that page/palette: LA has no "SEA",
                 # so it used a stale palette (pink water around a sinking car)
@@ -224,9 +239,72 @@ def water_from_miami(items):
                 return
 
 
-def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
-    """Gather used textures from both levels, keyed by group."""
+DAY_LEV = "work/d2_CHICAGO.LEV"
+
+
+def darken_clut(clut: bytes, f: float, rnd: bool = False) -> bytes:
+    """15-bit palette scaled by f; 0x0000 (transparent) and the STP bit kept, no colour turns
+    into 0x0000 (it would become transparent)."""
+    out = bytearray(clut)
+    for i in range(0, len(clut) - 1, 2):
+        c = clut[i] | clut[i + 1] << 8
+        if c == 0:
+            continue
+        r, g, b = c & 31, (c >> 5) & 31, (c >> 10) & 31
+        q = (lambda v: int(v * f + 0.5)) if rnd else (lambda v: int(v * f))   # rounding: fewer lost levels
+        r, g, b = q(r), q(g), q(b)
+        n = (c & 0x8000) | r | g << 5 | b << 10
+        if n == 0:
+            n = 0x0421
+        out[i], out[i + 1] = n & 0xFF, n >> 8
+    return bytes(out)
+
+
+def mean_brightness(rows, clut: bytes) -> float:
+    c16 = struct.unpack("<16H", clut[:32].ljust(32, bytes(1)))
+    tot = n = 0
+    for row in rows:
+        for v in row:
+            c = c16[v & 15]
+            if c:
+                tot += (c & 31) + ((c >> 5) & 31) + ((c >> 10) & 31)
+                n += 1
+    return tot / n if n else 0.0
+
+
+NIGHT_KEEP_RATIO = 0.8        # night textures this much darker than by day are D2's night designs: kept
+
+
+def night_same_as_day(chicago: Lev):
+    """Night conversion (D2's NLEVELS level): {texture name: day mean brightness}. D2 ships about
+    460 textures darkened for the night (0.1-0.4 of the day brightness) and keeps the others
+    (ground, roads, many props) as bright as by day, darkening them in its renderer; Driver 1 with
+    LA's night look does not, so those are darkened here. None for a day conversion."""
+    import os
+    src = os.environ.get("CHI_D2_LEV", DAY_LEV)
+    f = float(os.environ.get("CHI_NIGHT_DARKEN", "0.3"))
+    if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(DAY_LEV)) or f >= 1.0:
+        return None, f
+    day = Lev.parse(open(DAY_LEV, "rb").read())
+    dti, dpages = read_pages(day)
+    dnames = day.loadtime.get(5).data
+    out = {}
+    for p, pg in dpages.items():
+        for k, d in enumerate(dti.details[p]):
+            w, h = d[4] or 256, d[5] or 256
+            w, h = min(w, PAGE - d[2]), min(h, PAGE - d[3])
+            name = dnames[d[1]: dnames.index(b"\0", d[1])]
+            out[name] = mean_brightness(pg.rect(d[2], d[3], w, h), pg.cluts[k] if k < len(pg.cluts) else bytes(32))
+    return out, f
+
+
+def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev = None):
+    """Gather used textures from both levels, keyed by group. cars: the level whose car set
+    (car models, their textures and special pages) is used (convert.car_set; default the base
+    city's); its textures are source "K"."""
     cti, cpages = read_pages(chicago)
+    day_tex, dark_f = night_same_as_day(chicago)
+    ndark = 0
     bti, bpages = read_pages(base)
     cnames = chicago.loadtime.get(5).data
     bnames = base.loadtime.get(5).data
@@ -265,8 +343,10 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
     ball = {**area_models(base), **bmem}
     bmn = model_names(base)
     bused = set()
-    for m in car_models(base):
-        bused |= model_texrefs(m, ball)
+    if cars is None or cars is base:
+        cars = base
+        for m in car_models(base):
+            bused |= model_texrefs(m, ball)
     for n in ENGINE_MODEL_NAMES:
         if n in bmn and bmn.index(n) in ball:
             bused |= model_texrefs(ball[bmn.index(n)], ball)
@@ -289,13 +369,43 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
         w, h = min(w, PAGE - x), min(h, PAGE - y)
         pg = pages[t[0]]
         clut = pg.cluts[t[1]] if t[1] < len(pg.cluts) else bytes(32)
-        it = Item(src, t[0], t[1], name_at(names, noff), x, y, w, h, clut, pg.rect(x, y, w, h), ident)
+        rows = pg.rect(x, y, w, h)
+        nm = name_at(names, noff)
+        if src == "C" and day_tex is not None and day_tex.get(nm) and \
+                mean_brightness(rows, clut) >= NIGHT_KEEP_RATIO * day_tex[nm]:
+            clut = darken_clut(clut, dark_f)            # as bright as by day in D2: darkened
+            nonlocal ndark
+            ndark += 1
+        it = Item(src, t[0], t[1], nm, x, y, w, h, clut, rows, ident)
         it.ow, it.oh = w, h
         return it
 
     for t in sorted(bused):
         groups["perm"].append(make("B", bti, bpages, bnames, t))
-    water_from_miami(groups["perm"])
+    sti = bti
+    if cars is not base:                  # another city's car set: its car textures outside the special pages
+        sti, kpages = read_pages(cars)
+        knames = cars.loadtime.get(5).data
+        kspecial = {p for p, _ in sti.special}
+        kused = set()
+        import polish_cars                    # CHI_POLISH_D2CARS=1 (Polish, C42): only the mapped Driver 2 cars
+        import polish_carmix                  # CHI_POLISH_D2CARS=mixed: the car set's player cars only
+        for m in (polish_cars.models_for(cars) if polish_cars.enabled() else
+                  polish_carmix.player_models(cars) if polish_carmix.enabled() else car_models(cars)):
+            kused |= model_texrefs(m, {})
+        for t in sorted(kused):
+            if t[0] not in kspecial and t[0] in kpages and t[1] < len(sti.details[t[0]]):
+                groups["perm"].append(make("K", sti, kpages, knames, t))
+    import polish_carmix                      # mixed car set (Polish, C42 step 1): D2 traffic/cop textures, source "D"
+    if polish_carmix.enabled():
+        cspecial = {p for p, _ in cti.special}
+        dused = set()
+        for m in polish_carmix.civ_models(chicago):
+            dused |= model_texrefs(m, {})
+        for t in sorted(dused):
+            if t[0] not in cspecial and t[0] in cpages and t[1] < len(cti.details[t[0]]):
+                groups["perm"].append(make("D", cti, cpages, cnames, t))
+    water_from_miami(groups["perm"], night=day_tex is not None)
     for t in sorted(cused):
         it = make("C", cti, cpages, cnames, t)
         it.near = frozenset(tex_near.get(t, ()))
@@ -314,7 +424,9 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None):
         else:
             key = "perm" if (t[0] in cperm or t[0] not in member) else frozenset(member[t[0]])
         groups[key].append(it)
-    return groups, bti, base, csp
+    if day_tex is not None:
+        print("night: %d textures as bright as by day darkened x%.2f" % (ndark, dark_f))
+    return groups, sti, cars, csp
 
 
 def pack_area_aware(groups: dict, budget: int):
@@ -392,7 +504,7 @@ def _free_spot(occ, w, h):
     return int(xs[i]), int(ys[j])
 
 
-def pack_per_area(groups: dict, budget: int):
+def pack_per_area(groups: dict, budget: int, preload=None):
     """Area textures with per-area page contents. Every area streams its own
     copy of each page it lists (its own gfx block on disc), so a page index
     can hold different textures in different areas: two textures only need
@@ -408,7 +520,7 @@ def pack_per_area(groups: dict, budget: int):
     items = sorted(((it, frozenset(g)) for g, its in groups.items() if g != "perm" for it in its),
                    key=lambda e: (-len(e[1]), -(e[0].w * e[0].h)))
     pages = []          # {"areas": set, "occ": {area: bool map}, "cluts": {area: set}, "items": [...]}
-    lists = collections.Counter()
+    lists = collections.Counter(preload or {})      # preload: pages already listed per area (Polish shared pages)
     for it, S in items:
         best = None
         for pg in pages:
@@ -452,16 +564,47 @@ def pack_per_area(groups: dict, budget: int):
     return perm, pages, None
 
 
-def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None) -> RepackResult:
-    groups, bti, base_lev, csp = collect(chicago, base, model_areas, model_near)
+def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev = None) -> RepackResult:
+    # bti / base_lev below: the level whose special (car) pages are taken (the car set's)
+    groups, bti, base_lev, csp = collect(chicago, base, model_areas, model_near, cars)
     budget = SLOTS - CLUT_SLOT_COST - SPECIAL_LOADED
+    import polish_cars                        # CHI_POLISH_CARPAGES=1 (Polish, C42): traffic/cop car pages kept whole
+    fixed = polish_cars.fixed_pages(base_lev, [p for p, _ in bti.special]) if polish_cars.carpages_enabled() else []
+    fsrc = "B" if base_lev is base else "K"
+    if fixed:
+        for g in list(groups):
+            groups[g] = [it for it in groups[g] if not (it.src == fsrc and it.page in fixed)]
+            if not groups[g] and g != "perm":
+                del groups[g]
+        budget -= len(fixed)
+    if polish_cars.carpages_mode() == "2":
+        import polish_carmix
+        if polish_carmix.enabled():           # mixed: the traffic/cop textures are Driver 2's (source "D")
+            import texpages as _tp
+            cti_, _ = _tp.read_pages(chicago)
+            npairs = polish_cars.attach_twins(groups, chicago, "D", [p for p, _ in cti_.special])
+        else:
+            npairs = polish_cars.attach_twins(groups, base_lev, fsrc, [p for p, _ in bti.special])
+        print("car damage twins kept at u+128 (CHI_POLISH_CARPAGES=2): %d" % npairs)
+        if polish_carmix.enabled() and polish_carmix.HALF:   # mix2: the D2 car textures take the cost, not the city
+            nh = 0
+            for it in groups.get("perm", []):
+                if it.src == "D":
+                    for _ in range(polish_carmix.HALF):
+                        it.halve()
+                        if getattr(it, "twin", None) is not None:
+                            it.twin.halve()
+                    nh += 1
+            print("mixed car set: %d Driver 2 car textures halved x%d (twins alike)" % (nh, polish_carmix.HALF))
     shrunk = 0
     area_packed = None
+    import polish_pages                       # CHI_POLISH_SHAREDPAGES=1 (Polish, C45): stable shared pages
+    stable, stable_load = polish_pages.extract(groups) if (model_areas is not None and PER_AREA_CONTENT) else ({}, None)
     while model_areas is not None:
         if PER_AREA_CONTENT:
-            perm_pages, area_packed, failed = pack_per_area(groups, budget)
+            perm_pages, area_packed, failed = pack_per_area(groups, budget, stable_load)
             if area_packed is not None:
-                packed = {"perm": perm_pages}
+                packed = {"perm": perm_pages, **stable}
                 break
         else:
             packed, failed = pack_area_aware(groups, budget)
@@ -482,8 +625,10 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None) -> Repack
         # first), then those seen up close
         fail_areas = failed if failed != "perm" else frozenset()
         # (only textures that stay at least 16 pixels on the halved side)
-        max(cands, key=lambda it: (not (it.near & fail_areas) and max(it.w, it.h) >= 32,
-                                   it.w * it.h)).halve()
+        import polish_tex                     # CHI_POLISH_TEX=cost: halve by visual loss (Polish, C7)
+        (polish_tex.pick(cands, fail_areas) if polish_tex.COST else
+         max(cands, key=lambda it: (not (it.near & fail_areas) and max(it.w, it.h) >= 32,
+                                    it.w * it.h))).halve()
         shrunk += 1
     if model_areas is None:
         packed = {g: pack_group(items, g) for g, items in groups.items()}
@@ -536,13 +681,14 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None) -> Repack
         next_index += 1
         return idx
 
+    report_fixed = []
     order = ["perm"] + sorted((g for g in packed if g != "perm"), key=lambda g: sorted(g))
     for g in order:
         for pp in packed[g]:
             idx = take_index()
             page = Page()
             dets = []
-            for k, (it, x, y) in enumerate(sorted(pp.items, key=lambda e: (e[2], e[1]))):
+            for k, (it, x, y) in enumerate(sorted(pp.items, key=lambda e: (not getattr(e[0], "carfirst", False), e[2], e[1]))):
                 page.blit(x, y, it.rows)
                 page.cluts.append(it.clut)
                 dets.append((it.ident, it.name, x, y, it.w, it.h))
@@ -555,6 +701,25 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None) -> Repack
                 flags[idx] = 2
                 for a in g:
                     area_pages[a].append(idx)
+        if g == "perm" and fixed:             # whole car pages (polish_cars.fixed_pages), content and layout kept
+            from texpages import read_pages
+            _fti, fpages = read_pages(base_lev)
+            fnames = base_lev.loadtime.get(5).data
+            for fp in fixed:
+                idx = take_index()
+                src_pg = fpages[fp]
+                page = Page()
+                page.texels[:] = src_pg.texels
+                page.cluts = list(src_pg.cluts)
+                dets = []
+                for k, d in enumerate(bti.details[fp]):
+                    w, h = d[4] or 256, d[5] or 256
+                    dets.append((d[0], fnames[d[1]: fnames.index(b"\0", d[1])], d[2], d[3], w, h))
+                    remap[(fsrc, fp, k)] = (idx, k, d[2], d[3], d[2], d[3], w, h, w, h)
+                pages[idx], details[idx] = page, dets
+                flags[idx] = 1
+                permanent.append(idx)
+                report_fixed.append("%d->%d (%d textures)" % (fp, idx, len(dets)))
 
     area_page_content = {}
     for pg in (area_packed or []):
@@ -582,12 +747,48 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None) -> Repack
     report.append("downscaled textures: %d (%s)" % (shrunk, ", ".join(
         "%s %dx%d->%dx%d" % (it.name.decode("latin-1"), it.ow, it.oh, it.w, it.h)
         for items in groups.values() for it in items if it.shrink)))
+    if report_fixed:
+        report.append("car pages kept whole (CHI_POLISH_CARPAGES): " + ", ".join(report_fixed))
     report.append("permanent pages: %d (groups: %s)" % (nperm, {("perm" if g == "perm" else tuple(sorted(g))): len(v) for g, v in packed.items()}))
+    budget += len(fixed)                      # (the fixed car pages are in nperm)
     for a in sorted(area_pages):
         total = nperm + len(area_pages[a])
         report.append("area %2d: %d own pages -> %d resident of %d %s" % (
             a, len(area_pages[a]), total, budget, "OK" if total <= budget else "OVER by %d" % (total - budget)))
-    return RepackResult(pages, details, flags, permanent, special, dict(area_pages), remap, report, area_page_content)
+    res = RepackResult(pages, details, flags, permanent, special, dict(area_pages), remap, report, area_page_content)
+    if "keep_carpages" not in __import__("os").environ.get("CHI_EXPERIMENT", "").split(","):
+        renumber_permanent(res)
+    return res
+
+
+# Driver 1's car texture setup (0x8003BDC8, store 0x8003C218) writes one palette word per car
+# polygon to 0x800BEA04 + 600 * (page - 5) + 20 * texture: the car models' city textures must sit
+# on pages >= CAR_PAGE_BASE (LA: 5 and 6). Ours (permanent pages 0-2) wrote below that buffer,
+# into the texture page count table (0x800BE2F8), and every texture looked up by name on a page
+# >= 1 got a garbage sprite record (dark-square halos / brake lights). The permanent pages swap
+# indices with the pages at CAR_PAGE_BASE.. (Infrastructure 2026-10-13).
+CAR_PAGE_BASE = 5
+
+
+def renumber_permanent(res: RepackResult):
+    perm = sorted(res.permanent)
+    total = len(res.pages)
+    if not perm or perm[0] >= CAR_PAGE_BASE or CAR_PAGE_BASE + len(perm) > total:
+        return
+    m = {}
+    for i, pg in enumerate(perm):
+        t = CAR_PAGE_BASE + i
+        if pg != t:
+            m[pg], m[t] = t, pg
+    f = lambda i: m.get(i, i)
+    res.pages = {f(i): v for i, v in res.pages.items()}
+    res.details = {f(i): v for i, v in res.details.items()}
+    res.flags = {f(i): v for i, v in res.flags.items()}
+    res.permanent = [f(i) for i in res.permanent]
+    res.area_pages = {a: [f(i) for i in v] for a, v in res.area_pages.items()}
+    res.remap = {k: (f(v[0]),) + tuple(v[1:]) for k, v in res.remap.items()}
+    res.area_page_content = {(a, f(i)): v for (a, i), v in res.area_page_content.items()}
+    res.report.append("permanent pages renumbered for the car texture setup: %s" % sorted(m.items()))
 
 
 if __name__ == "__main__":

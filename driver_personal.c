@@ -372,6 +372,33 @@ static int s_overlay_on = 1, s_overlay_key_was_down;
 static int s_flip_key_was_down, s_flip_hold;
 static int32_t s_flip_state[10];   /* fpos[3], quat[4], pos[3] */
 static uint32_t s_fps_last_buf, s_fps_frames, s_fps_vblanks, s_fps, s_emu_pct;
+/* FPS stats for test tools (C40, 13.10.): the overlay's own numbers in mod memory, so testers
+ * read what the user sees. 8 words, allocated on the first frame (after the plugins' fixed
+ * blocks: 0x9F082310 with the Chicago slot on; the address is logged): +0 magic "FPS1",
+ * +4 FPS and +8 EMU % (the overlay's, updated once a second), +12 frames drawn and +16 VBlanks
+ * since boot (running sums), +20 one-second updates so far. */
+#define FPS_STATS_MAGIC 0x31535046u
+static uint32_t s_stats_addr, s_tot_frames, s_tot_vblanks, s_stats_updates;
+/* Stall ring for test tools (C45, 13.10.), right after the FPS block (+0x20 = 0x9F082330):
+ * +0 magic "STL1", +4 stalls (in game: >= STALL_VBLANKS VBlanks between two game frames),
+ * +8 longest gap (VBlanks), +12 stalls recorded (ring slot = (n - 1) % 8), +16 ring of 8 x 32 B:
+ * gap, player x, z (when the frame came), area before, area after, region before, region after,
+ * flags (1 = area loading flag 0x800969E8 set during the gap, 2 = spool sectors left 0x800971F8
+ * > 0 during the gap, 4 = a spool / CD read was active at the gap's start). */
+#define STALL_MAGIC     0x314C5453u
+#define STALL_VBLANKS   6u
+#define STALL_RING      8u
+/* Plane-selection record for test tools (C17 deck snap, 14.10.), after the stall ring (+0x130 = 0x9F082440):
+ * written by driver_chicago.c every VBlank via driver_personal_sel_debug: +0 magic "SEL1", +4 VBlank count,
+ * then the 6 words the caller passes (see driver_chicago.c surface_select_vblank). */
+#define SEL_MAGIC       0x314C4553u
+#define SEL_OFFSET      (0x20u + 16u + 32u * STALL_RING)
+#define STATS_BYTES     (SEL_OFFSET + 32u)
+#define AREA_WORD       0x800972C0u
+#define REGION_WORD     0x8009732Cu
+#define LOADING_FLAG    0x800969E8u
+#define SPOOL_LEFT      0x800971F8u
+static uint32_t s_gap, s_gap_flags, s_last_area, s_last_region, s_stalls, s_longest;
 static uint64_t s_fps_t0;
 
 /* runtime (local change, main.cpp): L3 + face button (3 = Triangle) */
@@ -475,13 +502,45 @@ static void flip_car(void) {
     host_osd_push("DEV: car flipped upright + repaired", 1500);
 }
 
-static void overlay_update(void) {
+void driver_personal_sel_debug(const uint32_t w[6]) {
+    if (!s_stats_addr)
+        return;
+    psx_mod_write_word(s_stats_addr + SEL_OFFSET, SEL_MAGIC);
+    psx_mod_write_word(s_stats_addr + SEL_OFFSET + 4u, s_tot_vblanks);
+    for (uint32_t i = 0; i < 6u; i++) psx_mod_write_word(s_stats_addr + SEL_OFFSET + 8u + 4u * i, w[i]);
+}
+
+void driver_personal_fps_tick(int caller) {
+    static int owner = -1;
+    if (owner < 0) owner = caller;
+    if (caller != owner) return;
     uint32_t buf = psx_mod_read_word(DRAWBUF_CUR);
+    int in_game = psx_mod_game_started();
+    uint32_t loading = psx_mod_read_word(LOADING_FLAG), left = psx_mod_read_word(SPOOL_LEFT);
     if (buf != s_fps_last_buf) {
         s_fps_last_buf = buf;
         s_fps_frames++;
+        s_tot_frames++;
+        uint32_t area = psx_mod_read_word(AREA_WORD), region = psx_mod_read_word(REGION_WORD);
+        if (in_game && s_gap >= STALL_VBLANKS && s_stats_addr && s_last_region != 0u) {   /* not boot / level load */
+            uint32_t slot = s_stats_addr + 0x20u + 16u + 32u * (s_stalls % STALL_RING);
+            const uint32_t rec[8] = { s_gap, psx_mod_read_word(PLAYER_POS), psx_mod_read_word(PLAYER_POS + 8u),
+                                      s_last_area, area, s_last_region, region, s_gap_flags };
+            for (int i = 0; i < 8; i++) psx_mod_write_word(slot + 4u * (uint32_t)i, rec[i]);
+            s_stalls++;
+            if (s_gap > s_longest) s_longest = s_gap;
+        }
+        s_gap = 0;
+        s_gap_flags = (loading || (int32_t)left > 0) ? 4u : 0u;
+        s_last_area = area;
+        s_last_region = region;
+    } else {
+        s_gap++;
+        if (loading) s_gap_flags |= 1u;
+        if ((int32_t)left > 0) s_gap_flags |= 2u;
     }
     s_fps_vblanks++;
+    s_tot_vblanks++;
     uint64_t t = now_ms();
     if (!s_fps_t0) s_fps_t0 = t;
     if (t - s_fps_t0 >= 1000u) {
@@ -490,7 +549,22 @@ static void overlay_update(void) {
         s_emu_pct = (uint32_t)(s_fps_vblanks / sec / 59.94 * 100.0 + 0.5);
         s_fps_frames = s_fps_vblanks = 0;
         s_fps_t0 = t;
+        s_stats_updates++;
     }
+    if (!s_stats_addr) {
+        s_stats_addr = psx_mod_alloc_guest_memory(STATS_BYTES, 16u);
+        fprintf(stdout, "driver.personal: FPS stats at 0x%08X\n", (unsigned)s_stats_addr);
+    }
+    if (s_stats_addr) {
+        const uint32_t w[6] = { FPS_STATS_MAGIC, s_fps, s_emu_pct, s_tot_frames, s_tot_vblanks, s_stats_updates };
+        for (int i = 0; i < 6; i++) psx_mod_write_word(s_stats_addr + 4u * (uint32_t)i, w[i]);
+        const uint32_t h[4] = { STALL_MAGIC, s_stalls, s_longest, s_stalls };
+        for (int i = 0; i < 4; i++) psx_mod_write_word(s_stats_addr + 0x20u + 4u * (uint32_t)i, h[i]);
+    }
+}
+
+static void overlay_update(void) {
+    driver_personal_fps_tick(0);
     if (!s_overlay_on)
         return;
     char text[256];

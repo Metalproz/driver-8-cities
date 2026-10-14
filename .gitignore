@@ -5,3 +5,9 @@ chicago/devtools/__pycache__/
 chicago/devtools/_pylib/
 *.pyc
 *.pkl
+
+# ripped game audio/data (copyrighted): never publish
+*.wav
+*.bin
+*.lev
+*.orig

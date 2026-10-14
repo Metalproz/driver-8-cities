@@ -1,9 +1,18 @@
-# driver.personal — local tools for Driver Recompiled
+# Driver: 8 Cities — Driver 2's cities in Driver 1 (recompiled)
 
-Personal, local-only additions to this install of
+Tools, converter, engine patches and notes for playing Driver 2's cities inside
 [driver-recomp](https://github.com/alexbeavs-ps1-ports/driver-recomp) v0.3.6
-(Driver, USA v1.1, SLUS-00842). Not part of the upstream project; not for
-publishing.
+(Driver, USA v1.1, SLUS-00842). Milestone 1 is Driver 2's Chicago in Los Angeles'
+slot; the end goal is all eight cities in one copy. Not part of the upstream project.
+
+**No game data is included.** You need your own Driver 1 and Driver 2 discs: the
+converter reads the original `.lev`/texture files from them and writes the
+converted level into `chicago/work/` (ignored by git). Code is GPL-3.0 (see
+`LICENSE`), matching driver-recomp; `runtime_patches/orig/` holds unmodified
+copies of upstream runtime sources for reference.
+
+Status, open issues and the plan: `ROADMAP.md`. Technical record of the port:
+`chicago/NOTES.md`. Curiosities found along the way: `FINDINGS.md`.
 
 ## Features (game launcher → Mods, package "Driver - Personal Tools")
 
@@ -79,7 +88,7 @@ An update replaces `CMakeLists.txt` and `game.toml`. Re-apply:
    (model table, cell buffer, primitive-buffer guard, area switch, render trap, spool guard), then run `generate` (with `--bios`)
    before `rebuild`.
 6. Add `driver_personal/driver_chicago.c` to `CODEGEN_SETUP_SOURCES` and run
-   `python driver_personal/chicago/build_package.py` to regenerate the driver.chicago package.
+   `python driver_personal/chicago/build_package.py --install --chicago driver_personal/chicago/work/chicago_d1.lev` to regenerate the driver.chicago package.
 
 If a future version changes the game executable, the Skip Intro patches fail
 their byte checks instead of patching the wrong code.

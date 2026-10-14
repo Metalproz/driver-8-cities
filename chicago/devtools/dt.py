@@ -203,7 +203,7 @@ def build_package(start=None, lev=None, pkg_dir=None):
         env["CHI_START"] = "%d,%d" % tuple(start)
     if pkg_dir:
         env["CHI_PKG_DIR"] = str(pkg_dir)
-    subprocess.run([sys.executable, "build_package.py", "--test-bigmiami", "work/test_bigmiami.lev",
+    subprocess.run([sys.executable, "build_package.py",
                     "--chicago", str(lev or lev_path())], cwd=CHI, env=env, check=True,
                    stdout=subprocess.DEVNULL)
 
@@ -260,16 +260,46 @@ def prepare(name, start=None, lev=None):
     return d
 
 
-def launch(name, port):
+def port_busy(port):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
+def launch(name, port, timeout=90):
+    """Start the copy's game and wait until ITS debug server answers. Never leaves an orphan:
+    on any failure (port already taken, no answer, game exited) the child is killed before
+    raising (13.10.: a lost Popen handle kept a game on the port for every later run)."""
+    if port_busy(port):
+        raise RuntimeError("debug port %d is already in use (another game?); not launching" % port)
     d = TEST / name
     for stale in ("psx_cps_exit_trace.json", "psx_last_run_report.json"):   # from an earlier run of this copy
         (d / stale).unlink(missing_ok=True)
     log = open(d / "run.log", "w")
+    # BELOW_NORMAL priority (C47, 14.10.): headless copies run uncapped (~300 %) and must not take CPU
+    # from the user's game; DT_NORMAL_PRIORITY=1 for measurement runs that need full priority
+    flags = 0 if os.environ.get("DT_NORMAL_PRIORITY") == "1" else getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
     p = subprocess.Popen([str(d / "Driver_Recompiled.exe"), "--headless", "--no-launcher",
                           "--memcard-dir", str(d / "cards"), "--debug-port", str(port)],
-                         cwd=d, stdout=log, stderr=subprocess.STDOUT)
-    time.sleep(3)
-    return p, Dbg(port=port)
+                         cwd=d, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+    dbg = Dbg(port=port)
+    t0 = time.time()
+    try:
+        while True:
+            time.sleep(1.0)
+            if p.poll() is not None:
+                raise RuntimeError("game exited (code %s) before its debug server answered" % p.returncode)
+            try:
+                dbg.cmd("frame")
+                return p, dbg
+            except (OSError, ValueError):
+                if time.time() - t0 > timeout:
+                    raise RuntimeError("debug server on port %d did not answer within %d s" % (port, timeout))
+    except BaseException:
+        p.kill()
+        raise
 
 
 def to_take_a_ride(d: Dbg):

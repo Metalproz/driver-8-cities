@@ -20,6 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dt  # noqa: E402
 
+FAST_FORWARD = "5"         # PSX_FAST_FORWARD_SPEED for the copies (hold Tab = 500 %)
+
 PORT = 4377
 SETTINGS = ["input.ini", "keybinds.ini", "settings.toml", "game_options.toml"]
 ROADMAP = dt.APP / "driver_personal" / "ROADMAP.md"
@@ -64,7 +66,10 @@ def main():
     dev = dt.APP / dt.BUILD
     lev = lev_override or dev / "mods" / "packages" / "driver.chicago" / "0.1.0" / "assets" / "chicago.lev"
     print("preparing %s (D2 %d, %d) from %s, level %s ..." % (name, start[0], start[1], dt.BUILD, lev))
-    d = dt.prepare("play_" + name, start=start, lev=lev if lev.exists() else None)
+    # a probe on another build (probes.json "build") gets its own copy: prepare() only
+    # replaces an exe that is older or differs in size, so a shared copy could keep it
+    copy = "play_" + name + ("" if dt.BUILD == "build-dev" else "_" + dt.BUILD.replace("build-", ""))
+    d = dt.prepare(copy, start=start, lev=lev if lev.exists() else None)
     for f in SETTINGS:
         if (dev / f).exists():
             shutil.copy2(dev / f, d / f)
@@ -75,9 +80,12 @@ def main():
                         "New-Item -ItemType Junction -Path '%s' -Target '%s' | Out-Null" % (link, dt.APP / "dev")],
                        check=True)
     log = open(d / "run.log", "w")
+    import os
+    env = dict(os.environ)
+    env.setdefault("PSX_FAST_FORWARD_SPEED", FAST_FORWARD)   # hold Tab: 5x (user, menus / loading)
     subprocess.Popen([str(d / "Driver_Recompiled.exe"), "--no-launcher",
                       "--memcard-dir", str(d / "cards"), "--debug-port", str(PORT)],
-                     cwd=d, stdout=log, stderr=subprocess.STDOUT,
+                     cwd=d, stdout=log, stderr=subprocess.STDOUT, env=env,
                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     print("game window starting; going to the Take a Ride city select (don't press anything for ~15 s) ..."
           if not auto else "game window starting; driving the menus to Take a Ride (don't press anything for ~1 min) ...")

@@ -390,5 +390,82 @@
    550507
   ],
   "note": "QA-1 height sweep: DROP -978 at street level near unevenn (C21 area), area 0, region 8,3 (pass 1; rerun showed a flip there)"
+ },
+ "exp_wallpin": {
+  "d2": [
+   -448898,
+   207933
+  ],
+  "note": "EXP bughunt: car drives into a building side at full throttle and stays pinned; damage rises ~1000 per 10 s with no reverse (wreck only after ~4 min); blackroofs area"
+ },
+ "exp_wallslide": {
+  "d2": [
+   -186258,
+   -329202
+  ],
+  "note": "EXP bughunt: curved trench wall, cross + zigzag steering: car stops and bounces, damage +~1000 per 10 s (C23 area)"
+ },
+ "exp_b0crash": {
+  "d2": [
+   -422519,
+   -464319
+  ],
+  "note": "EXP: teleport poke to D1 -400001,2000,-700000 (area 16) on full11 build-test: BIOS B0 call fn 0x17 from 0x80077AC0 (jal 0x8007F544 stub, t2=0xB0) is unhandled -> FAIL-FAST unknown dispatch addr=0xB0; same caller as the CITY=7 crash (DISPATCH FATAL 0x7776888E)"
+ },
+ "l_down_e": {
+  "d2": [
+   -101562,
+   106946
+  ],
+  "note": "user slow spot: downtown street under the L (east end)"
+ },
+ "l_down_w": {
+  "d2": [
+   -147698,
+   106096
+  ],
+  "note": "user slow spot: downtown street under the L (west end)"
+ },
+ "c43_ground": {
+  "d2": [
+   23662,
+   54070
+  ],
+  "note": "C43: black ground (nothing drawn) + red smear + rainbow kerb right at the start, car facing north (FAN l_down_e confusion: this is D2 23662,54070, not D1)"
+ },
+ "fps_drop_1": {
+  "d2": [
+   -41570,
+   -339995
+  ],
+  "note": "C40: FPS 14 / EMU 88%, wide view across an intersection to the downtown skyline (tall buildings) + 4 traffic cars, hdg 185, area 3 reg 73 (user, probe fps lightpvs, 210338)"
+ },
+ "fps_drop_2": {
+  "d2": [
+   -53883,
+   -363594
+  ],
+  "note": "C40: FPS 15 / EMU 85%, hdg 92, area 6 reg 72 (user, probe fps lightpvs, 210359). The palette/VRAM corruption in that shot appeared suddenly and is already fixed (user, 2026-10-14); use only as an FPS spot"
+ },
+ "diag_embank": {
+  "d2": [
+   -112670,
+   609166
+  ],
+  "note": "C37 diagonals probe: embankments with diagonal step edges (drive E/S/W)"
+ },
+ "c28_bank": {
+  "d2": [
+   -180864,
+   558771
+  ],
+  "note": "C28: INSIDE the NW lakeshore bank strip (stored 1176 below street, col west of the lake). b15: car stuck under the water line; c17b (CHI_BANK_WATER): strip is water -> car drowns at once"
+ },
+ "c28_bank_w": {
+  "d2": [
+   -182001,
+   558771
+  ],
+  "note": "C28: street cell just WEST of the bank strip c28_bank; drive EAST (1 cell) into the strip/lake. b15: drop + stuck; c17b: drowning"
  }
 }

@@ -1,7 +1,50 @@
 {
-  "_comment": "Current probes for the user (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago). Desktop shortcuts and the laptop copy follow this list: python driver_personal/probes.py sync",
-  "full planes": {
-    "lev": "work/var_c20_full4.lev",
-    "what": "user's full-planes concept + code-review fixes + own plane first; trench ends (C20), ramps (C17), far water (C19)"
+  "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop).",
+  "city selector": {
+    "lev": "work/var_roads_b16b_day.lev",
+    "night": "work/var_roads_b16b_night.lev",
+    "build": "build-test",
+    "slot": true,
+    "menu": "pages",
+    "what": "Two-page city selector: page 1 'Driver 1 cities' (Miami, SF, LA, NY, Newtown, Interview, Training), page 2 'Driver 2 cities' (Chicago day/night; Havana/Las Vegas/Rio greyed). Chicago = b16b: FPS improvement, Miami's cars by day (correct damage dents + damaged-car textures), D2-style night, minimap centred, own sky, trench-curve flip fixed, more of D2's road network with traffic; Play Again/quit freezes fixed on all maps; b16: lakeshore fixes (cars drown properly instead of getting stuck under the street; raised Lake Shore Drive deck joined up)."
+  },
+  "sky d2": {
+    "lev": "work/var_roads_b16b_day.lev",
+    "night": "work/var_roads_b16b_night.lev",
+    "build": "build-test",
+    "slot": true,
+    "menu": "pages",
+    "what": "C46 sky test: same as 'city selector' (b16) but Chicago's sky built like Driver 2's: the skyline band starts higher (larger, less squeezed) and D2's mirrored reflection rows appear below the horizon. Compare the sky with 'city selector'.",
+    "env": {
+      "CHI_POLISH_SKY": "mirror",
+      "CHI_POLISH_SKY_TOP": "42"
+    }
+  },
+  "smooth loading": {
+    "lev": "work/var_polish_c45_corr4b15_day.lev",
+    "night": "work/var_roads_b16b_night.lev",
+    "build": "build-test",
+    "slot": true,
+    "menu": "pages",
+    "what": "C45 loading test: Chicago DAY with the new corridor chunk layout (b15 + corridors). In route tests it cut loading stalls from 9 to 1 on 6 routes, but at one area switch a dark triangle can flash against the sky for about a second. Judge: is driving smoother (fewer short freezes) and is the flash acceptable? Night = b16b."
+  },
+  "diagonals": {
+    "lev": "work/var_c37_diag_day.lev",
+    "night": "work/var_roads_b16b_night.lev",
+    "build": "build-test",
+    "slot": true,
+    "menu": "pages",
+    "what": "C37 diagonal surfaces test: Chicago DAY where diagonal embankments, trench walls and bridge-deck edges were square steps; now 165 cells use diagonal halves (D2-like). Judge: do diagonal edges look/drive right (no staircase bumps)? Night = b16b."
+  },
+  "d2 cars": {
+    "lev": "work/var_polish_c42_mix3_day.lev",
+    "night": "work/var_roads_b16b_night.lev",
+    "build": "build-test",
+    "slot": true,
+    "menu": "pages",
+    "what": "Driver 2 cars + Chicago music: Chicago DAY traffic and police are Driver 2's own Chicago cars (your car stays a Miami car); Chicago plays Driver 2's own Chicago music (day track by day, night track at night); other cities keep their music. Known: a D2 car's front wheel can look too big/off its arch (wheel tables, next engine step). Night traffic = b15 (LA cars).",
+    "env": {
+      "CHI_POLISH_MUSIC": "1"
+    }
   }
 }

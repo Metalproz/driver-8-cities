@@ -18,7 +18,7 @@ Personal use only: the disc image and BIOS are the user's own dumps.
 """
 from __future__ import annotations
 
-import datetime, json, shutil, struct, subprocess, sys
+import datetime, json, os, shutil, struct, subprocess, sys
 from pathlib import Path
 
 APP = Path(__file__).resolve().parent.parent
@@ -103,6 +103,8 @@ rem Driver with Chicago (dev client copy): normal downtown start. Dev mode: F9 s
 cd /d "%~dp0"
 ''' + USE_PKG.format(slug="dev") + r'''powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" default
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fixpaths.ps1"
+rem hold Tab = fast forward at 500 % (menus / loading screens)
+if not defined PSX_FAST_FORWARD_SPEED set PSX_FAST_FORWARD_SPEED=5
 start "" "%~dp0Driver_Recompiled.exe" --memcard-dir "%~dp0saves"
 '''
 
@@ -112,25 +114,48 @@ cd /d "%~dp0"
 ''' + USE_PKG + r'''powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0spot.ps1" %*
 if errorlevel 1 (pause & exit /b 1)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0fixpaths.ps1"
+rem hold Tab = fast forward at 500 % (menus / loading screens)
+if not defined PSX_FAST_FORWARD_SPEED set PSX_FAST_FORWARD_SPEED=5
 start "" "%~dp0Driver_Recompiled.exe" --memcard-dir "%~dp0saves"
 '''
 SPOT_BAT = SPOT_BAT_T.replace("{title}", "dev client copy").replace("{slug}", "dev")
 
 PROBES_FILE = APP / "driver_personal" / "probes.json"
 PROBE_PKG_BUILD = APP / "devtest" / "_probe_pkgs"
+PROBE_ROOT_NAME = "Driver Probe Tests"   # user 2026-10-12: probes live in their own folder, never in the dev client copy
+
+# a probe copy has its package installed directly (no packages_store)
+PROBE_PLAY_BAT = PLAY_BAT.replace(USE_PKG.format(slug="dev"), "").replace("(dev client copy)", "(PROBE {name})")
+PROBE_SPOT_BAT = SPOT_BAT_T.replace(USE_PKG, "")
+# the probes share one disc image in '<root>/_disc' (747 MB) instead of one per probe
+PROBE_FIXPATHS_PS1 = (FIXPATHS_PS1
+    .replace(r"$fw = $here -replace '\\', '/'",
+             r"$fw = $here -replace '\\', '/'" + "\n" + r"$dw = (Split-Path -Parent $here) -replace '\\', '/'")
+    .replace(r'"$fw/disc/disc1.bin"', r'"$dw/_disc/disc1.bin"')
+    .replace(r"""('path = "' + $fw + '/disc/disc1.bin"')""", r"""('path = "' + $dw + '/_disc/disc1.bin"')"""))
+
+
+def all_probes() -> dict:
+    """Every current probe in probes.json: name -> slug, level, build folder, description."""
+    if not PROBES_FILE.exists():
+        return {}
+    out = {}
+    for name, p in json.loads(PROBES_FILE.read_text(encoding="utf-8")).items():
+        if name.startswith("_"):
+            continue
+        lev = APP / "driver_personal" / "chicago" / p["lev"]
+        if lev.exists():
+            out[name] = {"slug": "probe_" + "".join(c if c.isalnum() else "_" for c in name), "lev": lev,
+                         "build": APP / p.get("build", "build-dev"), "what": p.get("what", ""),
+                         "slot": bool(p.get("slot")),   # slot = Chicago as its own Take a Ride row (CHI_SLOT=1)
+                         "night": APP / "driver_personal" / "chicago" / p["night"] if p.get("night") else None,   # slot: night LEV (CHI_NIGHT)
+                         "menu": p.get("menu"),   # slot: "pages" = two-page Take a Ride menu (CHI_MENU_PAGES=1)
+                         "env": {k: str(v) for k, v in p.get("env", {}).items()}}   # extra package-build switches
+    return out
 
 
 def probes() -> dict:
-    if not PROBES_FILE.exists():
-        return {}
-    data = json.loads(PROBES_FILE.read_text(encoding="utf-8"))
-    out = {}
-    for name, p in data.items():
-        lev = APP / "driver_personal" / "chicago" / p["lev"] if not name.startswith("_") else None
-        if lev is not None and lev.exists():
-            out[name] = {"slug": "probe_" + "".join(c if c.isalnum() else "_" for c in name), "lev": lev,
-                         "what": p.get("what", "")}
-    return out
+    return {}                                   # the dev client copy carries no probes any more (see publish_probes)
 
 
 def copy_tree(src: Path, dst: Path, dry: bool) -> int:
@@ -190,9 +215,147 @@ def source_stamp() -> tuple[str, float]:
     return stamp, max(f.stat().st_mtime for f in files)
 
 
+def probe_package(p: dict) -> Path:
+    built = PROBE_PKG_BUILD / p["slug"] / "driver.chicago" / "0.1.0"
+    lev_out = built / "assets" / "chicago.lev"
+    # the package's manifest carries the [[patch]] list (dirty code pages run interpreted from guest RAM), so it
+    # must be rebuilt when the level, the patch list, the package builder or the probe's exe changes (C36, 21:28)
+    deps = [p["lev"], p.get("night") or p["lev"], APP / "driver_personal" / "chicago" / "exe_patches.py",
+            APP / "driver_personal" / "chicago" / "build_package.py", p["build"] / "Driver_Recompiled.exe"]
+    newest = max(f.stat().st_mtime for f in deps if f.exists())
+    env_stamp = json.dumps(p.get("env", {}), sort_keys=True)
+    stamp_file = built.parent / "probe_env.json"
+    same_env = stamp_file.exists() and stamp_file.read_text(encoding="utf-8") == env_stamp
+    if not lev_out.exists() or lev_out.stat().st_mtime < newest or not same_env:
+        sys.path.insert(0, str(APP / "driver_personal" / "chicago" / "devtools"))
+        import dt
+        shutil.rmtree(built.parent, ignore_errors=True)
+        old = {k: os.environ.get(k) for k in ("CHI_SLOT", "CHI_NIGHT", "CHI_MENU_PAGES", *p.get("env", {}))}
+        os.environ.update(p.get("env", {}))
+        if p.get("slot"):
+            os.environ["CHI_SLOT"] = "1"
+            if p.get("night"):
+                os.environ["CHI_NIGHT"] = str(p["night"])
+            if p.get("menu") == "pages":
+                os.environ["CHI_MENU_PAGES"] = "1"
+        try:
+            dt.build_package(lev=p["lev"], pkg_dir=built)
+            stamp_file.write_text(env_stamp, encoding="utf-8")
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    return built.parent
+
+
+def publish_probes(dry: bool, spots_only: bool) -> None:
+    """One self-contained copy per probe in '<Desktop>/Driver Probe Tests/<name>': the probe's own exe (build-dev
+    or a test build, frozen at publish time) + build-dev's runtime + the probe's Chicago package + launchers.
+    OneDrive syncs it to the laptop; the dev client copy is never touched. spots_only (the scheduled task): only
+    refresh the spot list, so a test build that is still being worked on never reaches a published probe."""
+    root = desktop() / PROBE_ROOT_NAME
+    plist = all_probes()
+    table = spot_table()
+    for name, p in plist.items():
+        dest = root / name
+        if running_from(dest):
+            print("probe %r is running, skipped" % name)
+            continue
+        if spots_only:
+            if dest.exists() and not dry:
+                (dest / "spots.txt").write_text(table, encoding="utf-8")
+            continue
+        exe_dir = p["build"] if (p["build"] / "Driver_Recompiled.exe").exists() else DEV
+        copied = 0
+        for f in RUNTIME_FILES:
+            src = exe_dir / f if (exe_dir / f).exists() else DEV / f
+            if src.exists():
+                copied += copy_file(src, dest / f, dry)
+        chi_pkg = DEV / "mods" / "packages" / "driver.chicago"
+        for d in RUNTIME_DIRS:
+            for src in (DEV / d).rglob("*"):
+                if src.is_file() and chi_pkg not in src.parents:
+                    copied += copy_file(src, dest / d / src.relative_to(DEV / d), dry)
+        if not dry:
+            active = dest / "mods" / "packages" / "driver.chicago"
+            shutil.rmtree(active, ignore_errors=True)
+            shutil.copytree(probe_package(p), active, dirs_exist_ok=True)
+            st = dest / "mods" / "state.toml"
+            t = st.read_text(encoding="utf-8").replace(     # old engine test (Miami copy), never for play
+                'id = "test-bigmiami"\nenabled = true', 'id = "test-bigmiami"\nenabled = false')
+            st.write_text(t, encoding="utf-8")
+            if p.get("slot"):                               # Chicago in its own row: chicago-slot instead of chicago-la
+                t = st.read_text(encoding="utf-8").replace(
+                    'id = "chicago-la"\nenabled = true',
+                    'id = "chicago-slot"\nenabled = true\n[feature.values]\ncity = "la"')
+                assert 'id = "chicago-slot"' in t, "chicago-la feature block not found in state.toml"
+                st.write_text(t, encoding="utf-8")   # row 3 = original LA, row 5 = Chicago
+        for f in DISC_FILES:
+            copied += copy_file(APP / "disc" / f, root / "_disc" / f, dry)
+        copied += copy_file(BIOS, dest / "bios" / BIOS.name, dry)
+        for src in DEVTOOLS:
+            copied += copy_file(src, dest / "devtools" / src.name, dry)
+        if not (dest / "saves").exists():                  # own saves, started from the PC's; never copied back
+            for src in (APP / "saves").glob("*.mcd"):
+                copied += copy_file(src, dest / "saves" / src.name, dry)
+        if not dry:
+            (dest / "fixpaths.ps1").write_text(PROBE_FIXPATHS_PS1, encoding="utf-8")
+            (dest / "spot.ps1").write_text(SPOT_PS1, encoding="utf-8")
+            (dest / "spots.txt").write_text(table, encoding="utf-8")
+            (dest / "devtools").mkdir(exist_ok=True)
+            (dest / "CLAUDE.md").write_text(LAPTOP_CHAT, encoding="utf-8")
+            title = "PROBE '%s' (%s)" % (name, p["what"][:80])
+            (dest / "Play probe.bat").write_text(PROBE_PLAY_BAT.replace("{name}", name).replace("\n", "\r\n"),
+                                                 encoding="ascii", errors="replace")
+            (dest / "Play probe at spot.bat").write_text(
+                PROBE_SPOT_BAT.replace("{title}", title).replace("\n", "\r\n"), encoding="ascii", errors="replace")
+            exe_t = datetime.datetime.fromtimestamp((dest / "Driver_Recompiled.exe").stat().st_mtime)
+            (dest / "VERSION.txt").write_text(
+                "PROBE '%s' published %s\nwhat: %s\ngame exe: %s (from %s, frozen at publish time)\nlevel: %s\n\n"
+                "Start: 'Play probe.bat' (downtown) or 'Play probe at spot.bat' (pick a test spot; then Take a Ride ->"
+                " Los Angeles = Chicago). F9 snapshots go to dev\\dumps here. Own saves, separate from the dev client.\n"
+                % (name, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), p["what"],
+                   exe_t.strftime("%Y-%m-%d %H:%M"), exe_dir.name, p["lev"].name), encoding="utf-8")
+        print("probe %r -> %s (%s exe): %.1f MB %s" % (name, dest, exe_dir.name, copied / 1e6,
+                                                      "to copy" if dry else "copied"))
+    if not dry and not spots_only and root.exists():
+        for old in root.iterdir():                          # probes no longer in probes.json
+            if old.is_dir() and old.name not in plist and old.name != "_disc" and not running_from(old):
+                dumps = old / "dev" / "dumps"                # the user's snapshots survive the probe
+                for snap in (dumps.iterdir() if dumps.exists() else []):
+                    keep = APP / "dev" / "dumps" / ("probe_%s_%s" % (old.name.replace(" ", "_"), snap.name))
+                    if snap.is_dir() and not keep.exists():
+                        shutil.copytree(snap, keep)
+                        print("kept user snapshot:", keep.name)
+                shutil.rmtree(old, ignore_errors=True)
+                for dp, dns, fns in os.walk(old, topdown=False):   # OneDrive can leave empty dirs behind
+                    if not fns:
+                        try:
+                            os.rmdir(dp)
+                        except OSError:
+                            pass
+                print("removed outdated probe folder:", old.name)
+        slugs = {p["slug"] for p in plist.values()}
+        for st in (PROBE_PKG_BUILD.iterdir() if PROBE_PKG_BUILD.exists() else []):   # lean disk: stale package builds
+            if st.is_dir() and st.name not in slugs:
+                shutil.rmtree(st, ignore_errors=True)
+                print("removed stale probe package build:", st.name)
+        (root / "README.txt").write_text(
+            "Probe tests: test levels / test builds that are NOT in the dev client yet. One folder per probe,\n"
+            "each self-contained (own exe, own saves). Use 'Play probe at spot.bat' inside a folder.\n\n" +
+            "".join("- %s: %s\n" % (n, p["what"]) for n, p in plist.items()), encoding="utf-8")
+
+
 def main():
     dry = "--dry-run" in sys.argv
     auto = "--if-changed" in sys.argv
+    if "--probes" in sys.argv:
+        publish_probes(dry, spots_only=False)
+        return
+    if auto:
+        publish_probes(dry, spots_only=True)
     dest = desktop() / NAME
     if auto:
         stamp, newest = source_stamp()

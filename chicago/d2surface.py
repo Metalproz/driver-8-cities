@@ -130,6 +130,40 @@ class Surface:
             return -d - int((lx + ly) / b)
         return 0
 
+    def switches(self, x, z):
+        """Driver 2's own level switch heights at (x, z) (sdGetCell): None for a cell with
+        one level, else [(height, threshold), ...] top level first; the wheel leaves a
+        level for the next lower one when -256 - wheel y > threshold, i.e. once its height
+        (y up, like height()) is below -(256 + threshold). The last level has None."""
+        buf = self._buffer(x, z)
+        if buf is None:
+            return None
+        cx, cy = (x - 512) & 1023, (z - 512) & 1023
+        e, = struct.unpack_from("<h", buf, 8 + 2 * ((((x - 512) >> 10) & 63) + (((z - 512) >> 10) & 63) * 64))
+        if e == -1 or (e & 0x6000) != 0x2000:
+            return None
+        lo, = struct.unpack_from("<h", buf, 4)
+        p, pairs = (lo & 0xFFFF) + 2 * (e & 0x1FFF), []
+        for _ in range(16):
+            if p + 4 > len(buf):
+                return None
+            thr, ent = struct.unpack_from("<hh", buf, p)
+            pairs.append((None if thr == -0x8000 else thr, ent))
+            if thr == -0x8000:
+                break
+            p += 4
+        out = []
+        for thr, ent in pairs:
+            seen = 0
+            while ent & 0x4000 and seen < 8:
+                ent2, _ = self._bsp(buf, ent & 0x3FFF, cx, cy)
+                ent = -1 if ent2 == 0x7FFF else ent2; seen += 1
+            pl = self._plane(buf, ent) if ent >= 0 else None
+            if pl is None:
+                return None                       # a level without a plane: no usable list
+            out.append((self.height(pl, x, z), thr))
+        return out if len(out) > 1 else None
+
     def levels(self, x, z):
         """All surfaces at (x, z): [(height, type)], y down (street ~ 0)."""
         buf = self._buffer(x, z)

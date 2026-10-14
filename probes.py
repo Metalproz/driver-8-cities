@@ -6,6 +6,8 @@
 
 A probe = the dev client's exe + a test level, started at a chosen spot (spotplay.py --lev).
 The laptop copy gets the same probes from publish_playable.py (it reads probes.json too).
+Optional "build": run that build's exe instead (e.g. "build-test" for an exe/plugin fix not yet
+in build-dev); desktop only, the laptop copy mirrors build-dev and skips such probes.
 """
 from __future__ import annotations
 
@@ -18,8 +20,8 @@ CHI = HERE / "chicago"
 PROBES = HERE / "probes.json"
 PREFIX = "Driver (probe - "
 
-BAT = ('@echo off\r\nrem PROBE "{name}": {what}\r\nrem = dev-client exe + {lev}. Separate test copy; the dev client is untouched.\r\n'
-       'cd /d "%~dp0driver_personal\\chicago\\devtools"\r\n'
+BAT = ('@echo off\r\nrem PROBE "{name}": {what}\r\nrem = {exe} exe + {lev}. Separate test copy; the dev client is untouched.\r\n'
+       'cd /d "%~dp0driver_personal\\chicago\\devtools"\r\n{env}'
        'if "%~1"=="" (python spotplay.py --lev {lev}) else (python spotplay.py %1 --lev {lev})\r\npause\r\n')
 
 
@@ -48,14 +50,21 @@ def sync():
         if not (CHI / p["lev"]).exists():
             print("MISSING level for probe %r: %s (skipped)" % (name, p["lev"]))
             continue
+        build = p.get("build", "build-dev")
+        if not (APP / build / "Driver_Recompiled.exe").exists():
+            print("MISSING exe for probe %r: %s (skipped)" % (name, build))
+            continue
+        env = "" if build == "build-dev" else "set CHI_TEST_BUILD=%s\r\n" % build
         bat = APP / (PREFIX + name + ").bat")
-        bat.write_text(BAT.format(name=name, what=p.get("what", ""), lev=p["lev"]), encoding="ascii", newline="")
-        make_lnk(desk / (PREFIX + name + ").lnk"), bat)
-        print("probe ok:", name, "->", p["lev"])
+        bat.write_text(BAT.format(name=name, what=p.get("what", ""), lev=p["lev"], exe=build, env=env),
+                       encoding="ascii", newline="")
+        print("probe ok:", name, "->", p["lev"], "" if build == "build-dev" else "(%s exe)" % build)
     for f in list(APP.glob(PREFIX + "*).bat")) + list(desk.glob(PREFIX + "*).lnk")):
-        if f.stem not in want:
+        if f.stem not in want or f.suffix == ".lnk":    # the desktop gets the "Driver Probe Tests" folder instead
             f.unlink()
-            print("removed outdated:", f.name)
+            print("removed:", f.name)
+    # user 2026-10-12: every probe as a self-contained copy in <Desktop>/Driver Probe Tests (OneDrive -> laptop)
+    subprocess.run([sys.executable, str(HERE / "publish_playable.py"), "--probes"], check=True)
 
 
 if __name__ == "__main__":
@@ -64,4 +73,4 @@ if __name__ == "__main__":
         sync()
     else:
         for name, p in load().items():
-            print("%-14s %s  (%s)" % (name, p["lev"], p.get("what", "")))
+            print("%-14s %s%s  (%s)" % (name, p["lev"], " [%s]" % p["build"] if "build" in p else "", p.get("what", "")))

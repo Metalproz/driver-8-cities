@@ -81,6 +81,44 @@ def split_polys(m: Model):
     return out
 
 
+# CHI_POLISH_SUBDIV (Polish, C40; default "light" since b13, user verdict 13.10.; empty =
+# Driver 2's flags unchanged): Driver 1 subdivides polygons flagged 0x20 (near: < 6000 / < 9000
+# units, handlers +0x20 / +0x10, routine 0x8003110C) or 0x40 (fixed +0x10 level) in the
+# per-object renderer (0x80030B08); the subdivision is the biggest renderer cost in dense
+# Chicago. "A,B" clears them on polygons whose longest edge is < A units, makes it the lighter
+# fixed level (0x60, as LA's small polygons) below B, and keeps Driver 2's flags above;
+# "light" = 0,1000000 (every flagged polygon at the light level). Clearing all flags ("none")
+# warped buildings (user) and was dropped.
+_SUBDIV = __import__("os").environ.get("CHI_POLISH_SUBDIV", "light").strip()
+if _SUBDIV == "light":
+    _SUBDIV = "0,1000000"
+
+
+def polish_subdiv(polys, verts):
+    if not _SUBDIV:
+        return polys, None
+    lo, hi = (int(v) for v in _SUBDIV.split(","))
+    out, st = [], {"cleared": 0, "light": 0, "kept": 0}
+    for p in polys:
+        t = p[0] & 31
+        off = VERT_OFF.get(t)
+        if off is None or not (p[0] & 0x60):
+            out.append(p)
+            continue
+        nv = 4 if t in (9, 11, 21) else 3
+        pts = [verts[i] for i in p[off:off + nv] if i < len(verts)]
+        edge = max((math.dist(a, b) for a in pts for b in pts), default=0)
+        if edge < lo:
+            b0, k = p[0] & ~0x60, "cleared"
+        elif edge < hi:
+            b0, k = p[0] | 0x60, "light"
+        else:
+            b0, k = p[0], "kept"
+        st[k] += 1
+        out.append(bytes([b0]) + p[1:])
+    return out, st
+
+
 def poly_normal(poly: bytes, verts):
     """Unit normal (x, y, z) in Driver 1's convention (the one its group planes
     use: a face is front-facing while n . camera < n . face), or None."""
@@ -234,6 +272,10 @@ def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
         if m.num_polys == 0 or m.instance_number >= 0 and m.instance_number != i:
             continue
         polys = split_polys(m)
+        polys, sst = polish_subdiv(polys, vertices(m))
+        if sst:
+            for k, v in sst.items():
+                stats["subdiv_" + k] = stats.get("subdiv_" + k, 0) + v
         order, groups = plan_groups(polys, vertices(m))
         plans[i] = (order, [len(polys[k]) for k in order])
         out[i] = rebuild(m, polys, order, group_table(groups))
@@ -247,6 +289,8 @@ def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
             continue
         src = m.instance_number
         polys = split_polys(m)
+        if _SUBDIV and src in parsed:
+            polys, _ = polish_subdiv(polys, vertices(parsed[src]))
         plan = plans.get(src)
         if plan and len(polys) == len(plan[0]) and [len(polys[k]) for k in plan[0]] == plan[1]:
             out[i] = rebuild(m, polys, plan[0], None)
@@ -255,7 +299,7 @@ def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
         if src not in parsed:
             raise ValueError("model %d instances %d, which is not in the set" % (i, src))
         alone = standalone(m, parsed[src])
-        polys = split_polys(alone)
+        polys, _ = polish_subdiv(split_polys(alone), vertices(alone))
         order, groups = plan_groups(polys, vertices(alone))
         out[i] = rebuild(alone, polys, order, group_table(groups))
         stats["deinstanced"] += 1

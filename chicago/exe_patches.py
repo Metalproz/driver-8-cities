@@ -202,7 +202,7 @@ def prim_guard_patches(exe_path):
 REG = {n: k for k, n in enumerate("zero at v0 v1 a0 a1 a2 a3 t0 t1 t2 t3 t4 t5 t6 t7 "
                                     "s0 s1 s2 s3 s4 s5 s6 s7 t8 t9 k0 k1 gp sp fp ra".split())}
 _IOP = {"addiu": 9, "slti": 10, "sltiu": 11, "andi": 12, "ori": 13, "lw": 0x23, "lbu": 0x24, "lhu": 0x25, "sw": 0x2B,
-        "lh": 0x21, "sh": 0x29}
+        "lh": 0x21, "sh": 0x29, "sb": 0x28, "lb": 0x20}
 _RFN = {"addu": 0x21, "subu": 0x23, "slt": 0x2A, "sltu": 0x2B, "xor": 0x26, "and": 0x24, "or": 0x25}
 
 
@@ -245,7 +245,7 @@ def asm(base, lines, end=None):
             w = (r(a[0]) << 21) | 8
         elif op == "lui":
             w = (15 << 26) | (r(a[0]) << 16) | (int(a[1], 0) & 0xFFFF)
-        elif op in ("lw", "lbu", "lhu", "sw", "lh", "sh"):
+        elif op in ("lw", "lbu", "lhu", "sw", "lh", "sh", "sb", "lb"):
             off, _, rb = a[1].partition("(")
             w = (_IOP[op] << 26) | (r(rb[:-1]) << 21) | (r(a[0]) << 16) | (int(off, 0) & 0xFFFF)
         elif op in _IOP:
@@ -325,9 +325,10 @@ AREA_SWITCH_CODE = [
     "bne at, zero, LOOP",
     "nop",
     "NOMATCH:",
-    "lw at, 0xc4(gp)",             # city (0x80096834)
-    "addiu v0, zero, 3",
-    "beq at, v0, OWN",             # Chicago: also when nothing is loaded yet (-1)
+    "lui at, 0x9F08",              # Chicago active (plugin flag at CHICAGO_FLAG_ADDR: Chicago may share
+    "lw at, 0x2104(at)",           # LA's city index 3 with the original LA since its own Take a Ride slot)
+    "nop",
+    "bne at, zero, OWN",           # Chicago: also when nothing is loaded yet (-1)
     "addiu at, zero, -1",
     "bne t5, at, %#x" % AREA_RET,  # other cities as before: only when nothing is loaded,
     "nop",
@@ -404,7 +405,87 @@ ROAD_DECODER_CODE = [
 
 
 def road_decoder_patches(exe_path):
-    return rewrite(exe_path, 0x800354D8, asm(0x800354D8, ROAD_DECODER_CODE, 0x80035558), "road decoder")
+    return rewrite(exe_path, 0x800354D8, asm(0x800354D8, ROAD_DECODER_CODE, 0x80035558), "road decoder") \
+        + road16_decoder_patches(exe_path)
+
+
+# C48 (14.10., investigator): the 16-bit road-id map decoder (0x8003542C, CD callback, 3600 s16 cells into
+# *(0x8009E724 + slot*4)) read run lengths as signed and never clamped them: a negative count grew the
+# remaining total, a long one wrote past the table (seen: 0x801DA000..0x801FBFFE, the draw-buffer struct
+# 0x800BE024 filled with 0x2F512F51 -> misaligned dispatch / B0 / PC 0 at load, more often with more roads).
+# Rewritten like the 32-bit decoder: a run must be 1..cells left, else it fills the rest and decoding ends.
+ROAD16_DECODER_CODE = [                # MIPS I: one instruction between a load and the use of its result
+    "lui v1, 0xa",
+    "lw a0, 0xb4c(gp)",            # spool entry index (0x800972BC)
+    "addiu v1, v1, 0x7ea4",
+    "sw zero, 0xb34(gp)",
+    "sll v0, a0, 2",
+    "addu v0, v0, a0",
+    "sll v0, v0, 2",
+    "addu v0, v0, v1",             # entry (20 B) at 0x800A7EA4
+    "lhu v1, 2(v0)",
+    "lw a1, 0xc(v0)",              # source data
+    "sll v1, v1, 2",
+    "addu v1, v1, gp",
+    "lw a0, 0x7fb4(v1)",           # destination: table 0x8009E724 (= gp + 0x7FB4)
+    "sw a1, 0xaec(gp)",            # 0x8009725C
+    "addiu a2, zero, 3600",
+    "sw a0, 0xae8(gp)",
+    "lw v1, 0(a1)",
+    "addiu v0, zero, -1",
+    "bne v1, v0, RUN",
+    "nop",
+    "move v1, v0",                 # whole region without roads: one run of 3600 x -1
+    "beq zero, zero, OK",
+    "move v0, a2",
+    "RUN:",
+    "lh v0, 0(a1)",                # count
+    "lh v1, 2(a1)",                # value
+    "addiu t0, v0, -1",
+    "sltu t0, t0, a2",             # 1 <= count <= cells left
+    "bne t0, zero, OK",
+    "addiu a1, a1, 4",
+    "move v0, a2",                 # bad run: fill the rest with its value, then end
+    "OK:",
+    "subu a2, a2, v0",
+    "FILL:",
+    "sh v1, 0(a0)",
+    "addiu v0, v0, -1",
+    "bne v0, zero, FILL",
+    "addiu a0, a0, 2",
+    "bne a2, zero, RUN",
+    "nop",
+    "jr ra",
+    "nop",
+]
+
+
+def road16_decoder_patches(exe_path):
+    if os.environ.get("CHI_ROAD16_FIX") == "0":      # default since the C48 change (14.10.)
+        return []
+    return rewrite(exe_path, 0x8003542C, asm(0x8003542C, ROAD16_DECODER_CODE, 0x800354D8), "road16 decoder")
+
+
+# C48 (14.10.): Driver 1 accepts at most 422 roads (ROADS / ROADBOUNDS loaders: slti 0x1A7, else a
+# "MAX_ROADS ... guess what you gotta do" break loop) and builds a 20-byte row per road from 0x8009E744.
+# The rows may now grow up to 0x800A0D00 (483 rows; 0x800A0D00.. is C50's script area): the 16-byte
+# variable that followed the 422 rows (0x800A083C, two sites) moves to 0x800A0CF0 (unused), and the limit
+# becomes 483. Original cities have at most 410 roads, so nothing changes for them. All guest code.
+MAX_ROADS = 483
+ROAD_LIMIT = [
+    (0x8003950C, 0x28C201A7, 0x28C20000 | (MAX_ROADS + 1), "C48: ROADS loader limit 422 -> %d" % MAX_ROADS),
+    (0x80039604, 0x28C201A7, 0x28C20000 | (MAX_ROADS + 1), "C48: ROADBOUNDS loader limit 422 -> %d" % MAX_ROADS),
+    (0x80024C88, 0x8C64083C, 0x8C640CF0, "C48: variable after the road rows 0x800A083C -> 0x800A0CF0"),
+    (0x80024C98, 0x2465083C, 0x24650CF0, "C48: its address (a1)"),
+]
+
+
+def road_limit_patches(exe_path):
+    img, base = load_exe(exe_path)
+    for pc, old, _new, _n in ROAD_LIMIT:
+        if struct.unpack_from("<I", img, pc - base)[0] != old:
+            raise RuntimeError("unexpected word at %08X" % pc)
+    return list(ROAD_LIMIT)
 
 
 # The model renderer (0x800307FC) traps bad polygon group data in an endless
@@ -431,6 +512,53 @@ SPOOL_CHAIN = [
     (0x80034D04, 0xAF830A8C, 0xAF820A8C, "sw v1,count -> sw v0,count"),
     (0x80034D0C, 0x00000000, 0xAF830A80, "nop (delay slot of j) -> sw v1,dest"),
 ]
+# The sector callbacks end a read when the "sectors left" total reaches exactly 0;
+# a total gone negative (seen after a teleport during a load, -170) kept them
+# chaining into stale queue slots (PC=0 / dispatch 0xB0 crashes) and kept the
+# plugin's surface selection idle. They now treat a total <= 0 as done (same
+# offsets, only the branch opcode: beqz -> blez, bnez -> bgtz).
+SPOOL_END = [
+    (0x80034CE0, 0x1060000B, 0x1860000B, "beqz v1 -> blez v1 (main reader: total <= 0 = done)"),
+    (0x80034BA8, 0x10A0000A, 0x18A0000A, "beqz a1 -> blez a1 (region reader: total <= 0 = done)"),
+    (0x800350CC, 0x14A00009, 0x1CA00009, "bnez a1 -> bgtz a1 (sector reader: go on only while total > 0)"),
+    (0x8003531C, 0x14600018, 0x1C600018, "bnez v1 -> bgtz v1 (sector reader: go on only while total > 0)"),
+]
+# Sea level (C35): for a water cell whose model is "sea" (flags 0x80) the ground query
+# 0x8001EEB4 ignores the cell height: ground = wave table value around y 0 (LA's
+# harbour at street level) minus a sink term. Chicago's water is drawn 1084 below the
+# street, so cars floated ~1000 above it. The same 10 words now also add a sea level
+# offset read from mod memory (SEA_LEVEL_ADDR, written by driver_chicago.c: -1084 in
+# Chicago, 0 elsewhere = unchanged): the redundant `lui v0,9` and the table base
+# `addiu` move into the load (lw/lhu offsets), the load-delay nop loads its address.
+SEA_LEVEL_ADDR = 0x9F082100        # after the empty model; driver_chicago.c allocates it
+CHICAGO_FLAG_ADDR = 0x9F082104     # same block: 1 while Chicago is the loaded city (plugin)
+SEA_LEVEL_OLD = [(0x8001F0C8, "nop"), (0x8001F0D8, "lui v0, 9"), (0x8001F0DC, "lw v0, 0x70fc(v0)"),
+                 (0x8001F0E0, "addiu v1, v1, -0x1558"), (0x8001F0E4, "andi v0, v0, 0xfff"),
+                 (0x8001F0E8, "sll v0, v0, 2"), (0x8001F0EC, "addu v0, v0, v1"), (0x8001F0F0, "lhu v0, 0(v0)"),
+                 (0x8001F0F4, "lw v1, 0x894(gp)"), (0x8001F0F8, "sll v0, v0, 0x10"), (0x8001F0FC, "sra a0, v0, 0x17")]
+SEA_LEVEL_NEW = [(0x8001F0C8, "lui at, 0x%X" % (SEA_LEVEL_ADDR >> 16)), (0x8001F0D8, "lw v0, 0x70fc(v1)"),
+                 (0x8001F0DC, "lw at, 0x%X(at)" % (SEA_LEVEL_ADDR & 0xFFFF)), (0x8001F0E0, "andi v0, v0, 0xfff"),
+                 (0x8001F0E4, "sll v0, v0, 2"), (0x8001F0E8, "addu v0, v0, v1"), (0x8001F0EC, "lhu v0, -0x1558(v0)"),
+                 (0x8001F0F0, "lw v1, 0x894(gp)"), (0x8001F0F4, "sll v0, v0, 0x10"), (0x8001F0F8, "sra a0, v0, 0x17"),
+                 (0x8001F0FC, "addu a0, a0, at")]
+
+
+# Model table, a use the lui/use pairing missed (C36, user freeze 2026-10-12 21:11):
+# 0x8004B5A4 `lui t7,0xA` (moved to 0x9F00) sits in the delay slot of a branch to
+# 0x8004B7A0, whose `addiu t7,t7,0xE20` 0x20C bytes later still added the OLD table's
+# offset: the read took entry index + 904, so a model index >= 1144 (Chicago's far
+# water 1214 / shore walls 1215) read past the 2048 entries -> garbage model pointer
+# -> address error at 0x8004B7CC (lhu flags2) -> the game stopped in the BIOS handler.
+MODEL_TABLE_LATE = [
+    (0x8004B7B0, 0x25EF0E20, 0x25EF0000, "addiu t7,t7,0xE20 -> addiu t7,t7,0 (t7 = new table base from 0x8004B5A4)"),
+]
+
+
+def sea_level_patches():
+    return [(pc, asm(pc, [o])[0], asm(pc, [n])[0], "sea level: " + n)
+            for (pc, o), (_, n) in zip(SEA_LEVEL_OLD, SEA_LEVEL_NEW)]
+
+
 SPOOL_DRAIN_SITES = (0x80034ACC, 0x80034E98, 0x80034FF8, 0x80035288)
 SPOOL_DRAIN_OLD = [0xAF800B40, 0x8F820B40, 0x00000000, 0xAF820280, 0x8F820280,
                    0x00000000, 0xAF82027C, 0x8F82027C, 0x00000000, 0xAF820B64]
@@ -455,16 +583,20 @@ SPOOL_RESET = [
     (0x80051448, 0x8C430008, 0xAF80027C, "spool reset: sw zero,reader index"),
     (0x8005144C, 0x8C450000, 0xAF800280, "spool reset: sw zero,read index"),
     (0x80051450, 0x00661021, 0xAF800278, "spool reset: sw zero,area loading flag (an abandoned load must not block switches)"),
-    (0x80051454, 0x0045102B, 0x0801E84B, "spool reset: j CdReadyCallback (tail call)"),
-    (0x80051458, 0x10400010, 0x00002021, "spool reset: move a0,zero (callback = none)"),
-    (0x8005145C, 0x00A62823, 0x00000000, "nop"),
+    # C38 root fix (14.10.): a restart left the drive streaming the old read (only the callback was
+    # dropped); the new level's reads then met a stuck CD interrupt (spool-done wait 0x80033AF8 forever).
+    # Now the queue is emptied and the spool's own end-of-queue path 0x80032DEC runs: CdReadyCallback(0)
+    # + CdControl(CdlPause), as when a queue ends normally.
+    (0x80051454, 0x0045102B, 0xAF800B40, "spool reset: sw zero,write index (queue empty)"),
+    (0x80051458, 0x10400010, 0x0800CB7B, "spool reset: j 0x80032DEC (empty queue -> callback none + CdlPause)"),
+    (0x8005145C, 0x00A62823, 0xAF800A88, "spool reset: sw zero,stream sectors left (delay slot)"),
     (0x8003381C, 0x8F820AC4, 0x0C014512, "lw v0,0xac4(gp) -> jal spool reset (0x80051448)"),
     (0x80033850, 0xAF820B40, 0xAF800B40, "sw v0,write index -> sw zero,write index"),
 ]
 
 
 def spool_patches():
-    out = list(SPOOL_CHAIN) + SPOOL_RESET
+    out = list(SPOOL_CHAIN) + SPOOL_RESET + SPOOL_END
     for site in SPOOL_DRAIN_SITES:
         for k, (old, new) in enumerate(zip(SPOOL_DRAIN_OLD, SPOOL_DRAIN_NEW)):
             if old != new:
@@ -581,7 +713,12 @@ def tile_guard_patches(exe_path):
 def area_patches(exe_path):
     img, base = load_exe(exe_path)
     out = []
-    for pc, old, new, note in RENDER_TRAP + AREA_SWITCH_WAIT + spool_patches():
+    skip = set(os.environ.get("CHI_EXCLUDE_PATCHES", "").split(","))   # bisection: spool_end, sea, mtlate
+    groups = (RENDER_TRAP + AREA_SWITCH_WAIT
+              + [q for q in spool_patches() if "spool_end" not in skip or q not in SPOOL_END]
+              + (sea_level_patches() if "sea" not in skip else [])
+              + (MODEL_TABLE_LATE if "mtlate" not in skip else []))
+    for pc, old, new, note in groups:
         cur = struct.unpack_from("<I", img, pc - base)[0]
         if cur != old:
             raise RuntimeError("unexpected word at %08X: %08X (expected %08X)" % (pc, cur, old))
@@ -595,9 +732,282 @@ def area_patches(exe_path):
 # marked ROADSURF planes around the player every vblank instead (see NOTES.md).
 
 
+# --- C45 part 3: skip resident stable pages at an area switch (opt-in: CHI_C45_SKIP=1) ---------
+# The area loader 0x80033B10 queues a 17-sector read for every page of the new area, resident or not
+# (residency 0x800BE278 only picks the slot). Pages below STABLE_END (main RAM word gp+0x2174,
+# written by the plugin from the level's stable-page list; 0 = no skipping, every original city)
+# have identical content in every area that lists them (Polish, CHI_POLISH_SHAREDPAGES): when such
+# a page is resident it keeps its slot and gets no queue entry and no slot/page pair; only its disc
+# offset advances. The page loop 0x80033BD4..0x80033D00 is rewritten (the per-page CITY table
+# lookup of the sector base is hoisted out, which makes room). P2: the page stream countdown
+# (0x80032EC0, = all queued pages) becomes 1, so after every page 0x80032DEC takes the next entry,
+# compares the drive position and seeks after a skipped page (contiguous pages stream on).
+STABLE_END_GP = 0x2174          # 0x800988E4, unused by the exe (zero in all dumps)
+C45_LOOP, C45_LOOP_END = 0x80033BD4, 0x80033D00
+C45_SKIP_CODE = [               # MIPS I: one instruction between a load and the use of its result
+    "lw v1, 0xb24(gp)",
+    "sll v0, t4, 4",
+    "addu v0, v0, v1",
+    "lhu t6, 0(v0)",               # the area's first page sector (relative to the spooled section)
+    "lw v0, 0xc4(gp)",             # CITY
+    "beq t2, zero, %#x" % C45_LOOP_END,
+    "move a2, zero",
+    "sll v0, v0, 5",
+    "lui v1, 0xc",
+    "addiu v1, v1, -0x1f5c",       # 0x800BE0A4 level location table
+    "addu v0, v0, v1",
+    "lw a1, 0x18(v0)",             # spooled section, byte position (>= 0)
+    "lui v0, 0xc",
+    "addiu s2, v0, -0x1d88",       # 0x800BE278 residency (slot + 1)
+    "sra a1, a1, 11",
+    "addu t6, t6, a1",             # absolute sector of the area's first page
+    "lui v0, 0xa",
+    "addiu s1, v0, 0x7ba4",        # 0x800A7BA4 spool queue
+    "addiu t7, v0, 0x7f54",        # pair table: slot
+    "addiu t9, v0, 0x7f50",        # pair table: page
+    "sll v0, a3, 2",
+    "addu t4, v0, sp",             # free slots (stack)
+    "addiu t5, zero, 0x11",
+    "lui t3, 3",
+    "addiu t3, t3, 0x3870",        # page callback 0x80033870
+    "addiu t0, zero, 1",
+    "LOOP:",
+    "lbu v0, 0(t1)",               # page
+    "lw at, %#x(gp)" % STABLE_END_GP,
+    "addu a0, v0, s2",
+    "lbu v1, 0(a0)",
+    "slt at, v0, at",              # stable page?
+    "beq v1, zero, FREE",
+    "addiu v1, v1, -1",            # (delay) resident: its slot
+    "bne at, zero, SKIP",          # resident and stable: nothing to read
+    "lw v0, 0xb44(gp)",            # (delay)
+    "beq zero, zero, PAIR",
+    "nop",
+    "FREE:",
+    "blez a3, %#x" % C45_LOOP_END,
+    "addiu t4, t4, -4",
+    "lw v1, 0(t4)",                # a free slot
+    "lw v0, 0xb44(gp)",
+    "addiu a3, a3, -1",
+    "PAIR:",
+    "lw a1, 0xb40(gp)",            # queue write index
+    "sll a0, v0, 3",
+    "addu a0, a0, t7",
+    "sw v1, 0(a0)",                # pair: slot
+    "addiu v1, v0, 1",
+    "sw v1, 0xb44(gp)",
+    "sll a0, v0, 3",
+    "addu a0, a0, t9",
+    "lbu v1, 0(t1)",
+    "sll v0, a1, 4",
+    "sw v1, 0(a0)",                # pair: page
+    "addu a0, v0, s1",
+    "addiu a1, a1, 1",
+    "sw a1, 0xb40(gp)",
+    "sb t0, 0(a0)",                # entry: type 1 (page)
+    "sb zero, 1(a0)",
+    "sh t5, 2(a0)",                # 17 sectors
+    "sw t6, 4(a0)",                # disc sector
+    "sw t8, 8(a0)",                # destination
+    "sw t3, 0xc(a0)",              # callback
+    "SKIP:",
+    "addiu t6, t6, 0x11",
+    "addiu a2, a2, 1",
+    "slt v0, a2, t2",
+    "bne v0, zero, LOOP",
+    "addiu t1, t1, 1",             # (delay)
+]
+C45_COUNTDOWN = 0x80032EC0      # lw a1, 0xb44(gp) -> addiu a1, zero, 1
+
+
+def c45_skip_patches(exe_path):
+    if os.environ.get("CHI_C45_SKIP") != "1":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    if word(C45_COUNTDOWN) != 0x8F850B44 or word(0x80033C18) != 0x91220000:
+        raise RuntimeError("unexpected area page loader")
+    out = rewrite(exe_path, C45_LOOP, asm(C45_LOOP, C45_SKIP_CODE, C45_LOOP_END), "C45 page loop")
+    out.append((C45_COUNTDOWN, 0x8F850B44, 0x24050001, "C45: page stream countdown 1 (seek after a skipped page)"))
+    return out
+
+
+# --- C47/C39: static "look CITY" instead of RAM code-word switches (opt-in: CHI_LOOK_CITY=1) -------
+# The plugin used to rewrite code words in RAM for Chicago by day (CITY 3 = LA's night-only branches);
+# every rewritten function then ran in the slow dirty-RAM interpreter (C47: +13-15 % host time in dense
+# Chicago, mostly the per-car headlight code 0x8004B000). Now these sites read main-RAM words kept by
+# the plugin (M8: a PS1 build sets them in guest code): LOOK_CITY = CITY, or 0x7F for Chicago by day
+# (at the CITY loads whose value only feeds "== 3" / "== 5" / "== 1" compares), and C3 = 3, or 0x7F
+# (the compare constant at 0x800298D8, whose CITY value is tested "< 4" afterwards; the instruction
+# after the load does not use v0, so the load delay holds). C38: the region decoder's error path
+# (printf from the CD interrupt) becomes the empty-region path, all cities.
+LOOK_CITY_GP, C3_GP = 0x112C, 0x1128     # 0x8009789C / 0x80097898, unused by the exe (zero in all dumps)
+# 0x8003B1A4 is NOT redirected: with CITY != 3 it calls 0x80079AF0(0x1F800308) (stack to the
+# scratchpad), and Chicago's draw then crashed at level start (PC 0, 14.10. bisection); Chicago by day
+# keeps LA's path there (no call), as LA always did.
+LOOK_CITY_SITES = [0x80023634, 0x80023794, 0x80023CD0, 0x8003A6B0, 0x8003C970, 0x800437DC,
+                   0x8004702C, 0x8004B250]
+LOOK_CITY_SITES = [a for a in LOOK_CITY_SITES
+                   if "%08X" % a not in os.environ.get("CHI_LOOK_SKIP", "").upper().split(",")]   # bisection
+
+
+def look_city_patches(exe_path):
+    if os.environ.get("CHI_LOOK_CITY") == "0":       # default since 14.10. (C47); 0 = old exe for A/B
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    out = []
+    for a in LOOK_CITY_SITES:
+        w = word(a)
+        rs, imm = (w >> 21) & 31, w & 0xFFFF
+        if w >> 26 != 0x23 or not ((rs == 28 and imm == 0xC4) or imm == 0x6834):
+            raise RuntimeError("no CITY load at %08X" % a)
+        new = (w & 0xFFFF0000) | (LOOK_CITY_GP if rs == 28 else 0x7898 + (LOOK_CITY_GP - 0x1128))
+        out.append((a, w, new, "C47: CITY load -> look CITY word"))
+    # C51: the car damage zone tables (0x8003E5A8: CITY indexes 0x8008A6BC/DC/FC/1C) follow the loaded car set
+    if word(0x8003E5A8) != 0x8C636834:
+        raise RuntimeError("unexpected 0x8003E5A8")
+    out.append((0x8003E5A8, 0x8C636834, 0x8C6378A0, "C51: damage zone tables by CARSET_CITY (0x800978A0)"))
+    if word(0x800298D8) != 0x24020003:
+        raise RuntimeError("unexpected 0x800298D8")
+    out.append((0x800298D8, 0x24020003, (0x23 << 26) | (28 << 21) | (2 << 16) | C3_GP, "C47: li v0,3 -> lw v0,C3(gp)"))
+    if word(0x80035670) != 0x14A20026:
+        raise RuntimeError("unexpected 0x80035670")
+    out.append((0x80035670, 0x14A20026, 0x14A2FFCD, "C38: decoder error path -> empty region"))
+    return out
+
+
+# --- C42 step 1: Driver 2 traffic/cop cars get Driver 2's damage zone tables -------------------------
+# Driver 1 loads ONE set of damage zone tables for every city at boot (DRIVER/DTL.BIN, 6484 B, to
+# 0x801F8BC0); the four per-CITY pointer tables 0x8008A6BC/DC/FC/1C hold the same address in all 8
+# entries. Entry 4 (FLAT, not used any more) of the civ verts / civ polys tables now points at
+# 0x800A0E20 / 0x800A11A4 (the old model-table area, unused since the model table moved): the plugin
+# writes Driver 2's civ tables there (Polish's damage blob) and sets CARSET_CITY (0x800978A0, read at
+# 0x8003E5A8) to 4 while Chicago with Driver 2 traffic cars is loaded. Player entries stay DTL's.
+C42_TABLES = [
+    (0x8008A6EC, 0x001F919C, 0x000A0E20, "C42: civ verts table, entry 4 -> 0x800A0E20 (Driver 2 civ cars)"),
+    (0x8008A72C, 0x001F9E80, 0x000A11A4, "C42: civ polys table, entry 4 -> 0x800A11A4"),
+]
+
+
+def c42_table_patches(exe_path):
+    if os.environ.get("CHI_C42_TABLES") == "0":      # default since 14.10. (applied with the disc exe)
+        return []
+    img, base = load_exe(exe_path)
+    for pc, old, _new, _n in C42_TABLES:
+        if struct.unpack_from("<I", img, pc - base)[0] != old:
+            raise RuntimeError("unexpected word at %08X" % pc)
+    return list(C42_TABLES)
+
+
+
+# --- C53 / C42: car cosmetics (wheel and light positions) by car set -----------------------------------
+# LoadCosmetics 0x80052620 copies the player's row (base + model) and the cop/civ rows (base + 5..7) of
+# the table 0x800853D8 (100-B rows, 8 per city) by a jump-table switch on CITY (0x80010A20: bases 0, 8,
+# 0x10, 0x18, -, 0x20, -, 0x28). It now reads CARSET_CITY (0x800978A0, the plugin's car-set word, as the
+# damage tables since C51): Chicago by day with Miami's cars gets Miami's rows (C53; it had LA's). The
+# jump table becomes a table of bases (lw a0 instead of jr); entry 4 (FLAT, unused) = 0x482 points at
+# 0x800A16A0 (old model-table area, free behind the C42 damage tables), where the plugin writes the
+# Chicago rows of a level with Driver 2 cars (Polish: Miami / LA rows 0-4 + D2 cop, civ0, civ1 in 5-7).
+COSMETICS_ROWS = 0x800A16A0
+COSMETICS = [
+    (0x80052624, 0x8C636834, 0x8C6378A0, "C53: LoadCosmetics reads CARSET_CITY 0x800978A0 instead of CITY"),
+    (0x80052648, 0x8C620000, 0x8C640000, "C53: lw a0, (v1): the base from the table"),
+    (0x8005264C, 0x00000000, 0x080149A1, "C53: j 0x80052684 (instead of jr v0)"),
+    (0x80052650, 0x00400008, 0x00000000, "C53: nop (delay slot)"),
+] + [(0x80010A20 + 4 * i, old, new, "C53: base table entry %d" % i) for i, (old, new) in enumerate([
+    (0x00052658, 0x00), (0x00052660, 0x08), (0x00052668, 0x10), (0x00052670, 0x18),
+    (0x00052658, (COSMETICS_ROWS - 0x800853D8) // 100), (0x00052678, 0x20), (0x00052658, 0x00), (0x00052680, 0x28)])]
+
+
+def cosmetics_patches(exe_path):
+    if os.environ.get("CHI_COSMETICS") == "0":       # default since 14.10. (applied with the disc exe)
+        return []
+    img, base = load_exe(exe_path)
+    for pc, old, _new, _n in COSMETICS:
+        if struct.unpack_from("<I", img, pc - base)[0] != old:
+            raise RuntimeError("unexpected word at %08X" % pc)
+    return list(COSMETICS)
+
+
+
+# --- C17: drowning at a water edge in Driver 2 cities (default; CHI_DROWN_EDGE=0 off; needs COSMETICS) --------
+# Drowning (FUN_0003A698, general path 0x8003ADC4) tests the car CENTRE's cell (model flag 0x80) and y < 0xDC,
+# but FindSurfaceD2 gives every WHEEL sea ground (wave + sea offset, -1084 in Chicago): a car straddling a
+# street / water edge sank on its water wheels while its centre stayed on a street cell, no countdown,
+# stuck ~1000 below the street (FAN deckfall, hs_drop). Now: "centre not sea" goes through a cave that
+# still takes the sea path when a wheel took FindSurfaceD2's sea path since the last check (0x800970F8,
+# written only by FindSurfaceD2, read by nothing: its clear at 0x8001F158 goes, the cave clears it) and the
+# car's y lies in [-1120, -500) (the water surface band; the 1352 trench floor is outside), with the band
+# width from DROWN_RANGE (gp+0x1138 = 0x800978A8, unused: plugin 620 in Chicago, 0 = off, so the D1 cities
+# keep their rule). Cave: the LoadCosmetics case blocks freed by COSMETICS (default block moved up a word).
+DROWN_EDGE = [
+    (0x80052630, 0x10400009, 0x10400008, "C17: LoadCosmetics default case -> 0x80052654 (moved up)"),
+    (0x80052654, 0x00000000, 0x080149A1, "C17: default case: j 0x80052684"),
+    (0x80052658, 0x080149A1, 0x00002021, "C17: default case: move a0, zero (delay)"),
+    (0x8005265C, 0x00002021, 0x8F831138, "C17 cave: lw v1, 0x1138(gp) (DROWN_RANGE)"),
+    (0x80052660, 0x080149A1, 0x8E2500CC, "C17 cave: lw a1, 0xcc(s1) (car y)"),
+    (0x80052664, 0x24040008, 0x83820988, "C17 cave: lb v0, 0x988(gp) (a wheel took the sea path)"),
+    (0x80052668, 0x080149A1, 0x24A50460, "C17 cave: addiu a1, a1, 1120"),
+    (0x8005266C, 0x24040010, 0x00A3282B, "C17 cave: sltu a1, a1, v1 (-1120 <= y < -1120 + range)"),
+    (0x80052670, 0x080149A1, 0x00451024, "C17 cave: and v0, v0, a1"),
+    (0x80052674, 0x24040018, 0x1440A1D6, "C17 cave: bnez v0, 0x8003ADD0 (the sea path)"),
+    (0x80052678, 0x080149A1, 0xA3800988, "C17 cave: sb zero, 0x988(gp) (delay: clear)"),
+    (0x8005267C, 0x24040020, 0x0800EB9F, "C17 cave: j 0x8003AE7C (the reset path)"),
+    (0x80052680, 0x24040028, 0x27A50088, "C17 cave: addiu a1, sp, 0x88 (delay: the reset path's first word)"),
+    (0x8003ADC8, 0x1040002B, 0x10405E24, "C17: centre not sea -> the cave (delay move a0, s2 stays)"),
+    (0x8001F158, 0xA02070F8, 0x00000000, "C17: FindSurfaceD2 keeps the sea-wheel flag set (the cave clears it)"),
+]
+
+
+def drown_edge_patches(exe_path):
+    if os.environ.get("CHI_DROWN_EDGE") == "0":      # default since 14.10. (applied with the disc exe)
+        return []
+    if not cosmetics_patches(exe_path):
+        raise RuntimeError("CHI_DROWN_EDGE needs the COSMETICS group (its cave)")
+    img, base = load_exe(exe_path)
+    for pc, old, _new, _n in DROWN_EDGE:
+        if struct.unpack_from("<I", img, pc - base)[0] != old:
+            raise RuntimeError("unexpected word at %08X" % pc)
+    return list(DROWN_EDGE)
+
+
+# --- Chicago music (milestone 2): Chicago-gated song select ---------------------------------------------
+# The mission loader stores the song (mission + 3) & 7 at 0x800687A8..B8 (sll/sra sign extension, addiu 3,
+# andi 7, sw 0x1030(gp)); MUSIC.BIN's songs 0-7 belong to the D1 cities. The relocated MUSIC.BIN (Polish,
+# work/var_polish_music_chicago.BIN) adds 8 = D2 Chicago day, 9 = night. The sign extension is dropped
+# (only the low 3 bits count) and a main-RAM word MUSIC_XOR (gp+0x217C = 0x800988EC, unused by the exe,
+# zero in all dumps) is XORed in: 0 for every other city (unchanged song), song ^ ((mission + 3) & 7) for
+# Chicago (the plugin sets it at the parser entry 0x80068928, which runs just before). PS1-native: guest
+# instructions + one RAM word (the Chicago decision itself is the plugin's, host-only list). v1 is free here
+# (the function returns right after; jr delay slot nop).
+MUSIC_XOR_GP = 0x217C
+MUSIC_SELECT = [
+    (0x800687A8, 0x00101400, 0x8F83217C, "music: lw v1, 0x217C(gp) (MUSIC_XOR, 0 = unchanged)"),
+    (0x800687AC, 0x00021403, 0x26020003, "music: addiu v0, s0, 3 (sign extension dropped: & 7 follows)"),
+    (0x800687B0, 0x24420003, 0x30420007, "music: andi v0, v0, 7"),
+    (0x800687B4, 0x30420007, 0x00431026, "music: xor v0, v0, v1 (then the original sw v0, 0x1030(gp))"),
+]
+
+
+def music_select_patches(exe_path):
+    if os.environ.get("CHI_MUSIC_SELECT") == "0":    # default since 14.10. (applied with the disc exe)
+        return []
+    img, base = load_exe(exe_path)
+    for pc, old, _new, _n in MUSIC_SELECT:
+        if struct.unpack_from("<I", img, pc - base)[0] != old:
+            raise RuntimeError("unexpected word at %08X" % pc)
+    return list(MUSIC_SELECT)
+
+
 def all_patches(exe_path):
+    if "all" in os.environ.get("CHI_EXCLUDE_PATCHES", "").split(","):
+        return []                                  # bisection: no engine patches at all
     return (patches(exe_path) + cell_patches(exe_path) + prim_guard_patches(exe_path) + area_patches(exe_path)
-            + tile_guard_patches(exe_path) + area_switch_patches(exe_path) + road_decoder_patches(exe_path))
+            + tile_guard_patches(exe_path) + area_switch_patches(exe_path) + road_decoder_patches(exe_path)
+            + c45_skip_patches(exe_path) + look_city_patches(exe_path) + road_limit_patches(exe_path)
+            + c42_table_patches(exe_path) + music_select_patches(exe_path) + cosmetics_patches(exe_path)
+            + drown_edge_patches(exe_path))
 
 
 def apply(exe_in, exe_out):
