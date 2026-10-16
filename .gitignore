@@ -11,3 +11,22 @@ chicago/devtools/_pylib/
 *.bin
 *.lev
 *.orig
+
+# Option A (R25): nothing derived from either game is published. Disc images, extracted files and
+# everything made from them (Design renders/previews, setup cache) stay local.
+*.raw
+*.tim
+*.4bit
+*.clut
+*.cue
+design/out/
+design/previews/out/
+setup_cache/
+
+# game-derived media stays local (user 2026-10-16): screenshots, audio renders/rips
+findings/**/*.png
+findings/**/*.jpg
+findings/**/*.wav
+findings/**/*.mp3
+findings/**/*.xm
+findings/screenshots temp/
