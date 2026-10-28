@@ -84,7 +84,8 @@ def _decode(celldata: bytes, table: bytes) -> np.ndarray:
 class D2Pvs:
     def __init__(self, path: str):
         key = hashlib.md5(open(path, "rb").read(1 << 20) + open(__file__, "rb").read()).hexdigest()[:8]
-        cache = os.path.join(os.path.dirname(path), "polish_pvs_%s.pkl" % key)
+        import inputs                     # Option A: caches in the setup cache (chicago/work in work mode)
+        cache = os.path.join(inputs.cache_dir(), "polish_pvs_%s.pkl" % key)
         lev = Lev.parse(open(path, "rb").read())
         self.hdr = MapHeader.parse(lev.loadtime.get(MAP).data)
         self.cs = self.hdr.cell_size

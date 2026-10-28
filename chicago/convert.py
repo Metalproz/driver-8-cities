@@ -1,6 +1,6 @@
 """convert.py — build a Driver 1 LEV of Driver 2's Chicago (stage A, v0).
 
-Inputs: work/d2_CHICAGO.LEV (world) and work/d1_LA.lev (the replaced city,
+Inputs (Option A: read from the player's discs via inputs.py): Driver 2 CHICAGO.LEV (world) and Driver 1 LA.LEV (the replaced city,
 which supplies Driver 1's engine assets: car models, palettes, pedestrian
 motion capture, wheels, pedestrian heads, HUD/effect textures).
 
@@ -22,9 +22,11 @@ from models import Model, inmem_models, area_models, model_names, POLY_SIZES
 from d2cells import extract as d2_extract
 from texpages import encode_compressed, encode_raw, pad, BLOCK, RAW_RECORD
 from texrepack import repack, car_models, ENGINE_MODEL_NAMES, SKY_SLOTS
-from d1models import convert_models
+from d1models import convert_models, near_vertex_count
+import inputs
 import pvs
 import worldscale as ws
+from cityprofile import P as CITY   # M3: per-city profile (CHI_CITY, default Chicago)
 from d2cells import CellObject
 
 # D1 lump ids
@@ -34,13 +36,13 @@ L_OVERLAY, L_PALLET, L_SPOOL, L_CARMODELS, L_CHAIR, L_TEXINFO = 24, 25, 26, 28, 
 
 CELL = 3000
 EXPERIMENT = set(os.environ.get('CHI_EXPERIMENT', '').split(','))
-D2_LEV = os.environ.get("CHI_D2_LEV", "work/d2_CHICAGO.LEV")
+D2_LEV = inputs.d2_lev()   # Option A: CHI_D2_LEV = day (default) / night / a path; read from the player's discs (inputs.py)
 # Car set (car models, car palettes, car texture pages, police car) by D2 city and time of day
 # (user R19, 13.10.: Chicago by day takes Miami's day-designed cars, by night LA's); CHI_CARS
 # overrides (la, miami, sf, ny). C42 (Driver 2's own cars) can add its set here.
-CAR_SET_LEVS = {"la": "work/d1_LA.lev", "miami": "work/d1_MIAMI.lev", "sf": "work/d1_FRISCO.lev",
-                "ny": "work/d1_NEWYORK.lev"}
-CAR_SETS = {("CHICAGO", "day"): "miami", ("CHICAGO", "night"): "la"}
+CAR_SET_LEVS = {"la": "d1_LA.lev", "miami": "d1_MIAMI.lev", "sf": "d1_FRISCO.lev",     # inputs.py names
+                "ny": "d1_NEWYORK.lev"}
+CAR_SETS = {(CITY.name, k): v for k, v in CITY.car_sets.items()}   # M3: from the city profile
 
 
 def car_set() -> str:
@@ -48,16 +50,18 @@ def car_set() -> str:
         return "d2"
     if os.environ.get("CHI_CARS"):
         return os.environ["CHI_CARS"]
-    day = os.path.normcase(os.path.abspath(D2_LEV)) == os.path.normcase(os.path.abspath("work/d2_CHICAGO.LEV"))
-    return CAR_SETS.get(("CHICAGO", "day" if day else "night"), "la")
+    day = CITY.is_day_lev(D2_LEV)
+    return CAR_SETS.get((CITY.name, "day" if day else "night"), "la")
 ROADS = os.environ.get("CHI_ROADS") == "1"   # D1 road network for traffic (d1roads.py; Stage B, 2026-10-13)   # D2 source city (night Chicago: work/d2_CHICAGO_night.lev)
+CAR_PALETTE_ENTRIES = {}   # set where the PALLET lump is built
+CLUT_BASE_POS = int(os.environ.get("CHI_CLUT_BASE", "38"))   # CLUT positions taken before the pages palettes (Infrastructure; calibrate)
 BIG_OBJECT = 3000      # bounding radius above which an object spans cells
 BIG_TILE = int(os.environ.get("CHI_BIG_TILE", "3000"))   # same for ground tiles (tried 1500
                        # for the ground holes: no visible change, 9x the straddlers)
 NEAR_CELLS = 2         # cells around a region whose models count as seen up close
 AREA_BAND_LOW = 13        # area switch threshold (exe_patches.AREA_SWITCH_CODE): cells < 13 / > 17
 SWITCH_LAG = int(os.environ.get("CHI_SWITCH_LAG", "0"))           # cells the car may cross while an area loads (no new switch meanwhile)
-AREA_TEXTURE_LIMIT = int(os.environ.get("CHI_AREA_TEX", "220"))   # textures one area may need (13 VRAM pages x 32 palettes, minus permanent + packing slack)
+AREA_TEXTURE_LIMIT = int(os.environ.get("CHI_AREA_TEX", str(CITY.area_tex_limit)))   # textures one area may need (13 VRAM pages x 32 palettes, minus permanent + packing slack)
 REGION_CELLS = 30
 ROAD_UNIT = 1500
 # per-vertex UVs: (offset, count). Types 9 and 17 are compact (12 bytes) and
@@ -127,6 +131,9 @@ def remap_polys(data: bytes, src: str, remap: dict, fallback) -> bytes:
         t = b[q] & 31
         if (t in UVOFF or t in PAGE_ONLY) and b[q + 1] != 0xFF:
             r = remap.get((src, b[q + 1], b[q + 2])) or fallback
+            if r is None:                    # (Polish S1 second pass: global textures stay as they are)
+                q += POLY_SIZES[t]
+                continue
             np_, nd, nx, ny, ox, oy, ow, oh, nw, nh = r
             b[q + 1], b[q + 2] = np_, nd
             if t in UVOFF:
@@ -147,7 +154,106 @@ def remap_polys(data: bytes, src: str, remap: dict, fallback) -> bytes:
 # Engine models the replaced slot's loader needs by name but whose events place
 # them at that city's coordinates: LA's airport plane stood broken in a Chicago
 # street. Kept, but drawn as nothing.
-HIDDEN_ENGINE_MODELS = {"BOEING"}
+HIDDEN_ENGINE_MODELS = set(CITY.hidden_engine_models)
+# C45 (Infrastructure 16.10.): header byte +6 = vertices of always-plain polygons (d1models.near_vertex_count); without
+# it near objects draw those polygons from stale screen points (the quay's dark beams). CHI_TRI_VERTS=0 = old output,
+# plain = only always-plain polygons counted (exe without C67).
+# C70 (Infrastructure 16.10.): quay walls that hang from street level down to the water (or below it) were drawn over
+# the road at the car: Driver 1 sorts every polygon of a "sorted" model by its own depth, and a wall piece's average
+# depth can be nearer than the big road tile pieces in front of it. Such low walls (every placement: top at most
+# LOW_WALL_TOP above the street, bottom at least LOW_WALL_BOTTOM below it; plus SHOREWALL) lose the sorted flag of their
+# group table for their polygons wholly below the street (those groups come first, unsorted: object depth), so they
+# are drawn behind the road; parapets and railings above the street stay sorted. CHI_LOW_WALLS=0 = old output.
+LOW_WALLS = os.environ.get("CHI_LOW_WALLS", "1") != "0"
+LOW_WALL_TOP, LOW_WALL_BOTTOM = 400, 850
+LOW_WALL_IDS = {}                    # id -> below-street model y; filled by convert() before build_models
+
+
+def low_wall_models(obj_list, models: dict, world=None) -> dict:
+    yr = {}
+    for mid, d in models.items():
+        m = Model.parse(mid, d)
+        if m.vertices <= 0 or m.num_vertices <= 0 or m.vertices + 8 * m.num_vertices > len(d):
+            continue
+        ys = [struct.unpack_from("<3h", d, m.vertices + 8 * i)[1] for i in range(m.num_vertices)]
+        yr[mid] = (min(ys), max(ys))
+    for mid, d in models.items():                    # instances: the source's vertices
+        m = Model.parse(mid, d)
+        if mid not in yr and m.instance_number >= 0 and m.instance_number in yr:
+            yr[mid] = yr[m.instance_number]
+    ok, bad, top = set(), set(), {}
+    for o in obj_list:
+        r = yr.get(o.model)
+        if r is None or r[1] - r[0] <= 300:
+            continue
+        (ok if o.y + r[0] >= -LOW_WALL_TOP and o.y + r[1] >= LOW_WALL_BOTTOM else bad).add(o.model)
+        top[o.model] = min(top.get(o.model, o.y), o.y)
+    # C70 round 3 (16.10.): only the UNDERGROUND faces go to the object-depth groups: a polygon wholly below the
+    # street (50 units under it at every placement) whose visible side (-normal, d1models.plane: drawn while
+    # n . camera < d) looks at land (no sea_kinds water cell 400 units in front of it) at most placements. The faces
+    # that look at the water stay depth-sorted (round 2 sent them all to object depth: the river side of the quay
+    # walls was then hidden by the water tiles).
+    import d1models
+    kinds = sea_kinds(world["across"], world["down"])
+    half_x, half_z = world["across"] // 2 * CELL, world["down"] // 2 * CELL
+    places = {}
+    for o in obj_list:
+        if o.model in ok - bad:
+            places.setdefault(o.model, []).append(o)
+    out = {}
+    for mid in ok - bad:
+        d = models[mid]
+        m = Model.parse(mid, d)
+        if m.num_polys == 0 or m.poly_block >= len(d):
+            continue
+        verts = d1models.vertices(m)
+        polys = d1models.split_polys(m)
+        lim = -top[mid] + 50
+        under = set()
+        for i, pb in enumerate(polys):
+            t = pb[0] & 31
+            if t not in d1models.VERT_OFF:
+                continue
+            n = 4 if t in (9, 11, 21) else 3
+            idx = [j for j in pb[d1models.VERT_OFF[t]: d1models.VERT_OFF[t] + n] if j < len(verts)]
+            if not idx or any(verts[j][1] < lim for j in idx):
+                continue
+            nrm = d1models.poly_normal(pb, verts)
+            if nrm is None or abs(nrm[1]) > 0.7:
+                continue                                   # floors / roofs: not a wall face
+            mx = sum(verts[j][0] for j in idx) / len(idx); mz = sum(verts[j][2] for j in idx) / len(idx)
+            land = water = 0
+            for o in places.get(mid, []):
+                a = o.yang * 64 * 2 * math.pi / 4096; ca, sa = math.cos(a), math.sin(a)
+                vx, vz = mx - 400 * nrm[0], mz - 400 * nrm[2]          # 400 units out on the visible side
+                wx, wz = o.x + vx * ca + vz * sa, o.z - vx * sa + vz * ca
+                col, row = int(round((wx + half_x) / ROAD_UNIT)), int(round((half_z - wz) / ROAD_UNIT))
+                if kinds.get((col, row)) == "water":
+                    water += 1
+                else:
+                    land += 1
+            if land > water:
+                under.add(i)
+        if under:
+            out[mid] = under
+    return out
+
+
+def unsorted_groups(d: bytes) -> bytes:
+    """Clear the 'sorted' bit (31) of the first group entry (d1models.group_table)."""
+    gt = struct.unpack_from("<I", d, 0x1C)[0]
+    if gt <= 0 or gt + 8 > len(d):
+        return d
+    hdr = struct.unpack_from("<I", d, gt)[0]
+    e = gt + 4 + (hdr >> 16)
+    if e + 4 > len(d):
+        return d
+    b = bytearray(d)
+    struct.pack_into("<I", b, e, struct.unpack_from("<I", b, e)[0] & 0x7FFFFFFF)
+    return bytes(b)
+
+
+TRI_VERTS = os.environ.get("CHI_TRI_VERTS", "plain") != "0"   # plain (default) / all (test) / 0 = old
 
 
 def hide_model(data: bytes) -> bytes:
@@ -214,6 +320,34 @@ def fit_bounding_spheres(conv: dict) -> dict:
     return out
 
 
+QUAY_RAIL_SRC = CITY.quay_rail_src   # balustrade + wall-face models; their rail-only copies follow SHOREWALL
+
+
+def quay_rail_index(chi: Lev) -> int:
+    return far_water_index(chi) + FAR_WATER + SHORE_WALLS
+
+
+def rail_only(data: bytes, cut: int = 60) -> bytes:
+    """A converted model with every polygon that reaches more than `cut` below its origin collapsed to a point
+    (same polygon count and group tables, nothing drawn): the balustrade of a quay wall without the wall face."""
+    import d1models
+    from models import Model, POLY_SIZES
+    m = Model.parse(-1, data)
+    vs = [struct.unpack_from("<3h", data, m.vertices + 8 * i) for i in range(m.num_vertices)]
+    b = bytearray(data); q = m.poly_block
+    for _ in range(m.num_polys):
+        t = b[q] & 31
+        off = d1models.VERT_OFF.get(t)
+        if off is not None:
+            nv = 4 if t in (9, 11, 21) else 3
+            ids = [i for i in b[q + off:q + off + nv]]
+            if ids and max(vs[i][1] for i in ids if i < len(vs)) > cut:
+                for k in range(nv):
+                    b[q + off + k] = ids[0]
+        q += POLY_SIZES.get(t, 4)
+    return bytes(b)
+
+
 def far_water_index(chi: Lev) -> int:
     """The far water model goes after Chicago's models and the base city's engine models."""
     return struct.unpack_from("<i", chi.inmem.get(1).data, 0)[0] + len(ENGINE_MODEL_NAMES)
@@ -234,6 +368,10 @@ def build_models(chi: Lev, base: Lev, res):
     for i, q in light_turns(chi, {**carea, **cmem}).items():
         if i in chi_all:
             chi_all[i] = turn_model(chi_all[i], q)
+    import d1models
+    d1models.BELOW_Y.clear()
+    if LOW_WALLS:
+        d1models.BELOW_Y.update(LOW_WALL_IDS)
     conv, stats = convert_models(chi_all)
     print("models: %(models)d converted (%(groups)d groups), %(tiles)d tiles kept, %(instances)d instances, "
           "%(deinstanced)d de-instanced" % stats)
@@ -276,8 +414,23 @@ def build_models(chi: Lev, base: Lev, res):
             nocoll = {int(v) for v in e[8:].split("+")}
     if nocoll:
         conv = {i: (d[:0x20] + bytes(4) + d[0x24:] if i in nocoll else d) for i, d in conv.items()}
-    data = {i: conv[i] for i in cmem}               # index -> bytes (in-memory models)
-    area_data = {i: conv[i] for i in carea if i not in cmem}   # area-spooled models
+    if TRI_VERTS:                                   # C45: plain polygons near the camera (d1models.near_vertex_count)
+        conv = {i: near_vertex_count(d) for i, d in conv.items()}
+        for i, d in list(conv.items()):             # instances without own polygons: the source's count
+            inst = struct.unpack_from("<h", d, 4)[0]
+            if inst >= 0 and inst != i and inst in conv and struct.unpack_from("<h", d, 14)[0] == 0:
+                conv[i] = d[:6] + conv[inst][6:7] + d[7:]
+    if LOW_WALLS and LOW_WALL_IDS:                  # C70: (d1models.BELOW_Y) below-street parts of low quay walls unsorted
+        print("low walls (below-street polygons at object depth):", len(LOW_WALL_IDS), sorted(LOW_WALL_IDS)[:20])
+    if STREAM_INMEM and STREAM_KEEP:              # Q36 B: the moved in-memory models are streamed per area
+        moved = set(cmem) - STREAM_KEEP
+        data = {i: conv[i] for i in cmem if i not in moved}
+        area_data = {i: conv[i] for i in carea if i not in cmem}
+        area_data.update({i: conv[i] for i in moved})
+        cmem = {i: m for i, m in cmem.items() if i not in moved}
+    else:
+        data = {i: conv[i] for i in cmem}               # index -> bytes (in-memory models)
+        area_data = {i: conv[i] for i in carea if i not in cmem}   # area-spooled models
 
     names = list(cnames)
     for k, n in enumerate(names):
@@ -295,6 +448,8 @@ def build_models(chi: Lev, base: Lev, res):
     # Driver 2's unplaced BASE1..4, so the base city's sky models replace them.
     for i in range(SKY_SLOTS):
         data[i] = remap_polys(ball[i].data, "B", res.remap, fallback)
+        if SKY_SUBDIV:
+            data[i] = sky_subdivide(data[i], i)
         names[i] = bnames[i]
     new_index = {}
     for n in ENGINE_MODEL_NAMES:
@@ -314,10 +469,24 @@ def build_models(chi: Lev, base: Lev, res):
         assert len(names) == far_water_index(chi), (len(names), far_water_index(chi))
         names.append("FARWATER")
         data[len(names) - 1] = far_water_model(res, fallback)
+        if TRI_VERTS:
+            data[len(names) - 1] = near_vertex_count(data[len(names) - 1])
     if SHORE_WALLS:
         assert len(names) == far_water_index(chi) + FAR_WATER
         names.append("SHOREWALL")
         data[len(names) - 1] = shore_wall_model(res, fallback)
+        if TRI_VERTS:
+            data[len(names) - 1] = near_vertex_count(data[len(names) - 1])
+        if LOW_WALLS:
+            data[len(names) - 1] = unsorted_groups(data[len(names) - 1])
+    if QUAY_FILL:
+        assert len(names) == quay_rail_index(chi), (len(names), quay_rail_index(chi))
+        for m in QUAY_RAIL_SRC:                     # C70 r2: balustrade-only copies of the quay walls
+            names.append("QRAIL%d" % m)
+            data[len(names) - 1] = rail_only(data[m])
+        for m in QUAY_DROP:                         # C70 r3: invisible copies that keep the collision boxes
+            names.append("QGHOST%d" % m)
+            data[len(names) - 1] = rail_only(data[m], cut=-100000)
     count = len(names)
 
     lump = bytearray(struct.pack("<i", count))
@@ -340,6 +509,32 @@ def build_models(chi: Lev, base: Lev, res):
 
 # ---------------------------------------------------------------------------
 # map, regions, areas
+
+STREAM_INMEM = os.environ.get("CHI_POLISH_STREAM_INMEM", "") == "1"
+STREAM_MAX_AREAS = int(os.environ.get("CHI_POLISH_STREAM_MAXAREAS", "99"))   # models seen in more areas stay in memory
+STREAM_KEEP = set()
+
+
+def stream_keep(chi: Lev, cmem: dict, models_all: dict, world, lodt, nlod) -> set:
+    """In-memory models that must stay resident (Q36 B): ground tiles (SUBDIVISION UVs), LOD targets, the base city's
+    sky slots, light models (named, glow list at load), the water model, models never placed (events may use them),
+    models seen in more than STREAM_MAX_AREAS areas, and instance sources of every kept model."""
+    names = model_names(chi)
+    keep = set()
+    lod_targets = {t for i in range(nlod) for t in (lodt[i], lodt[nlod + i]) if t != 0xFFFF and t != i}
+    lights = set(light_turns(chi, models_all)) | {i for i, n in enumerate(names) if n in LIGHT_RENAME}
+    for i, m in cmem.items():
+        vis = world["model_vis"].get(i, ())
+        if (m.shape_flags & 0x2400 or i in lod_targets or i < SKY_SLOTS or i in lights or i == WATER_MODEL
+                or not vis or len(vis) > STREAM_MAX_AREAS or (QUAY_FILL and i in tuple(QUAY_RAIL_SRC) + tuple(QUAY_DROP))):
+            keep.add(i)                             # (quay models: their rail-only / ghost copies are built from them)
+    todo = list(keep)
+    while todo:
+        src = models_all[todo.pop()].instance_number
+        if src >= 0 and src in cmem and src not in keep:
+            keep.add(src); todo.append(src)
+    return keep
+
 
 def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
     hdr2, sp2, objects, refs = d2_extract_cached()
@@ -365,8 +560,11 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
         x, z = ws.to_d1(o.x, o.z)
         m = models_all.get(o.model)
         if kinds and m is not None and m.shape_flags & 0x0400 and abs(ws.s(o.y)) < 200 and                 kinds.get(((x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT)) == "water":
-            dropped += 1
-            continue
+            # Polish R35 (bridge hole at quay_wall): keep tiles that stand on a real D2 surface (a quay path whose
+            # road cell the overhead map paints as river); only tiles over D2's sea are river tiles
+            if not (KEEP_SHORE_TILES and any(t not in (6, 9) for h, t in _d2surf().levels(o.x, o.z))):
+                dropped += 1
+                continue
         yang = (o.yang - turns[o.model]) & 63 if o.model in turns else o.yang
         obj_list.append(CellObject(x, ws.s(o.y), z, yang, o.model))
     if turns:
@@ -386,7 +584,8 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                     col, row = (x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT
                     near = [wh[k] for k in ((col, row), (col - 1, row), (col, row - 1), (col - 1, row - 1)) if k in wh]
                     if inside_world(x, z, across, down):
-                        obj_list.append(CellObject(x, max(near) if near else WATER_Y, z, 0, WATER_MODEL))
+                        wy = BASIN_Y if (cx, cz) in BASIN_CELLS else (max(near) if near else WATER_Y)
+                        obj_list.append(CellObject(x, wy, z, 0, WATER_MODEL))
         print("water tiles:", len(wc))
         if FAR_WATER:
             fw = far_water_blocks(across, down)
@@ -401,6 +600,63 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
             for x, y, z, yang in sw:
                 obj_list.append(CellObject(x, y, z, yang, far_water_index(chi) + FAR_WATER))
             print("shore walls:", len(sw))
+    if QUAY_FILL:
+        # Polish C70 r2 (user R31, quay_wall): the lower river-walk pieces under the quay (D2 models 1000, 1115,
+        # 117/119/122 at y ~990) and our fillers go inside the boxes, and every 1500 tile there without water gets
+        # a water tile at the river's level, so no empty / void spot shows. The balustrade 1114 stays.
+        before = len(obj_list)
+        _QUAY_GRID["g"] = road_levels(dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS))
+        sites = quay_sites()
+        import math as _m
+        _grid = {}
+        for sx, sz in sites:
+            _grid.setdefault((int(sx) // QUAY_SITE_R, int(sz) // QUAY_SITE_R), []).append((sx, sz))
+        def inbox(x, z):
+            gx, gz = int(x) // QUAY_SITE_R, int(z) // QUAY_SITE_R
+            return any(_m.hypot(x - sx, z - sz) <= QUAY_SITE_R
+                       for i in (-1, 0, 1) for j in (-1, 0, 1) for sx, sz in _grid.get((gx + i, gz + j), ()))
+        filler = far_water_index(chi) + FAR_WATER if SHORE_WALLS else -1
+        rails = {m: quay_rail_index(chi) + k for k, m in enumerate(QUAY_RAIL_SRC)}
+        ghosts = {m: quay_rail_index(chi) + len(QUAY_RAIL_SRC) + k for k, m in enumerate(QUAY_DROP)}
+        kept = []
+        for o in obj_list:
+            if inbox(o.x, o.z):
+                if o.model == filler:
+                    continue
+                if o.model in (QUAY_GHOST or QUAY_DROP) and o.y > 600:   # keep the collision, hide the visuals (R31)
+                    o = CellObject(o.x, o.y, o.z, o.yang, ghosts[o.model]); kept.append(o); continue
+                if o.model in rails and QUAY_GHOST is None:
+                    o = CellObject(o.x, o.y, o.z, o.yang, rails[o.model])
+            kept.append(o)
+        obj_list = kept
+        boxes = [(int(sx), int(sz), QUAY_SITE_R) for sx, sz in sites]
+        have = set()                                       # 1500 sub-cells already under a (3060-wide) water tile
+        for o in obj_list:
+            if o.model == WATER_MODEL:
+                for dx in (-750, 750):
+                    for dz in (-750, 750):
+                        have.add(((o.x + dx) // 1500, (o.z + dz) // 1500))
+        wgrid = {}
+        for o in obj_list:
+            if o.model == WATER_MODEL:
+                wgrid.setdefault((o.x // 6000, o.z // 6000), []).append(o.y)
+        def local_wy(x, z):                         # the nearest existing water tiles' level (river vs lake differ)
+            ys = [y for i in (-1, 0, 1) for j in (-1, 0, 1) for y in wgrid.get((x // 6000 + i, z // 6000 + j), ())]
+            return max(ys) if ys else WATER_Y
+        wy = WATER_Y
+        added = 0
+        done_cells = set()
+        for bx, bz, br in boxes:
+            for x in range((bx - br) // 1500 * 1500 + 750, bx + br, 1500):
+                for z in range((bz - br) // 1500 * 1500 + 750, bz + br, 1500):
+                    if (x // 1500, z // 1500) in have or (x // 1500, z // 1500) in done_cells or not inbox(x, z)                             or not inside_world(x, z, across, down):
+                        continue
+                    done_cells.add((x // 1500, z // 1500))
+                    col, row = (x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT
+                    if kinds and kinds.get((col, row)) is None and not _quay_low(col, row):
+                        continue                    # real street / land cell: no water over it
+                    obj_list.append(CellObject(x, local_wy(x, z), z, 0, WATER_MODEL)); added += 1
+        print("quay fill: %d sites, %d objects changed / dropped, %d water tiles added (y %d)" % (len(sites), sum(1 for o in obj_list if o.model >= quay_rail_index(chi)), added, wy))
     # Driver 1 lists ~89% of objects only in their centre cell (measured on LA);
     # only objects larger than a cell are also listed in the cells they cover.
     covered = []
@@ -524,6 +780,7 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                     region_area[nb] = region_area[(rx, rz)]
                     nxt.append(nb)
         frontier = nxt
+    region_d2area = dict(region_area)                # C42 r3 (c): Driver 2's own area per region (SpecialByRegion)
 
     texof = {}
 
@@ -622,6 +879,7 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
         region_area.update(polish_areas.agglomerate(sorted(region_area), lambda r: textures_of(region_seen.get(r, set())),
                                                     street_edges, polish_areas.LIMIT_SHARE * AREA_TEXTURE_LIMIT))
         print("areas: street-merged start layout, %d areas" % len(set(region_area.values())))
+    over_ok = set()                                  # M3: single-region areas over the limit the profile accepts
     while True:
         connected = switch_entries()
         loadable = loadable_areas(connected)
@@ -631,14 +889,19 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                 area_regions[la].add(reg)
         counts = {a: len(textures_of(set().union(*(region_seen.get(r, set()) for r in area_regions[a]))))
                   for a in sorted(set(region_area.values()))}
-        big = [(n, a) for a, n in counts.items() if n > AREA_TEXTURE_LIMIT]
+        big = [(n, a) for a, n in counts.items() if n > AREA_TEXTURE_LIMIT and a not in over_ok]
         if not big:
             break
         _, a = max(big)
         regs = sorted(r for r, ra in region_area.items() if ra == a)
         if len(regs) < 2:
-            raise RuntimeError("area %d: one region already needs %d textures (loadable in %d regions; %.2f areas per region)" % (
-                a, counts[a], len(area_regions[a]), sum(map(len, loadable.values())) / len(loadable)))
+            if not CITY.area_single_over_ok:
+                raise RuntimeError("area %d: one region already needs %d textures (loadable in %d regions; %.2f areas per region)" % (
+                    a, counts[a], len(area_regions[a]), sum(map(len, loadable.values())) / len(loadable)))
+            print("areas: area %d (one region) needs %d textures > %d: kept, the texture packer halves more there (M3 profile)"
+                  % (a, counts[a], AREA_TEXTURE_LIMIT))
+            over_ok.add(a)
+            continue
         new_id = min(set(range(64)) - set(region_area.values()))
         moved = polish_areas.best_split(regs, street_edges) if street_edges is not None else None
         if not moved:
@@ -684,7 +947,8 @@ def build_world(chi: Lev, models_all: dict, inmem_ids: set, base: Lev):
                 straddlers=straddlers, local=local, obj_num=obj_num, cell_lists=cell_lists,
                 region_area=region_area, connected=connected, area_model_ids=area_model_ids,
                 model_vis=model_vis, model_near=model_near, radii=radii, region_seen=region_seen,
-                used_areas=used_areas, hdr2=hdr2)
+                used_areas=used_areas, hdr2=hdr2, region_d2area=region_d2area, loadable=loadable,
+                region_units=REGION_CELLS * CELL, half_x=half_x, half_z=half_z)
 
 
 _d2_cache = {}
@@ -693,7 +957,50 @@ _d2_cache = {}
 def d2_extract_cached():
     if "v" not in _d2_cache:
         _d2_cache["v"] = d2_extract(D2_LEV)
+        if CITY.water_relocate:                    # M3 Rio: the water slot's own objects use the model's new index
+            n = relocated_index()
+            moved = 0
+            for o in _d2_cache["v"][2].values():
+                if o.model == WATER_MODEL:
+                    o.model = n; moved += 1
+            print("water slot: Driver 2 model %d -> %d (%d objects)" % (WATER_MODEL, n, moved))
     return _d2_cache["v"]
+
+
+def relocated_index() -> int:
+    """M3 (CityProfile.water_relocate): the new index of the Driver 2 model that held the water slot = the city's model
+    count (it becomes the last Driver 2 model)."""
+    return struct.unpack_from("<i", Lev.parse(open(D2_LEV, "rb").read()).inmem.get(L_MODELS).data, 0)[0]
+
+
+def relocate_water_slot(chi: Lev):
+    """M3 Rio: no model slot < 900 is free (all placed, instance sources or LOD targets). The Driver 2 model at
+    WATER_MODEL is appended as model `count` (its objects follow, d2_extract_cached) and its slot is left to the
+    water tile, so no area model list writes over the water tile at run time (Havana hav6 lesson)."""
+    k = WATER_MODEL
+    lump = chi.inmem.get(L_MODELS)
+    raw = lump.data
+    count = struct.unpack_from("<i", raw, 0)[0]
+    p, entry = 4, None
+    for i in range(count):
+        size = struct.unpack_from("<i", raw, p)[0]
+        if i == k:
+            entry = raw[p: p + 4 + max(size, 0)]
+        p += 4 + max(size, 0)
+    if not entry or struct.unpack_from("<i", entry, 0)[0] <= 0:
+        raise RuntimeError("water_relocate: model %d is no in-memory model" % k)
+    lump.data = struct.pack("<i", count + 1) + raw[4:p] + entry + raw[p:]
+    nl = chi.loadtime.get(L_MODELNAMES)
+    names = nl.data.split(b"\0")
+    blob = b"\0".join(names[:count] + [names[k]]) + b"\0"
+    nl.data = blob + bytes(-len(blob) % 4)
+    ll = chi.inmem.get(L_LOD)
+    nlod = len(ll.data) // 4
+    t = list(struct.unpack_from("<%dH" % (2 * nlod), ll.data))
+    a, b = t[:nlod], t[nlod:]
+    a.append(count if a[k] == k else a[k]); b.append(count if b[k] == k else b[k])
+    ll.data = struct.pack("<%dH" % (2 * len(a)), *(a + b))
+    return count
 
 
 def pack_cell_pointers(ptrs: list[int]) -> bytes:
@@ -726,8 +1033,8 @@ def cell_object(o) -> bytes:
 # instances that borrow its vertices) is turned a quarter (model' = R(48): (x, z) -> (-z, x))
 # and its objects get yang + 16, which leaves the world unchanged. D2's TLIGHT02 (an arm,
 # facing -z) becomes TLIGHT00 so it gets kind 0. The plugin sets Chicago's glow offsets.
-LIGHT_TURN = {"TLIGHT01": 48}                  # model name -> quarter-turn steps (of 64)
-LIGHT_RENAME = {"TLIGHT02": "TLIGHT00"}
+LIGHT_TURN = dict(CITY.light_turn)            # model name -> quarter-turn steps (of 64); Chicago {"TLIGHT01": 48}
+LIGHT_RENAME = dict(CITY.light_rename)         # Chicago {"TLIGHT02": "TLIGHT00"}
 
 
 def light_turns(chi: Lev, models_all: dict) -> dict:
@@ -805,6 +1112,72 @@ def subdiv_textures(cmem, carea):
     return min(o for o in offs if o)
 
 
+# C76 (Infrastructure 20.10., user: diagonal 'cut' lines in the sky): Driver 1's dome is 4 quadrant models x 12 quads, each
+# drawn as ONE affine-textured quad (FUN_0004F34C) with a 64 x 42 sky piece; Driver 1's soft skies hide the warping along
+# the quad diagonals, Driver 2's skyline (straight building edges) shows it. Chicago's dome quads are split 2 x 2 (48 per
+# quadrant; the original 20 vertices keep their indices, the horizon-line pick 0x33ADF3 still finds them): a sub-quad
+# carries 0x80 | its parent piece in byte 1 and its own UVs (the piece's quarter, table layout TL, TR, BL, BR) in bytes
+# 8..15; exe group C76D (sky_dome_patches) makes the dome loop take the piece from byte 1 when bit 7 is set and the
+# piece draw take those UVs (CLUT of the parent). Driver 1's domes (byte 1 = their page index < 128) draw as before.
+SKY_SUBDIV = os.environ.get("CHI_SKY_SUBDIV", "0") == "1"   # parked (user R36: probe-33 sky approved; FPS -0.3)
+# the piece rows split (0 = cap / upper clouds, 1 = clouds + skyline tops, 2 = skyline + horizon): the soft top row
+# keeps its 4 quads (FPS: +96 instead of +144 sky quads)
+SKY_SUBDIV_ROWS = {int(v) for v in os.environ.get("CHI_SKY_SUBDIV_ROWS", "1,2").split(",") if v.strip()}
+SKY_PIECE_MAP = (0, 2, 6, 10, 1, 5, 9, 4, 8, 11, 7, 3, 2, 11, 7, 3, 6, 10, 8, 4, 0, 1, 5, 9, 9, 0, 4, 8, 5, 1, 10, 6,
+                 2, 3, 7, 11, 0, 4, 8, 3, 9, 5, 1, 7, 11, 2, 6, 10)   # exe 0x8008AA8C: piece of quad k in quadrant q
+
+
+def sky_subdivide(data: bytes, quadrant: int) -> bytes:
+    nv, npl = struct.unpack_from("<hH", data, 12)
+    vo, po = struct.unpack_from("<ii", data, 16)
+    if npl != 12 or nv < 4:
+        return data
+    V = [list(struct.unpack_from("<4h", data, vo + 8 * i)) for i in range(nv)]
+    polys = [bytearray(data[po + 20 * k: po + 20 * k + 20]) for k in range(npl)]
+    if any(p[0] & 31 != 5 for p in polys):
+        return data
+    mids = {}
+
+    def mid(a, b):
+        key = (min(a, b), max(a, b))
+        if key not in mids:
+            va, vb = V[a], V[b]
+            V.append([(va[0] + vb[0] + (1 if va[0] + vb[0] > 0 else 0)) // 2, (va[1] + vb[1]) // 2,
+                      (va[2] + vb[2]) // 2, 0])
+            mids[key] = len(V) - 1
+        return mids[key]
+
+    out = []
+    for k, p in enumerate(polys):
+        piece = SKY_PIECE_MAP[12 * quadrant + k]
+        if piece // 4 not in SKY_SUBDIV_ROWS:
+            out.append(bytes(p))                           # unmarked: Driver 1's own piece lookup
+            continue
+        bl, br, tr, tl = p[4], p[5], p[6], p[7]          # FUN_0004F34C: xy0 = v[4] (uv BL), v[5] BR, v[7] TL, v[6] TR
+        t, b, l_, r_ = mid(tl, tr), mid(bl, br), mid(tl, bl), mid(tr, br)
+        cx = [sum(V[i][c] for i in (tl, tr, bl, br)) // 4 for c in range(3)]
+        V.append(cx + [0]); c = len(V) - 1
+        grid = {(0, 0): tl, (1, 0): t, (2, 0): tr, (0, 1): l_, (1, 1): c, (2, 1): r_, (0, 2): bl, (1, 2): b, (2, 2): br}
+        u0, v0 = 64 * (piece % 4), 42 * (piece // 4)
+        us = (u0, (2 * u0 + 63 + 1) // 2, u0 + 63)
+        vs = (v0, (2 * v0 + 41 + 1) // 2, v0 + 41)
+        for j in range(2):
+            for i in range(2):
+                q = bytearray(p)
+                q[1] = 0x80 | piece
+                q[4], q[5], q[6], q[7] = grid[(i, j + 1)], grid[(i + 1, j + 1)], grid[(i + 1, j)], grid[(i, j)]
+                q[8:16] = bytes((us[i], vs[j], us[i + 1], vs[j], us[i], vs[j + 1], us[i + 1], vs[j + 1]))
+                out.append(bytes(q))
+    if len(V) > 120:
+        return data
+    hdr = bytearray(data[:vo])
+    vbytes = b"".join(struct.pack("<4h", *v) for v in V)
+    npo = vo + len(vbytes)
+    struct.pack_into("<hH", hdr, 12, len(V), len(out))
+    struct.pack_into("<iiii", hdr, 16, vo, npo, npo, npo)
+    return bytes(hdr) + vbytes + b"".join(out)
+
+
 def replace_model(lump: bytes, index: int, data: bytes) -> bytes:
     """Replace model <index> in a MODELS lump (count, then size + data per model)."""
     n, = struct.unpack_from("<i", lump, 0)
@@ -828,22 +1201,85 @@ def remap_subdivision(lump: bytes, cmem, carea, remap: dict, fallback) -> bytes:
     d = bytearray(lump)
     if "no_subremap" in EXPERIMENT:
         return bytes(d)
+    from models import POLY_SIZES
+    every = os.environ.get("CHI_SUBDIV_ALL", "1") != "0"
     done = set()
     for m in {**carea, **cmem}.values():
         if not (m.shape_flags & 0x2400) or m.vertices < 0x30 or m.num_polys == 0:
             continue
-        off = struct.unpack_from("<I", m.data, 0x2C)[0] >> 16
-        if not off or off in done or off + 18 > len(d):
-            continue
-        q = m.poly_block
-        r = remap.get(("C", m.data[q + 1], m.data[q + 2])) or fallback
-        np_, nd, nx, ny, ox, oy, ow, oh, nw, nh = r
-        for k in range(9):
-            u, v = d[off + 2 * k], d[off + 2 * k + 1]
-            d[off + 2 * k] = min(max(nx + (u - ox) * nw // ow, nx), nx + nw - 1)
-            d[off + 2 * k + 1] = min(max(ny + (v - oy) * nh // oh, ny), ny + nh - 1)
-        done.add(off)
+        # C74 (18.10.): the mid-band tile routine 0x80026C38 reads one word PER POLYGON from the list at +0x2C
+        # (s5 += 4; the vertex block follows the list), not just the first; tiles with several polygons (66 of 157
+        # in Chicago) kept Driver 2's page coordinates in their other records (sand patch, 150740). Each record is
+        # remapped with the polygon texture whose original rectangle holds its nine (u, v) points (polygon k first).
+        texs, q = [], m.poly_block
+        for k in range(m.num_polys):
+            t = m.data[q] & 31
+            texs.append((m.data[q + 1], m.data[q + 2]))
+            q += POLY_SIZES.get(t, 4)
+        n = min(m.num_polys, (m.vertices - 0x2C) // 4) if every else 1
+        for k in range(n):
+            off = struct.unpack_from("<I", m.data, 0x2C + 4 * k)[0] >> 16
+            if not off or off in done or off + 18 > len(d):
+                continue
+            pts = [(d[off + 2 * j], d[off + 2 * j + 1]) for j in range(9)]
+            r = None
+            for t in [texs[k]] + texs:
+                c = remap.get(("C",) + t)
+                if c and all(c[4] - 1 <= u <= c[4] + c[6] and c[5] - 1 <= v <= c[5] + c[7] for u, v in pts):
+                    r = c
+                    break
+            r = r or remap.get(("C",) + texs[k]) or fallback
+            np_, nd, nx, ny, ox, oy, ow, oh, nw, nh = r
+            for j, (u, v) in enumerate(pts):
+                d[off + 2 * j] = min(max(nx + (u - ox) * nw // ow, nx), nx + nw - 1)
+                d[off + 2 * j + 1] = min(max(ny + (v - oy) * nh // oh, ny), ny + nh - 1)
+            done.add(off)
     return bytes(d)
+
+
+def clut_check(path):
+    """S2/slot-15 (Infrastructure 21.10.): permanent, loaded special/car, sky and map CLUTs share one allocator of
+    192 + 32 x (first area slot) positions (Chicago 384). Count, from the written level: 38 fixed + palettes of the
+    permanent pages + of the 2 special pages loaded in play + one per car palette entry (PALLET lump).
+    Calibrated: var_polish_s1_cars1 = 384, var_d2cars16 = 374 (measured in game)."""
+    from texpages import read_pages as _rp
+    lev = Lev.parse(open(path, "rb").read())
+    ti, pages = _rp(lev)
+    pal = lev.loadtime.get(L_PALLET).data
+    npal = sum(len(pages[p].cluts) for p, _ in ti.permanent) + sum(len(pages[p].cluts) for p, _ in ti.special[:2])
+    if any(not pages[p].cluts for p, _ in ti.special):   # C124 blank pair first: the check takes the largest pair (check only)
+        sp_ = [len(pages[p].cluts) for p, _ in ti.special]
+        npal += max(sum(sp_[k:k + 2]) for k in range(0, len(sp_), 2)) - sum(sp_[:2])
+    first_area_slot = len(ti.permanent) - sum(1 for p, _ in ti.permanent if ti.positions[p][0] & 0x80) + 2
+    cap = int(os.environ.get("CHI_CLUT_CAP", str(192 + 32 * first_area_slot)))
+    pos = CLUT_BASE_POS + npal + struct.unpack_from("<i", pal, 0)[0]
+    print("CLUT allocator: %d of %d positions (permanent + 2 special pages %d palettes, car palette entries %d)"
+          % (pos, cap, npal, struct.unpack_from("<i", pal, 0)[0]))
+    margin = int(os.environ.get("CHI_CLUT_MARGIN", "4"))      # keep a few positions free (the count is calibrated, not exact)
+    if pos > cap - margin:
+        msg = "CLUT allocator overflow: %d > %d - margin %d (the first area slot's palettes would be overwritten)" % (pos, cap, margin)
+        if os.environ.get("CHI_CLUT_CHECK", "error") == "error":
+            raise RuntimeError(msg)
+        print("WARNING: " + msg)
+
+
+S1_COPY_HASH = {}
+AREA_COPY_HASH = {}   # model id -> hashes of its copies in all areas (carried models must be identical)
+
+
+def s1_diff_table(world) -> bytes:
+    """Q36 B fallback (b), for the engine: per ordered pair of areas loadable from one region (A -> B), the streamed
+    model ids present in both whose per-area copy differs (other texture spots): the plugin hides those carried
+    models until B's load completes. Format: u16 pair count, then per pair u8 A, u8 B, u16 n, n x u16 model id."""
+    pairs = set()
+    for reg, la in world["loadable"].items():
+        la = sorted(la)
+        pairs.update((x, y) for x in la for y in la if x != y)
+    out = []
+    for a, b in sorted(pairs):
+        ids = sorted(i for (aa, i), h in S1_COPY_HASH.items() if aa == a and (b, i) in S1_COPY_HASH and S1_COPY_HASH[(b, i)] != h)
+        out.append(struct.pack("<BBH", a, b, len(ids)) + struct.pack("<%dH" % len(ids), *ids))
+    return struct.pack("<H", len(out)) + b"".join(out)
 
 
 def build_spooled(world, area_data, res, chi: Lev):
@@ -863,8 +1299,14 @@ def build_spooled(world, area_data, res, chi: Lev):
         ids = instance_order([i for i in world["area_model_ids"][a] if i in area_data], area_data,
                              world["inmem_ids"], a)
         body = bytearray()
+        rma = getattr(res, "remap_area", {}).get(a)
         for i in ids:
-            body += struct.pack("<i", len(area_data[i])) + area_data[i]
+            md = area_data[i]
+            if rma:                                       # Polish S1: this area's spots of the local textures
+                md = remap_polys(md, "X", rma, None)
+                S1_COPY_HASH[(a, i)] = hash(md)
+            AREA_COPY_HASH.setdefault(i, []).append(hash(md))
+            body += struct.pack("<i", len(md)) + md
         body = pad(bytes(body))
         trailer = pad(struct.pack("<H", len(ids)) + struct.pack("<%dH" % len(ids), *ids))
         spooled += body + trailer
@@ -901,6 +1343,7 @@ def build_spooled(world, area_data, res, chi: Lev):
     # but each keeps its own area switch entries (one record per distinct set).
     empty_block = None                     # record fields of the shared empty data block
     empty_records = {}                     # switch entries -> record offset
+    empty_vals = None                      # the shared block's road map (M3 hav5: only regions with the same one share it)
 
     def record(fields, conn):
         start, pvs_n, cell_n, ptr_n, obj_n, roadm_n, roadh_n = fields
@@ -915,7 +1358,7 @@ def build_spooled(world, area_data, res, chi: Lev):
         full_view = all(int(r) >= pvs.MAX_RADIUS for r in world["radii"][reg[1] * REGION_CELLS:(reg[1] + 1) * REGION_CELLS,
                                                                            reg[0] * REGION_CELLS:(reg[0] + 1) * REGION_CELLS].flatten())
         shareable = not any(cells) and full_view and reg not in world.get("road_ids", {})
-        if shareable and empty_block is not None:
+        if shareable and empty_block is not None and world["road_values"][reg] == empty_vals:
             if conn not in empty_records:
                 empty_records[conn] = len(spool_records)
                 spool_records += record(empty_block, conn)
@@ -955,20 +1398,22 @@ def build_spooled(world, area_data, res, chi: Lev):
         spooled += roadm + roadh + ptr_blob + cell_blob + objs_blob + pvs_blob
         fields = (start, len(pvs_blob) // BLOCK, len(cell_blob) // BLOCK, len(ptr_blob) // BLOCK,
                   len(objs_blob) // BLOCK, len(roadm) // BLOCK, len(roadh) // BLOCK)
-        if shareable:
-            empty_block = fields
+        if shareable and empty_block is None:
+            # (a region without objects inside the city, e.g. Havana's centre (7,10) / (8,10): its building blocks
+            # took the shared block's all-water road map, the map edge's)
+            empty_block, empty_vals = fields, world["road_values"][reg]
             empty_records[conn] = len(spool_records)
         region_offsets[reg[1] * rx_n + reg[0]] = len(spool_records)
         spool_records += record(fields, conn)
     return bytes(spooled), areas, slots_max, objs_max, region_offsets, bytes(spool_records), total_cell_data
 
 
-WATER_MODEL = 683            # free in-memory Chicago slot < 900 (road map ids must be < 900)
+WATER_MODEL = CITY.water_model   # free in-memory slot (Chicago 683) < 900 (road map ids must be < 900)
 WATER_SRC = 316              # LA's water tile (shape flags 0x04A1, 1500 x 1500, LASEA)
 WATER_SCALE = 2              # LA's 1500 tile stretched to one per 3000 cell (with real corner vertices, see water_model)
-WATER_Y = int(os.environ.get("CHI_WATER_Y", "1084"))               # water surface below street level: the sand base (one ocean level; quay gaps closed by shore walls)
+WATER_Y = int(os.environ.get("CHI_WATER_Y", str(CITY.water_level)))               # water surface below street level: the sand base (one ocean level; quay gaps closed by shore walls)
 WATER_NEAR = 4               # water tiles on water cells within this many cells of land
-WATER_LEVEL = int(os.environ.get("CHI_WATER_LEVEL", "1084"))  # one level for all water: 100 under the sand base (beach_n car y -820 = sand 984;
+WATER_LEVEL = int(os.environ.get("CHI_WATER_LEVEL", str(CITY.water_level)))  # one level for all water: 100 under the sand base (beach_n car y -820 = sand 984;
                              # at equal height water and sand tiles swapped draw order: water through the sand); 0 = per shore
 WATER_BELOW_SHORE = 100      # water this far under the lowest shore nearby
 WATER_SHORE_RADIUS = 8       # road cells (12000 units)
@@ -978,13 +1423,21 @@ WATER_GROW = int(os.environ.get("CHI_WATER_GROW", "0"))     # cells of water und
 BEACH_GROW = int(os.environ.get("CHI_BEACH_GROW", "0"))     # display-only water this many cells under low land (beaches): gaps show water; 0 since R12 (user 2026-10-13: seen from below while drowning; was 2)
 
 
+def _city_key() -> str:
+    """M3: converter caches must not mix cities. Chicago (day and night share the geometry) keeps its old keys (""),
+    any other Driver 2 level adds its file name."""
+    if CITY.name == "CHICAGO" and CITY.is_lev(D2_LEV):
+        return ""
+    return os.path.basename(D2_LEV).upper()
+
+
 def surface_grid(across, down):
     """Driver 2 surface per 3000-unit cell, sampled at its 4 quarter points:
     {(cx, cz): (land?, wet?)} (cached)."""
     import pickle, hashlib
     from d2surface import Surface
-    key = hashlib.md5(open("d2surface.py", "rb").read()).hexdigest()[:8]
-    cache = "work/surface_grid4_%d_%d_%s.pkl" % (across, down, key)
+    key = hashlib.md5(open("d2surface.py", "rb").read() + _city_key().encode()).hexdigest()[:8]
+    cache = os.path.join(inputs.cache_dir(), "surface_grid4_%d_%d_%s.pkl") % (across, down, key)
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     surf = Surface(D2_LEV)
@@ -1003,6 +1456,9 @@ def surface_grid(across, down):
     return grid
 
 
+MAP_WATER = tuple(CITY.map_water)   # overhead-map palette of water (Chicago: river 1, lake 12; Havana: sea 4)
+
+
 def sea_kinds(across, down):
     """Driver 2 has no water surface: the lake, the river, building interiors and
     the land outside the city all read as "no surface" (sea). Its overhead map
@@ -1014,8 +1470,8 @@ def sea_kinds(across, down):
     from d2overlay import Overlay
     world = dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS)
     grid = road_levels(world)
-    key = hashlib.md5((open("d2overlay.py", "rb").read() + repr((across, down, ws.OFFSET_X, ws.OFFSET_Z, sorted(grid.items())[:50])).encode() + b"v4")).hexdigest()[:8]
-    cache = "work/sea_kinds_%s.pkl" % key
+    key = hashlib.md5((open("d2overlay.py", "rb").read() + repr((across, down, ws.OFFSET_X, ws.OFFSET_Z, sorted(grid.items())[:50])).encode() + b"v4" + _city_key().encode() + (b"" if MAP_WATER == (1, 12) else repr(MAP_WATER).encode()) + (b"seatiles" if CITY.sea_tiles_water else b""))).hexdigest()[:8]
+    cache = os.path.join(inputs.cache_dir(), "sea_kinds_%s.pkl") % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     ov = Overlay(D2_LEV)
@@ -1038,17 +1494,43 @@ def sea_kinds(across, down):
         wet = 0
         for (col, row) in comp[::max(1, len(comp) // 4000)]:
             dx, dz = ws.to_d2(col * ROAD_UNIT - half_x, half_z - row * ROAD_UNIT)
-            wet += any(ov.at(dx + ox, dz + oz) in (1, 12) for ox in (-r, 0, r) for oz in (-r, 0, r))
+            wet += any(ov.at(dx + ox, dz + oz) in MAP_WATER for ox in (-r, 0, r) for oz in (-r, 0, r))
         frac = wet / len(comp[::max(1, len(comp) // 4000)])
         edge = any(k[0] in (0, w - 1) or k[1] in (0, h - 1) for k in comp)
         kind = "water" if frac >= 0.3 else ("void" if edge else "inside")
         if edge and len(comp) > 100000:        # the lake joins the land outside the city: per cell
             for (col, row) in comp:
                 dx, dz = ws.to_d2(col * ROAD_UNIT - half_x, half_z - row * ROAD_UNIT)
-                out[(col, row)] = "water" if ov.at(dx, dz) in (1, 12) else "void"
+                out[(col, row)] = "water" if ov.at(dx, dz) in MAP_WATER else "void"
             continue
         for k in comp:
             out[k] = kind
+    if CITY.sea_tiles_water:                   # M3 Rio (rio2): Driver 2's own sea tiles mark water (the coast strips)
+        import d2cells as _d2c
+        from models import inmem_models as _im, area_models as _am
+        _lev = Lev.parse(open(D2_LEV, "rb").read())
+        _all = {**_am(_lev), **_im(_lev)[0]}
+        _ext = {}
+        for i, m in _all.items():
+            if m.shape_flags & 0x80 and m.shape_flags & 0x0400:
+                src = _all.get(m.instance_number, m) if m.instance_number >= 0 else m
+                try:
+                    vs = [struct.unpack_from("<3h", src.data, src.vertices + 8 * k) for k in range(src.num_vertices)]
+                    _ext[i] = (min(v[0] for v in vs), max(v[0] for v in vs), min(v[2] for v in vs), max(v[2] for v in vs))
+                except struct.error:
+                    pass
+        marked = 0
+        for o in _d2c.extract(D2_LEV)[2].values():
+            e = _ext.get(o.model)
+            if not e:
+                continue
+            xs = (o.x + e[0], o.x + e[1]); zs = (o.z + e[2], o.z + e[3])
+            (x0, z0), (x1, z1) = ws.to_d1(xs[0], zs[0]), ws.to_d1(xs[1], zs[1])
+            for col in range(int((min(x0, x1) + half_x) // ROAD_UNIT), int((max(x0, x1) + half_x) // ROAD_UNIT) + 2):
+                for row in range(int((half_z - max(z0, z1)) // ROAD_UNIT), int((half_z - min(z0, z1)) // ROAD_UNIT) + 2):
+                    if out.get((col, row)) == "void":
+                        out[(col, row)] = "water"; marked += 1
+        print("sea kinds: %d void cells under Driver 2 sea tiles become water" % marked)
     for _ in range(3):                         # shore: map misfit leaves void strips at the water
         grow = [k for k, v in out.items() if v == "void" and any(
             out.get(n) == "water" for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1)))]
@@ -1084,6 +1566,101 @@ def water_heights(across, down):
             for k, v in kinds.items() if v == "water"}
 
 
+_iw = __import__("os").environ.get("CHI_POLISH_INSIDEWATER", "basin")   # R36: basin default (user approved); "0" = off
+INSIDE_BASIN = _iw == "basin"      # C75: per-hole rule from D2's geometry (exposed holes get water)
+INSIDE_WATER = 1 if INSIDE_BASIN else int(_iw or 0)   # (radius rule: 3000-cells from water; too coarse)
+
+
+TALL_SHARE = 0.35
+BASIN_CELLS = set()                # 3000-cells filled as basins (water_cells)
+BASIN_Y = int(__import__('os').environ.get('CHI_POLISH_BASIN_Y', '24'))   # basin water just below street / sand level (sand -22, y down)
+BASIN_MIN = 5                      # road cells; smaller holes are building interiors
+WATER_TEX = CITY.water_tex   # a basin's own rim / water textures
+
+
+def exposed_inside_cells(kinds, across, down, wall=1000):
+    """C75 per-hole rule from Driver 2's own geometry: 'inside' road cells (enclosed no-surface holes) form holes;
+    a hole whose own and surrounding objects (1-cell ring) are all lower than `wall` above the street is an open
+    basin / pool (Buckingham Fountain: rim 384, centre 768), where Driver 2's water level shows; a hole walled by
+    tall facades (building blocks: 2000+) is a building interior and stays dry. Returns the basin road cells."""
+    import collections, d2cells
+    from models import inmem_models, area_models
+    _, _, objects, _ = d2cells.extract(D2_LEV)
+    d2 = Lev.parse(open(D2_LEV, "rb").read())
+    mem, _ = inmem_models(d2); allm = {**area_models(d2), **mem}
+    half_x, half_z = across // 2 * CELL, down // 2 * CELL
+    inside = {k for k, v in kinds.items() if v == "inside"}
+    comp, n = {}, 0
+    for k in inside:
+        if k in comp:
+            continue
+        stack = [k]; comp[k] = n
+        while stack:
+            c = stack.pop()
+            for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nb = (c[0] + d[0], c[1] + d[1])
+                if nb in inside and nb not in comp:
+                    comp[nb] = n; stack.append(nb)
+        n += 1
+    height = {}
+    tallest = collections.defaultdict(int)
+    count = collections.Counter(); tall_n = collections.Counter(); wet_n = collections.Counter()
+    from texrepack import model_texrefs
+    from textures import TexInfo
+    ti2 = TexInfo.parse(d2.loadtime.get(34).data); nm2 = d2.loadtime.get(5).data
+    def _tn(p, k):
+        try:
+            no = ti2.details[p][k][1]; return nm2[no:nm2.index(b"\0", no)].decode("latin-1").upper()
+        except Exception:
+            return ""
+    wet_model = {}
+    for o in objects.values():
+        m = allm.get(o.model)
+        if m is None:
+            continue
+        if o.model not in height:
+            src = allm.get(m.instance_number, m) if m.instance_number >= 0 and m.instance_number != o.model else m
+            try:
+                ys = [struct.unpack_from("<3h", src.data, src.vertices + 8 * i)[1] for i in range(src.num_vertices)] if src.vertices > 0 else [0]
+            except struct.error:
+                ys = [0]
+            height[o.model] = -min(ys)
+        h = height[o.model] - o.y
+        x, z = ws.to_d1(o.x, o.z)
+        col, row = (x + half_x + ROAD_UNIT // 2) // ROAD_UNIT, (half_z - z + ROAD_UNIT // 2) // ROAD_UNIT
+        for dc in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                c = comp.get((col + dc, row + dr))
+                if c is not None:
+                    tallest[c] = max(tallest[c], h)
+                    count[c] += 1; tall_n[c] += h >= wall
+                    if o.model not in wet_model:
+                        wet_model[o.model] = any(w in _tn(*r) for r in model_texrefs(m, allm) for w in WATER_TEX)
+                    wet_n[c] += wet_model[o.model]
+                    break
+            else:
+                continue
+            break
+    # mostly low objects (rims, paving, plants; a fountain's few tall centre pieces allowed) = open basin
+    size = collections.Counter(comp.values())
+    # (D2 top-down check 18.10.: the 1-3 cell holes on the north lakefront lie under building roofs: dry)
+    basins = {c for c in range(n) if count[c] >= 4 and tall_n[c] <= TALL_SHARE * count[c] and wet_n[c] and size[c] >= BASIN_MIN}
+    out = {k for k, c in comp.items() if c in basins}
+    print("inside holes: %d holes, %d basins (water-edge textures, <= %d%% of their objects %d+ high) = %d road cells" % (n, len(basins), TALL_SHARE * 100, wall, len(out)))
+    return out
+
+
+KEEP_SHORE_TILES = __import__("os").environ.get("CHI_POLISH_KEEPSHORETILES", "1") == "1"
+_SURF = {}
+
+
+def _d2surf():
+    if "s" not in _SURF:
+        from d2surface import Surface
+        _SURF["s"] = Surface(D2_LEV)
+    return _SURF["s"]
+
+
 def water_cells(across, down):
     """Cells that get a water tile: every 3000-unit cell with real water (sea_kinds)
     in one of its four road cells, plus land gaps of up to WATER_CLOSE cells
@@ -1109,6 +1686,31 @@ def water_cells(across, down):
                     if all((cx + dx * k, cz + dz * k) not in wet for k in range(1, n)):
                         out.update((cx + dx * k, cz + dz * k) for k in range(1, n))
                     break
+    if INSIDE_WATER:
+        # Polish (user R33, monument): Driver 2 shows its global water level through every no-surface hole; an
+        # enclosed hole ("inside") next to the lake / river is a pool or basin there, not ground: give it water
+        inside = set()
+        for cz in range(down):
+            for cx in range(across):
+                cells = [(2 * cx + i, rows - 1 - (2 * cz + j)) for i in (0, 1) for j in (0, 1)]
+                if any(kinds.get(c) == "inside" for c in cells):
+                    inside.add((cx, cz))
+        if INSIDE_BASIN:
+            # per hole from Driver 2's own geometry: a no-surface road cell under a tall model (building interior)
+            # stays dry; an exposed one (fountain basin, pool) shows D2's water level -> water tile
+            exposed = exposed_inside_cells(kinds, across, down)
+            add = {c for c in inside if any(((2 * c[0] + i, rows - 1 - (2 * c[1] + j)) in exposed) for i in (0, 1) for j in (0, 1))}
+        else:
+            add = {c for c in inside if any((c[0] + dx, c[1] + dz) in wet for dx in range(-INSIDE_WATER, INSIDE_WATER + 1)
+                                            for dz in range(-INSIDE_WATER, INSIDE_WATER + 1))}
+        print("inside water: %d cells next to the lake / river" % len(add - out))
+        if INSIDE_BASIN:
+            # R35: the basin water continues one cell under the surrounding sand / paving (like the beaches), so no
+            # gap shows at the rim; at BASIN_Y it stays below the ground there
+            ring = {(cx + dx, cz + dz) for (cx, cz) in add for dx in (-1, 0, 1) for dz in (-1, 0, 1)}
+            add = (add | ring) - out
+            BASIN_CELLS.update(add)
+        out |= add
     if BEACH_GROW:                             # display-only water under low land next to the water (beaches)
         world = dict(across=across, down=down, rx_n=across // REGION_CELLS, rz_n=down // REGION_CELLS)
         grid = road_levels(world)
@@ -1259,9 +1861,9 @@ def far_water_blocks(across, down):
     return out
 
 
-SHORE_WALLS = "no_walls" not in EXPERIMENT and "no_water" not in EXPERIMENT   # quay walls down to the water (984 level)
-WALL_TEXTURE = ("C", 1, 3)   # Driver 2's RIVER3A: concrete quay wall with a dark waterline (forced resident)
-WALL_DEPTH = 2000            # from the bank down, past the water (WATER_LEVEL)
+SHORE_WALLS = "no_walls" not in EXPERIMENT and "no_water" not in EXPERIMENT and CITY.wall_texture is not None   # quay walls down to the water (984 level)
+WALL_TEXTURE = CITY.wall_texture   # Chicago: Driver 2's RIVER3A: concrete quay wall with a dark waterline (forced resident)
+WALL_DEPTH = CITY.wall_depth if CITY.wall_depth else 2000 + CITY.water_level - 1084   # from the bank down, past the water (WATER_LEVEL; Chicago 2000)
 WALL_TOP_GAP = 40            # wall top this far under the bank edge: no overlap with the ground at the rim
 WALL_YANG = tuple(int(v) for v in os.environ.get("CHI_WALL_YANG", "48,16,32,0").split(","))   # land +x, -x, below, above (x verified at quaydiag 2026-10-11: 16/48 faced the land)
 
@@ -1285,6 +1887,72 @@ def shore_wall_model(res, fallback) -> bytes:
     return remap_polys(conv[0], "C", res.remap, fallback)
 
 
+SHORE_FIX = __import__("os").environ.get("CHI_POLISH_SHOREFIX", "1") == "1"  # Polish: no walls hanging from raised levels (default since 16.10., C70 round 2)
+SHORE_RAISED = 300            # a bank level this far above the street counts as raised
+
+
+QUAY_CLEAN = __import__("os").environ.get("CHI_POLISH_QUAYCLEAN", "1") == "1" and bool(CITY.quay_models)   # R36: default (user approved)   # Polish C70: no fillers at D2's quays
+QUAY_MODELS = CITY.quay_models
+QUAY_DROP = CITY.quay_drop   # lower river-walk / below-street quay pieces (C70 r2)
+_qf = __import__("os").environ.get("CHI_POLISH_QUAYFILL", "4")   # R36: mode 4 default (user approved map fixes 2); "0" = off
+QUAY_FILL = _qf in ("1", "2", "3", "4") and bool(CITY.quay_rail_src)   # M3: Chicago-only lists (empty elsewhere)
+# mode 2 (user R33): the sloped quay walls are the REAL ones (1113/1114 faces, 1115 stay); only the vertical fronts
+# standing before them (1000 and the lower-walk boxes 117/119/122) go invisible (collision kept); water fill as mode 1
+QUAY_GHOST = CITY.quay_ghost_2 if _qf == "2" else CITY.quay_ghost_34 if _qf in ("3", "4") else None
+# mode 3 (user R34): the lower-walk boxes 117/119/122 ARE the quay seen from across the river (hiding them left an
+# empty spot); only the vertical front 1000 before the sloped wall goes invisible (collision kept)
+QUAY_SPOT = CITY.quay_spot      # quay_wall (D1)
+QUAY_STRETCH = 12000               # lower-walk pieces this close to quay_wall define the clean-up stretch
+QUAY_SITE_R = 2500                 # ... and everything this close to such a piece is cleaned
+
+
+def quay_sites():
+    """D1 positions of Driver 2's lower river-walk pieces (QUAY_DROP models below the street) along the stretch
+    around quay_wall."""
+    import math, d2cells
+    _, _, objects, _ = d2cells.extract(D2_LEV)
+    out = []
+    for o in objects.values():
+        if o.model in QUAY_DROP and o.y > 500:
+            x, z = ws.to_d1(o.x, o.z)
+            if _qf == "4" or math.hypot(x - QUAY_SPOT[0], z - QUAY_SPOT[1]) <= QUAY_STRETCH:   # 4: city-wide (R35)
+                out.append((x, z))
+    return out
+
+
+def _quay_low(col, row):
+    """A road-map cell whose only D2 levels lie well below the street (the lower river walk)."""
+    grid = _QUAY_GRID.get("g")
+    lv = grid.get((col, row), []) if grid else []
+    return bool(lv) and all(y > 500 for y, t in lv if t not in (6, 9))
+
+
+_QUAY_GRID = {}   # Driver 2's river quay walls with balustrade (9462 D1 units long)
+QUAY_R = 1600                      # a filler wall this close to a D2 quay wall line is dropped
+
+
+def quay_segments():
+    """Driver 2's quay-wall lines in Driver 1 coordinates: [((x0, z0), (x1, z1))] (model z axis rotated by yang)."""
+    import math, d2cells
+    _, _, objects, _ = d2cells.extract(D2_LEV)
+    out = []
+    for o in objects.values():
+        if o.model in QUAY_MODELS:
+            a = o.yang * 2 * math.pi / 64
+            x0, z0 = ws.to_d1(o.x, o.z)
+            L = 7168 * ws.SCALE
+            out.append(((x0, z0), (x0 + math.sin(a) * L, z0 + math.cos(a) * L)))
+    return out
+
+
+def _seg_dist(p, a, b):
+    import math
+    ax, az = a; bx, bz = b; px, pz = p
+    dx, dz = bx - ax, bz - az
+    t = max(0.0, min(1.0, ((px - ax) * dx + (pz - az) * dz) / max(1e-9, dx * dx + dz * dz)))
+    return math.hypot(px - ax - t * dx, pz - az - t * dz)
+
+
 def shore_walls(across, down):
     """(x, y, z, yang) per water/land edge where the bank stands above the water:
     the wall hides the gap between the bank's edge and the water below it."""
@@ -1306,11 +1974,30 @@ def shore_walls(across, down):
                 continue                       # bridge deck: water again on the far side, no wall under it
             lv = sorted(grid[n], key=lambda hl: (hl[1] in (6, 9), abs(hl[0])))
             gy = 0 if abs(lv[0][0]) < HEIGHT_DEADBAND else lv[0][0]
+            if SHORE_FIX and gy < -SHORE_RAISED:
+                # Polish (quay_wall, 15.10.): a land cell whose only D2 level is raised (a structure top, a deck)
+                # hung a 2000-high wall from up there: huge grey planes across the street. Take the bank level of
+                # the land neighbours instead (median of their street-near levels), else no wall.
+                near = sorted(min((h for h, t in grid.get((n[0] + i, n[1] + j), []) if t not in (6, 9)), key=abs, default=None)
+                              for i in (-1, 0, 1) for j in (-1, 0, 1) if (i or j) and kinds.get((n[0] + i, n[1] + j)) is None
+                              and grid.get((n[0] + i, n[1] + j)))
+                near = [h for h in near if h is not None and -SHORE_RAISED <= h <= 1000]
+                if not near:
+                    continue
+                gy = near[len(near) // 2]
+                gy = 0 if abs(gy) < HEIGHT_DEADBAND else gy
             if gy > wh.get((col, row), WATER_Y) - 100:
                 continue                       # beach at or below the water: no wall
             x = col * ROAD_UNIT - half_x + dc * ROAD_UNIT // 2
             z = half_z - row * ROAD_UNIT - dr * ROAD_UNIT // 2
             out.append((x, gy + WALL_TOP_GAP, z, yang))
+    if QUAY_CLEAN:
+        # Polish C70 (user R30): at Driver 2's own quays (balustrade walls 1113-1115) our generated fillers were the
+        # low / below-street faces the user kept seeing; D2 has none there. Beach walls elsewhere stay.
+        segs = quay_segments()
+        keep = [w for w in out if not any(_seg_dist((w[0], w[2]), a, b) <= QUAY_R for a, b in segs)]
+        print("shore walls: %d of %d dropped at Driver 2's quays (CHI_POLISH_QUAYCLEAN)" % (len(out) - len(keep), len(out)))
+        out = keep
     return out
 
 
@@ -1345,8 +2032,8 @@ def road_levels(world):
     import pickle, hashlib
     from d2surface import Surface
     key = hashlib.md5(open("d2surface.py", "rb").read() + repr(
-        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE)).encode()).hexdigest()[:8]
-    cache = "work/road_levels_%s.pkl" % key
+        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE)).encode() + _city_key().encode()).hexdigest()[:8]
+    cache = os.path.join(inputs.cache_dir(), "road_levels_%s.pkl") % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     surf = Surface(D2_LEV)
@@ -1482,11 +2169,11 @@ def trench_ends(world, grid, choice, kinds):
 # Driver 2 surfaces of rail inclines (not marked as such in the data, found by the user):
 # col 369 rows 873-879 climbs from the trench (1352) to street level (R8, the user's
 # 19:14 track), rows 860-866 is its twin to the north (one 1-cell V with the floor between)
-RAIL_INCLINES = {(369, r) for r in list(range(860, 867)) + list(range(873, 880))}
-RAIL_CUTS = [(602, 796)]       # seeds of rail trenches (user R10: under c20_p2n's bridge)
-RAIL_FLOOR = 1352
+RAIL_INCLINES = set(CITY.rail_inclines)
+RAIL_CUTS = list(CITY.rail_cuts)       # seeds of rail trenches (user R10: under c20_p2n's bridge)
+RAIL_FLOOR = CITY.rail_floor
 EDGE_WATER_MIN = int(os.environ.get("CHI_EDGE_WATER_MIN", "6"))   # of 9 samples water: a water-edge cell becomes water
-BED_DEPTH = 1700               # land levels this deep next to water are D2's river / lake bed
+BED_DEPTH = 1700 + CITY.water_level - 1084   # (Chicago 1700) land levels this deep next to water are D2's river / lake bed
 GUARD_MIN_BELOW = int(os.environ.get("CHI_GUARD_MIN_BELOW", "300"))   # a neighbour's level becomes a guard plane only this far below (a sunken road / trench floor: a car along its wall must not be pushed up)
 NO_SWITCH = -0x8000            # SIPOLY pad: no Driver 2 switch height (the plugin uses the midpoint)
 
@@ -1498,8 +2185,8 @@ def level_switches(world):
     import pickle, hashlib
     from d2surface import Surface
     key = hashlib.md5(open("d2surface.py", "rb").read() + repr(
-        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE, "switch1")).encode()).hexdigest()[:8]
-    cache = "work/level_switches_%s.pkl" % key
+        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE, "switch1")).encode() + _city_key().encode()).hexdigest()[:8]
+    cache = os.path.join(inputs.cache_dir(), "level_switches_%s.pkl") % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     surf = Surface(D2_LEV)
@@ -1522,8 +2209,8 @@ def sea_fixed_cells(world):
     import pickle, hashlib
     from d2surface import Surface
     key = hashlib.md5(open("d2surface.py", "rb").read() + repr(
-        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE, "seafix1")).encode()).hexdigest()[:8]
-    cache = "work/sea_fixed_%s.pkl" % key
+        (world["rx_n"], world["rz_n"], world["across"], world["down"], ws.SCALE, "seafix1")).encode() + _city_key().encode()).hexdigest()[:8]
+    cache = os.path.join(inputs.cache_dir(), "sea_fixed_%s.pkl") % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     surf = Surface(D2_LEV)
@@ -1912,6 +2599,9 @@ def surface_planes(world, grid, choice, kinds):
           % (len(planes), nmulti, len(slopes), len(cand), borrowed))
     if "keep_fullcells" not in EXPERIMENT:
         split_cells(world, grid, hw, land, slopes, planes)
+    import polish_slopes
+    if polish_slopes.ENABLED:                     # Polish C37: Driver 2's sloped planes at any angle (CHI_POLISH_SLOPES)
+        polish_slopes.apply(world, hw, planes, sys.modules[__name__])
     return planes
 
 
@@ -1928,7 +2618,7 @@ def split_samples(world, keys):
     from d2surface import Surface
     key = hashlib.md5(open("d2surface.py", "rb").read() + repr((sorted(keys), world["across"], world["down"],
                                                                  ws.SCALE, SPLIT_SAMPLES, D2_LEV)).encode()).hexdigest()[:8]
-    cache = "work/split_samples_%s.pkl" % key
+    cache = os.path.join(inputs.cache_dir(), "split_samples_%s.pkl") % key
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     surf = Surface(D2_LEV)
@@ -2127,6 +2817,9 @@ def _canonical(pl):
     return best
 
 
+import polish_slopes as _PSLOPES
+
+
 def roadsurf_lump(planes, ids, force=None):
     """Driver 1 ROADSURF lump (int count; SURFACEINFO {type, info, heading, numpolys}
     + SIPOLY 52 B {xz[4] int pairs, plane a b c d, nverts, pad}) with one surface per
@@ -2202,7 +2895,10 @@ def roadsurf_lump(planes, ids, force=None):
             else:
                 x0, z0, x1, z1 = foot
                 out += struct.pack("<8i", x0, z0, x0, z1, x1, z1, x1, z0)
-            out += struct.pack("<4i", int(round(a * 4096 / n)), int(round(4096 * 4096 / n)), int(round(c * 4096 / n)), d)
+            if _PSLOPES.ENABLED and _PSLOPES.EXACT:        # Polish C37: a, c are the engine's gradients (no / b)
+                out += struct.pack("<4i", *_PSLOPES.plane_words(a, c), d)
+            else:
+                out += struct.pack("<4i", int(round(a * 4096 / n)), int(round(4096 * 4096 / n)), int(round(c * 4096 / n)), d)
             out += struct.pack("<hh", 3 if len(foot) == 6 else 4, sw)   # pad: the D2 level switch height (plugin)
     cells = {k: (sid[key], rot) for k, (rot, key) in canon.items() if key in sid}
     proto = os.environ.get("CHI_PROTO_TRI")        # C37 prototype: "col,row" gets two triangles
@@ -2309,6 +3005,9 @@ def road_values(world):
         is_wet = lambda lv: bool(lv) and all(t in (6, 9) for y, t in lv)
         deck_of = lambda lv: min((y, t) for y, t in lv) if lv and not is_wet(lv) and min(y for y, t in lv) <= -500 else None
         deck_only = lambda lv: bool(lv) and not is_wet(lv) and all(y <= -500 for y, t in lv)
+        if CITY.raised_ground:                    # M3 Havana: a raised quarter's ground is no deck (its shore cells got the
+            _dk = deck_only                       # main level as an extra plane and wrote it: 2700 steps on the quarter's edge)
+            deck_only = lambda lv: _dk(lv) and not all(any(abs(y - g) <= 150 for g in CITY.raised_ground) for y, t in lv)
         has_deck = lambda k, dy: any(abs(y - dy) <= 300 for y, t in grid.get(k, []) if t not in (6, 9))
         filled, gaps = 0, set()
         for k in sorted(k for k, lv in grid.items() if deck_only(lv)):
@@ -2328,7 +3027,8 @@ def road_values(world):
                 gaps.add(a)
         lowered, inland = 0, 0
         for k in sorted(k for k, lv in grid.items() if deck_only(lv)):
-            if not any(is_wet(grid.get((k[0] + i, k[1] + j), [])) for i in (-1, 0, 1) for j in (-1, 0, 1)):
+            if not any(is_wet(grid.get((k[0] + i, k[1] + j), [])) and not (CITY.inside_follow and kinds.get((k[0] + i, k[1] + j)) == "inside")
+                       for i in (-1, 0, 1) for j in (-1, 0, 1)):   # (M3 Havana: a building block is no water: its ramps up to the raised quarters kept the street)
                 inland += 1                         # over land (building blocks): no invisible ground under it
                 continue
             low = set()
@@ -2351,6 +3051,30 @@ def road_values(world):
         choice[k] = lv[0]
         if kinds.get(k) == "inside":           # building block: plain ground, no drowning
             choice[k] = (0, 0)
+    if CITY.inside_follow:
+        # M3 Havana (hav5): building blocks (no D2 surface, enclosed) take the level of the nearest
+        # street cell instead of street level 0: a block inside a raised quarter at 0 dropped cars
+        # 2700 at every block edge (Chicago: blocks stay 0, its streets are at 0)
+        inside = {k for k in choice if kinds.get(k) == "inside"}
+        front = sorted(k for k in inside if any(
+            (n in choice and n not in inside and choice[n][1] not in (6, 9))
+            for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1))))
+        src = {}
+        for k in front:
+            ys = sorted((choice[n][0] for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1))
+                         if n in choice and n not in inside and choice[n][1] not in (6, 9)), key=abs)
+            src[k] = ys[0]
+        done = set(front)
+        while front:
+            nxt = []
+            for k in front:
+                choice[k] = (src[k], 0)
+                for n in ((k[0] + 1, k[1]), (k[0] - 1, k[1]), (k[0], k[1] + 1), (k[0], k[1] - 1)):
+                    if n in inside and n not in done:
+                        done.add(n); src[n] = src[k]; nxt.append(n)
+            front = nxt
+        print("road map: %d building-block cells follow their nearest street's level (%d raised)"
+              % (len(done), sum(1 for k in done if choice[k][0] <= -HEIGHT_DEADBAND)))
     if "keep_rail" not in EXPERIMENT:
         # rail cuts (user R10: the trench under c20_p2n's bridge is railway): a bridge
         # over it keeps only its street, the rail floor stays but feeds no guard planes
@@ -2471,6 +3195,23 @@ PVS_BUFFER = 32768        # empty PVS (4 KB) + road ids (7.2 KB) + road values (
 FLAT_GROUND = int(next((e[7:] for e in EXPERIMENT if e.startswith("ground=")), "0"), 0)
 
 
+def s4_pvs_buffers(world, offsets, records):
+    """S4 (CHI_S4=1): per-barrel buffer sizes as Driver 1 sizes its own levels. LoadRegionData (0x800342D4) spools a
+    region's roadm to buffer + 0, roadh to buffer + 0x1000 (both decoded by callbacks) and then the PVS to buffer + 0,
+    so a barrel needs max(roadm, 0x1000 + roadh, pvs) over its regions (exactly D1's SPOOLINFO values for Miami / LA /
+    NY / SF). Chicago: 90 KB instead of 4 x 32 KB (-38 KB of level heap)."""
+    need = [0x1000] * 4
+    for idx, off in enumerate(offsets):
+        if off == 0xFFFF:
+            continue
+        rx, rz = idx % world["rx_n"], idx // world["rx_n"]
+        sp = struct.unpack_from("<H2B B3B B B B B", records, off)
+        pvs, roadm, roadh = sp[3], sp[9], sp[10]
+        b = (rx & 1) + 2 * (rz & 1)
+        need[b] = max(need[b], roadm * 2048, 0x1000 + roadh * 2048, pvs * 2048)
+    return need
+
+
 def spoolinfo_lump(base_sp_raw: bytes, base_sp: SpoolInfo, world, areas, slots, objs, offsets, records, model_buf):
     # keep the base city's music/ambient header block verbatim
     music_sz = struct.unpack_from("<i", base_sp_raw, 4)[0]
@@ -2492,7 +3233,10 @@ def spoolinfo_lump(base_sp_raw: bytes, base_sp: SpoolInfo, world, areas, slots, 
     # The per-barrel "PVS" buffer also receives the region's road data (roadm +
     # unpacked roadh = 3600 x (2 + 4) bytes), so it must be far bigger than our
     # empty PVS block (LA uses ~45 KB per barrel).
-    out += struct.pack("<4i", *slots) + struct.pack("<4i", *objs) + struct.pack("<4i", *(__import__("polish_pvs").barrels() if __import__("polish_pvs").enabled() else [PVS_BUFFER] * 4))
+    pvs_bufs = __import__("polish_pvs").barrels() if __import__("polish_pvs").enabled() else [PVS_BUFFER] * 4
+    if os.environ.get("CHI_S4", "0") == "1":
+        pvs_bufs = s4_pvs_buffers(world, offsets, records)
+    out += struct.pack("<4i", *slots) + struct.pack("<4i", *objs) + struct.pack("<4i", *pvs_bufs)
     out += struct.pack("<i", len(offsets)) + struct.pack("<%dH" % len(offsets), *offsets)
     out += struct.pack("<i", len(records)) + records
     return bytes(out)
@@ -2543,7 +3287,9 @@ def polish_overlay(base_lump: bytes) -> bytes:
 
 def convert(out_path: str):
     chi = Lev.parse(open(D2_LEV, "rb").read())
-    base = Lev.parse(open("work/d1_LA.lev", "rb").read())
+    if CITY.water_relocate:
+        relocate_water_slot(chi)
+    base = Lev.parse(inputs.read("d1_LA.lev"))
     cmem0, _ = inmem_models(chi)
     models0 = {**area_models(chi), **cmem0}
     world = build_world(chi, models0, set(cmem0), base)
@@ -2564,9 +3310,49 @@ def convert(out_path: str):
     texrepack.FORCED_AREAS = set(world["model_vis"].get(far_water_index(chi) + FAR_WATER, set())) if SHORE_WALLS else set()
     print("shore wall texture areas:", sorted(texrepack.FORCED_AREAS))
     cset = car_set()
-    cars = base if cset == "la" else (chi if cset == "d2" else Lev.parse(open(CAR_SET_LEVS[cset], "rb").read()))
+    cars = base if cset == "la" else (chi if cset == "d2" else Lev.parse(inputs.read(CAR_SET_LEVS[cset])))
     csrc = "B" if cars is base else "K"           # texture source key of the car set (texrepack)
     print("car set:", cset)
+    import polish_specials                          # C42 r3 (c): the specials' textures in their areas' sets
+    texrepack.EXTRA_MODELS = polish_specials.extra_models(chi, world) if (cset == "d2" and polish_specials.enabled()) else {}
+    if texrepack.EXTRA_MODELS:
+        print("specials: textures in the areas %s" % {m: sorted(a) for m, a in polish_specials.special_areas(world).items()})
+    import polish_s1
+    if STREAM_INMEM:                                # Q36 B (Polish 21.10.): in-memory models streamed per area
+        keep = stream_keep(chi, cmem0, models0, world, lodt, nlod)
+        moved = set(cmem0) - keep
+        sets = {a: set(v) for a, v in world["area_model_ids"].items()}
+        for m in moved:
+            for a in world["model_vis"].get(m, ()):
+                if a in sets:
+                    sets[a].add(m)
+        for a, ids in sets.items():                 # instance sources of streamed models: in memory or in the area
+            todo = list(ids)
+            while todo:
+                src = models0[todo.pop()].instance_number
+                if src >= 0 and src not in keep and src not in ids and src in models0:
+                    ids.add(src); todo.append(src)
+        world["area_model_ids"] = {a: sorted(v) for a, v in sets.items()}
+        STREAM_KEEP.clear(); STREAM_KEEP.update(keep)
+        texrepack.INMEM_KEEP = keep
+        mb = {a: sum(len(cmem0[m].data) for m in v if m in moved) for a, v in sets.items()}
+        print("stream in-memory models (CHI_POLISH_STREAM_INMEM): %d of %d move into the area spools (%d KB of D2 data); "
+              "kept %d; per area +KB %s" % (len(moved), len(cmem0), sum(len(cmem0[m].data) for m in moved) // 1024, len(keep),
+                                           {a: v // 1024 for a, v in sorted(mb.items())}))
+    polish_s1.AREA_MODELS = world["area_model_ids"]
+    polish_s1.PIN_MODELS = set()
+    if os.environ.get("CHI_POLISH_S1_PIN", "0") == "1":
+        # Infrastructure (21.10.): during an area switch the C30 carry draws the outgoing area's models with the new
+        # area's pages for ~0.5-1 s; models seen from regions where two areas can be loaded (boundaries, corridors)
+        # therefore keep their textures at one spot in every area
+        for reg, seen in world["region_seen"].items():
+            if len(world["loadable"].get(reg, ())) > 1:
+                polish_s1.PIN_MODELS.update(seen)
+        print("S1: %d models seen from switch regions keep one texture spot" % len(polish_s1.PIN_MODELS))
+    if os.environ.get("CHI_POLISH_PACKSTAT") == "1":     # S1 estimate: RAM if the in-memory models were streamed per area
+        _cm, _ = inmem_models(chi)
+        _per = {a: sum(len(_cm[m].data) for m in _cm if a in world["model_vis"].get(m, ())) for a in world["used_areas"]}
+        print("PACKSTAT in-memory model bytes visible per area (D2 sizes): %s; whole lump %d" % (_per, sum(len(m.data) for m in _cm.values())))
     res = repack(chi, base, world["model_vis"], None if "no_near" in EXPERIMENT else world["model_near"], cars)
     import polish_pages                              # CHI_POLISH_SHAREDPAGES=1 (Polish, C45)
     if polish_pages.enabled():
@@ -2575,11 +3361,73 @@ def convert(out_path: str):
               sorted({i for (_a, i) in res.area_page_content})))
     print("\n".join(res.report))
 
+    # S2/slot-15 (Infrastructure 20.10.): permanent, special/car, sky and map CLUTs share one allocator of
+    # 192 + 32 x (first area slot) positions (Chicago 384); ~CLUT_BASE_POS + palettes of the permanent + special pages
+    # (Infrastructure 21.10.): 37 fixed + permanent pages + the 2 special pages loaded in play + one per car palette
+    # entry (PALLET lump, built below; counted from the car set's list): calibrated 38 + ... = 384 (cars1) / 374 (d2cars16)
+    _npal = sum(len(res.pages[i].cluts) for i in res.permanent) + sum(struct.unpack_from("<i", b, 0)[0] for _p, b in res.special[:2])
     # special (car) pages: renumber right after the repacked pages, keep content
-    if cset == "d2":                                 # Polish C42: Driver 1's pair order for the player cars
+    flip = set()
+    if cset == "d2":                               # Polish C42: Driver 1's pair order for the player cars
         import polish_cars
         order = polish_cars.special_order(chi, [p for p, _ in res.special])
         blobs = dict(res.special)
+        if any(p < 0 for p in order):                  # C124: blank pairs for player cars without special pages
+            from texpages import decode_compressed as _dc0, encode_compressed as _ec0, Page as _Pg
+            _ref, _e = _dc0(next(iter(blobs.values())))
+            for p in order:
+                if p < 0:
+                    blobs[p] = _ec0(_Pg([], bytearray(len(_ref.texels))))
+            print("d2 cars: blank special pairs for player slots without special pages: %s" % [p for p in order if p < 0])
+        # R32 (user 'd2 cars 3': player car rear window / damaged bonnet glitched): Driver 1 keeps its MINIMAP tile cache
+        # (4 x 4 tiles of 32 px, FUN_00056278: slot of the chosen car's first special page + 0x8008B140 offsets) in the
+        # FIRST page of the player car's special pair at u 128..255, v 0..127; Driver 1's own minor pages leave it free,
+        # Driver 2's are full there (BONSPEC5's damage twin, WINDSPEC ...), so the map tiles overwrote them. The minor
+        # page's two halves are swapped when its lower half holds only textures no car uses (TSHADOW in all four):
+        # the minimap then overwrites TSHADOW. CHI_SPECIAL_FLIP=0: off.
+        if os.environ.get("CHI_SPECIAL_FLIP", "1") != "0":
+            from texrepack import model_texrefs as _mtr
+            from texpages import read_pages as _rp, decode_compressed as _dc, encode_compressed as _ec
+            used = set()
+            for m_ in polish_cars.models_for(chi):
+                used |= _mtr(m_, {})
+            cti2, _ = _rp(chi)
+
+            def _top_free(p):                          # no used texture in the top half (the audit's rule)
+                return p < 0 or not any((p, k) in used for k, e in enumerate(cti2.details[p]) if e[3] < 128)
+
+            def _flippable(p):
+                if p < 0:                              # C124 blank page
+                    return False
+                dets = cti2.details[p]
+                bottom = [k for k, e in enumerate(dets) if e[3] >= 128]
+                cross = any(e[3] < 128 < e[3] + (e[5] or 256) for e in dets)
+                return not cross and not any((p, k) in used for k in bottom)
+            def _flippable_used(p):                    # M3 Las Vegas: only USED textures may not cross the middle
+                if p < 0:
+                    return False
+                dets = cti2.details[p]                 # (Vegas' TSHADOW, unused by the cars, spans 112..240)
+                return not any((p, k) in used and (e[3] >= 128 or e[3] < 128 < e[3] + (e[5] or 256))
+                               for k, e in enumerate(dets))
+            # M3 Las Vegas: a pair whose minor page can neither keep its top half free nor be flipped takes its major
+            # page first when that one can (pages are addressed by remapped number, so the order inside a pair only
+            # decides which page hosts the tile cache). Chicago / Havana never reach this (their minor pages pass)
+            swapped = []
+            for j in range(0, len(order) - 1, 2):
+                p0, p1 = order[j], order[j + 1]
+                if (not _top_free(p0) and not _flippable(p0) and not _flippable_used(p0)
+                        and (_top_free(p1) or _flippable(p1) or _flippable_used(p1))):
+                    order[j], order[j + 1] = p1, p0
+                    swapped.append((p1, p0))
+            if swapped:
+                print("d2 cars: special pairs with the major page first (minimap tile cache): %s" % swapped)
+            for p in order[0::2]:
+                if _flippable(p) or (not _top_free(p) and _flippable_used(p)):   # (as before: also top-free pages)
+                    pg, _end = _dc(blobs[p])
+                    pg.texels = bytearray(pg.texels[128 * 128:] + pg.texels[:128 * 128])
+                    blobs[p] = _ec(pg)
+                    flip.add(p)
+            print("d2 cars: special pages with halves swapped (minimap tile cache): %s" % sorted(flip))
         res.special = [(p, blobs[p]) for p in order]
         print("d2 cars: special pages in pair order %s (of %s)" % (order, sorted(blobs)))
     from texpages import read_pages
@@ -2588,17 +3436,51 @@ def convert(out_path: str):
     res.special_details = {}
     special_new = {}
     nxt = max(res.pages) + 1
+    fy = lambda old, y: (y + 128) % 256 if old in flip else y
     for old, _blob in res.special:
         special_new[old] = nxt
-        res.special_details[old] = [(d[0], bnames[d[1]: bnames.index(b"\0", d[1])], *d[2:])
-                                    for d in bti.details[old]]
-        for k, d in enumerate(bti.details[old]):
+        res.special_details[old] = [(d[0], bnames[d[1]: bnames.index(b"\0", d[1])], d[2], fy(old, d[3]), *d[4:])
+                                    for d in (bti.details[old] if old >= 0 else [])]
+        for k, d in enumerate(bti.details[old] if old >= 0 else []):
             w, h = d[4] or 256, d[5] or 256
-            res.remap[(csrc, old, k)] = (nxt, k, d[2], d[3], d[2], d[3], w, h, w, h)
+            res.remap[(csrc, old, k)] = (nxt, k, d[2], fy(old, d[3]), d[2], d[3], w, h, w, h)
         nxt += 1
+    if cset == "d2":                                  # R32 memory-safety audit: the minimap tile cache vs the player cars
+        from texrepack import model_texrefs as _mtr2
+        firsts = {old for old in order[0::2]} if order else set()
+        bad = []
+        for m_ in polish_cars.models_for(chi):
+            for (p_, k_) in _mtr2(m_, {}):
+                r_ = res.remap.get((csrc, p_, k_))
+                if p_ not in firsts or not r_:
+                    continue
+                x_, y_, w_, h_ = r_[2], r_[3], r_[8], r_[9]
+                for dx in (0, 128):                  # the clean rect and its Driver 2 damage twin (+128)
+                    if x_ + dx < 256 and x_ + dx + w_ > 128 and y_ < 128:
+                        bad.append((p_, k_, x_ + dx, y_))
+        if bad:
+            raise RuntimeError("player car textures in the minimap tile cache (first special page, u 128..255, v 0..127): %s"
+                               % sorted(set(bad))[:8])
+        print("d2 cars: minimap tile cache clear of the player cars' textures (audit)")
 
+    # R32 (VRAM audit): LoadSky (0x8004ED34) uploads the sky panorama to VRAM (512, 0) = slot 0x8 = the FIRST permanent
+    # page in load order, and Driver 1 levels list their PCSKY page first (LA 2, Miami 30: PCSKY 256 x 128 reserves its
+    # top half). Ours listed page 5 first, so the sky overwrote the top half of the civilian car page (half / garbled
+    # civilian textures). The page holding PCSKY is now loaded first.
+    sky_pg = [i for i in res.permanent if any(dd[1] == b"PCSKY" for dd in res.details.get(i, []))]
+    if sky_pg and res.permanent[0] != sky_pg[0]:
+        res.permanent = sky_pg[:1] + [i for i in res.permanent if i != sky_pg[0]]
+    print("permanent load order (first = sky slot 0x8): %s" % list(res.permanent))
+    spc_slot = None
+    if cset == "d2" and polish_specials.slot_mode():  # R34: the specials' dedicated texture slot (plugin uploads)
+        spc_slot = polish_specials.reserve_slot(res)
+        print("specials slot: page %d entries %d..%d, bottom %dx%d" % (spc_slot["page"], spc_slot["base"],
+              spc_slot["base"] + spc_slot["n"] - 1, spc_slot["w"], spc_slot["h"]))
     texnames, texinfo, tpages, num_pages = texture_lumps(res, special_new)
 
+    if LOW_WALLS:
+        LOW_WALL_IDS.clear()
+        LOW_WALL_IDS.update(low_wall_models(world["obj_list"], {i: ws.scale_model(m.data) for i, m in models0.items()}, world))
     models_lump, names_lump, lod_lump, area_data, count, cmem, carea = build_models(chi, base, res)
     fallback = res.remap[next(iter(res.remap))]
     subdiv_lump = remap_subdivision(ws.scale_subdivision(chi.inmem.get(L_SUBDIV).data, subdiv_textures(cmem, carea)),
@@ -2639,6 +3521,7 @@ def convert(out_path: str):
     hs = collections.Counter((((v & 0xFFF8) ^ 0x8000) - 0x8000) // 500 * 500 for v in vals)
     print("road map: %d cells, grass %d, heights (500-unit bins): %s" % (
         len(vals), sum(1 for v in vals if (v >> 16) & 0x3FF == GRASS_ID), sorted(hs.items())))
+    S1_COPY_HASH.clear(); AREA_COPY_HASH.clear()
     spooled, areas, slots, objs, offsets, records, total_cd = build_spooled(world, area_data, res, chi)
     # The model spool buffer also stages area texture pages (34 KB each) at an
     # offset inside it, so it must be at least as big as the base city's.
@@ -2655,6 +3538,10 @@ def convert(out_path: str):
     if cset == "d2":
         cm = bytearray(polish_cars.lump28(chi.loadtime.get(L_CARMODELS).data))
     import polish_carmix                             # Polish C42 step 1: mixed set (D2 traffic/cop + the set's player cars)
+    import polish_cars                               # (local name in convert(): bind it on every path, not only cset d2)
+    if polish_cars.enabled() and os.environ.get("CHI_POLISH_CARPAL_MERGE", "1") == "1":
+        print("car textures with identical palettes merged (CLUT allocator): %d"
+              % polish_cars.merge_identical_car_textures(chi.loadtime.get(L_PALLET).data, res, csrc))
     slot_src = {}
     if polish_carmix.enabled():
         raw, slot_src = polish_carmix.lump28(chi.loadtime.get(L_CARMODELS).data, cars.loadtime.get(L_CARMODELS).data)
@@ -2700,7 +3587,30 @@ def convert(out_path: str):
             r = res.remap.get(("B", tp_, t_))
             if r:
                 peds.append(struct.pack("<3i", a_, r[1], r[0]) + bpal[q + 12: q + 44])
-        pal = bytearray(polish_cars.palettes(chi.loadtime.get(L_PALLET).data, keep, _r, peds))
+        cop = polish_cars.cop_palettes(chi, _r) if not mixed else []    # C59: the D2 cop's own paint for palettes 0..3
+        pal = bytearray(polish_cars.palettes(chi.loadtime.get(L_PALLET).data, keep, _r, peds + cop))
+        if not mixed:                               # C42 r3 (b): only entries inside Driver 1's car CLUT table
+            cp0 = texrepack.CAR_PAGE_BASE
+            ents_ = [bytes(pal[q:q + 44]) for q in range(4, len(pal), 44)]
+            ok_ = [e_ for e_ in ents_ if cp0 <= struct.unpack_from("<i", e_, 8)[0] < cp0 + polish_cars.CLUT_PAGES
+                   and struct.unpack_from("<i", e_, 4)[0] < polish_cars.CLUT_TEXTURES]
+            print("d2 cars: car CLUT table: %d of %d palette entries kept (pages %d-%d, textures < %d)"
+                  % (len(ok_), len(ents_), cp0, cp0 + polish_cars.CLUT_PAGES - 1, polish_cars.CLUT_TEXTURES))
+            pal = bytearray(struct.pack("<i", len(ok_)) + b"".join(ok_))
+            # the palettised models' polygons write the table too (FUN_0003BDC8): all of them must be inside
+            for s_ in polish_cars.PALETTE_SLOTS:
+                d2_ = polish_cars.slot_map().get(s_)
+                ents2 = polish_cars._entries(chi.loadtime.get(L_CARMODELS).data)
+                if d2_ is None or ents2[d2_][0] == -1:
+                    continue
+                bad = sorted({_r(p_, k_) for p_, k_ in model_texrefs(Model.parse(-1, polish_cars._model_bytes(
+                    chi.loadtime.get(L_CARMODELS).data, ents2[d2_][0])), {})
+                    if _r(p_, k_) and not (cp0 <= _r(p_, k_)[0] < cp0 + polish_cars.CLUT_PAGES
+                                           and _r(p_, k_)[1] < polish_cars.CLUT_TEXTURES)})
+                if bad:
+                    raise RuntimeError("car CLUT table: civilian slot %d textures outside pages %d-%d / < %d: %s"
+                                       % (s_, cp0, cp0 + 1, polish_cars.CLUT_TEXTURES, bad[:6]))
+        print("d2 cars: %d cop palette entries (own CLUTs)" % len(cop))
         print("d2 cars: %d pedestrian palette entries kept" % len(peds))
         total = 0
         print("d2 cars: %d palette entries" % struct.unpack_from("<i", pal, 0)[0])
@@ -2717,6 +3627,7 @@ def convert(out_path: str):
         p += 12 + 32
 
     rw, rh = world["across"] * CELL // ROAD_UNIT, world["down"] * CELL // ROAD_UNIT
+
     load = LumpList(kind=35, d1=True, lumps=[
         Lump(L_TEXNAMES, texnames),
         Lump(L_TEXINFO, texinfo),
@@ -2757,9 +3668,100 @@ def convert(out_path: str):
     import polish_carmix
     if polish_carmix.enabled():                      # Polish C42 step 1: civ damage rows (slots 0-2) for build_package
         den = os.path.splitext(D2_LEV)[0] + ".DEN"
-        den = den if os.path.exists(den) else "work/d2_CHICAGO.DEN"     # night LEV: same cars, same DEN
+        if not os.path.exists(den) or not CITY.is_day_lev(D2_LEV):
+            den = inputs.path(CITY.den)                             # night LEV: same cars, same DEN
         open(out_path + ".dmg.bin", "wb").write(polish_carmix.damage_civ(den))
         print("mixed car set: damage rows (civ verts 900 + civ polys 1260) ->", out_path + ".dmg.bin")
+    if car_set() == "d2":                             # C42 engine step (17.10.): all-Driver 2 set, damage + cosmetics rows
+        import polish_cars, polish_cosmetics, tempfile
+        den = os.path.splitext(D2_LEV)[0] + ".DEN"
+        if not os.path.exists(den) or not CITY.is_day_lev(D2_LEV):
+            den = inputs.path(CITY.den)
+        _cm28 = chi.loadtime.get(L_CARMODELS).data
+        import polish_specials
+        t = polish_cars.damage_tables(open(den, "rb").read(), polish_cars.fit_maps(_cm28), polish_cars.fit_maps(_cm28, True),
+                                      extra=polish_specials.SPECIALS)
+        # civ rows = AI resident models 1..3 (slots 0..2; the exe table pointer sits one row lower), player rows = choices 0..3
+        open(out_path + ".dmg.bin", "wb").write(t["civ_verts"] + t["civ_polys"] + t["player_verts"] + t["player_polys"])
+        open(out_path + ".lvl.bin", "wb").write(polish_cars.level_rows(
+            open(den, "rb").read(), polish_cars.fit_maps(_cm28), polish_cars.fit_maps(_cm28, True),
+            twin_ok=lambda p_, k_: (csrc, p_, k_) in polish_cars.TWINNED, d2_cm=_cm28))
+        with tempfile.TemporaryDirectory() as td:
+            cos = polish_cosmetics.build(inputs.path(CITY.lcf), td, inputs.path(CITY.lev_day))[0]["day"]
+            open(out_path + ".cos.bin", "wb").write(open(cos, "rb").read())
+        # collision boxes of the player choices 0..3 (D2 CAR_COSMETICS colBox at +212, half x, y, z) x SCALE -> 4 x 3 int32
+        lcf = open(inputs.path(CITY.lcf), "rb").read()
+        offs = struct.unpack_from("<13i", lcf, 0)
+        box = b""
+        for c in range(4):
+            d2m = polish_cars.slot_map().get(5 + c)
+            bx = struct.unpack_from("<3h", lcf, offs[d2m] + 212) if d2m is not None and offs[d2m] > 0 else (0, 0, 0)
+            box += struct.pack("<3i", *(int(round(v * polish_cars.SCALE)) for v in bx))
+        open(out_path + ".box.bin", "wb").write(box)
+        # C42 r3: wheel size per car (D2 CAR_COSMETICS wheelSize x SCALE; tread +-size, rim size * 1.4142 like D2 cars.c):
+        # player choices 0..3 (slots 5..8), then AI resident models 1..3 (1..5 with six models: slots 0..4) -> 7 / 9 int16
+        wsz = []
+        for d1 in (5, 6, 7, 8) + polish_cars.AI_SLOTS:
+            d2m = polish_cars.slot_map().get(d1)
+            v = struct.unpack_from("<h", lcf, offs[d2m] + 114)[0] if d2m is not None and offs[d2m] > 0 else 0
+            wsz.append(int(round(v * polish_cars.SCALE)))
+        open(out_path + ".whl.bin", "wb").write(struct.pack("<%dh" % len(wsz), *wsz))
+        if polish_specials.enabled():                # C42 r3 (c): the four specials for the plugin's runtime swap
+            cosb = open(out_path + ".cos.bin", "rb").read()
+            sm = polish_cars.slot_map()
+            row_of = {sm.get(5 + r): r for r in range(4)}
+            zone = dict(t["extra"])                  # AI-fitted zone rows of the specials (R33: player cars fit differently)
+            spc_cos = {m: cosb[100 * row_of[m]: 100 * row_of[m] + 100] for m in polish_specials.SPECIALS if m in row_of}
+            spc_whl = {m: wsz[row_of[m]] for m in polish_specials.SPECIALS if m in row_of}
+            for m in polish_specials.SPECIALS:       # M3: specials that are no player choice (Havana's 11)
+                if m not in row_of:
+                    spc_cos[m] = polish_cosmetics.special_row(inputs.path(CITY.lcf), inputs.path(CITY.lev_day), m, cosb[96:100])
+                    spc_whl[m] = int(round(struct.unpack_from("<h", lcf, offs[m] + 114)[0] * polish_cars.SCALE))
+            sa = polish_specials.asset(chi, world, lambda b: remap_polys(b, "C", res.remap, fallback),
+                                       spc_cos, spc_whl, zone,
+                                       polish_specials.col_boxes(polish_cars.SCALE), slot=spc_slot, remap=res.remap,
+                                       permanent=res.permanent,
+                                       remap_with=lambda b_, rm_: remap_polys(b_, "C", rm_, fallback))
+            open(out_path + ".spc.bin", "wb").write(sa)
+            print("specials: %d bytes -> %s" % (len(sa), out_path + ".spc.bin"))
+            # M3 (Infrastructure, C82 SPTW per city): <lev>.spt.bin = "SPT1", n, civilian reference twistRateY (D2 model 1),
+            # then n x {model, twistRateY} from the city's LCF (CAR_COSMETICS +230); Chicago = the plugin's old table
+            spt = struct.pack("<3i", 0x31545053, len(polish_specials.SPECIALS), struct.unpack_from("<h", lcf, offs[1] + 230)[0])
+            for m_ in polish_specials.SPECIALS:
+                spt += struct.pack("<2i", m_, struct.unpack_from("<h", lcf, offs[m_] + 230)[0])
+            open(out_path + ".spt.bin", "wb").write(spt)
+            if os.environ.get("CHI_POLISH_SPCSHADOW") == "1":
+                # cheats 6: <lev>.sps.bin = "SPS1", n, then n x {model, 4 x (x, z)} = Driver 2's cPoints[0..3] (handling.c
+                # SetShadowPoints: the shadow quad) x the car scale, car frame (Driver 1 and 2 models both face -z)
+                sps = struct.pack("<2i", 0x31535053, len(polish_specials.SPECIALS))
+                for m_ in polish_specials.SPECIALS:
+                    sps += struct.pack("<i", m_)
+                    for k_ in range(4):
+                        cx_, _cy, cz_ = struct.unpack_from("<3h", lcf, offs[m_] + 116 + 8 * k_)
+                        sps += struct.pack("<2i", int(round(cx_ * polish_cars.SCALE)), int(round(cz_ * polish_cars.SCALE)))
+                open(out_path + ".sps.bin", "wb").write(sps)
+                print("specials shadow corners (cheats 6): %s (%d bytes)" % (out_path + ".sps.bin", len(sps)))
+            if polish_specials.SPECDMG and polish_specials.LEVEL_ROWS:
+                # Q45 B: <lev>.spd.bin = "SPD1", n, DMG_OFF, then n x {model i32, 256 B DentCar level row of its clean
+                # model (1 = damage copy DMG_OFF texels right (u), shift at level 2; 3 = no shift)}
+                spd = struct.pack("<3i", 0x31445053, len(polish_specials.SPECIALS), polish_specials.DMG_OFF)
+                for m_ in polish_specials.SPECIALS:
+                    spd += struct.pack("<i", m_) + polish_specials.LEVEL_ROWS.get(m_, bytes([3] * 256))
+                open(out_path + ".spd.bin", "wb").write(spd)
+                print("specials damage rows (Q45 B, u + DMG_OFF): %s (%d bytes; %s)" % (out_path + ".spd.bin", len(spd), ", ".join(
+                    "model %d: %d shifting polygons" % (m_, polish_specials.LEVEL_ROWS[m_].count(1))
+                    for m_ in polish_specials.SPECIALS if m_ in polish_specials.LEVEL_ROWS)))
+        print("d2 car set: wheel sizes (choices 0-3, AI 1-%d):" % len(polish_cars.AI_SLOTS), wsz)
+        print("d2 car set: damage rows (civ %d + player 2880) + cosmetics rows (%d) ->" % (720 * len(polish_cars.AI_SLOTS),
+              os.path.getsize(out_path + ".cos.bin")), out_path + ".dmg.bin / .cos.bin")
+    clut_check(out_path)
+    multi = [i for i, hs in AREA_COPY_HASH.items() if len(hs) > 1]
+    print("area model copies: %d models in more than one area (%d copies), %d with differing copies" % (
+        len(multi), sum(len(AREA_COPY_HASH[i]) for i in multi), sum(1 for i in multi if len(set(AREA_COPY_HASH[i])) > 1)))
+    if S1_COPY_HASH:
+        tab = s1_diff_table(world)
+        open(out_path + ".s1d.bin", "wb").write(tab)
+        print("S1 switch table (models whose spot differs between neighbouring areas) -> %s (%d bytes)" % (out_path + ".s1d.bin", len(tab)))
     print("wrote %s: %d bytes; models %d, objects %d (straddlers %d), regions %d, areas %d, pages %d"
           % (out_path, len(out), count, len(world["obj_list"]), len(world["straddlers"]),
              sum(1 for o in offsets if o != 0xFFFF), len(areas), num_pages))

@@ -467,5 +467,47 @@
    558771
   ],
   "note": "C28: street cell just WEST of the bank strip c28_bank; drive EAST (1 cell) into the strip/lake. b15: drop + stuck; c17b: drowning"
+ },
+ "quay_wall": {
+  "d2": [
+   -181624,
+   -100165
+  ],
+  "note": "river quay: SHOREWALL hanging from a raised level (cell 425,775 reads -1634 up) drawn as huge stretched grey planes; user snapshots 20261015-234734..234751 (smooth loading probe), also in b16b"
+ },
+ "diag_ramp": {
+  "d2": [
+   -247029,
+   318123
+  ],
+  "note": "C37 user example (16.10.): diagonal sloped river ramp, area 9 reg 230, hdg 348; D2 tilts the car to the diagonal ground, D1 must too"
+ },
+ "slope_ref": {
+  "d2": [
+   124699,
+   56932
+  ],
+  "note": "C37 user reference 16.10.: PERFECT slope (ramp between walls, area 12 reg 171, hdg 180, Y 1501); no excess drivable tiles, no floating/clipping"
+ },
+ "slope_float": {
+  "d2": [
+   129755,
+   46553
+  ],
+  "note": "C37 user 16.10.: car floats/clips on excess drivable tiles beside the ramp (raised flat area, Y 1516)"
+ },
+ "fountain": {
+  "d2": [
+   55081,
+   -227602
+  ],
+  "note": "C75 user 18.10.: Buckingham Fountain basin (water level just below the sand)"
+ },
+ "pop_chi_a": {
+  "d2": [
+   4734,
+   106425
+  ],
+  "note": "QA-POP: Chicago drive (probe cheats 6 lev, build-test, Extra draw OFF seed 9, Take a Ride Chicago, ring frames 13953-14030): semi PolyFT4 quads tpage 74 (VRAM 640,0) uv 32x64 colour 80 from pc 0x8002CD94/0x8002D2DC/0x80070A98 blink for one rendered frame, 2-98k visible px; ot 4073-4141. Car end pos heading -105 deg"
  }
 }

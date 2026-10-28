@@ -10,7 +10,7 @@ Plane: short surface, a, b, c; int d. Surface types: 0 concrete, 4 grass,
 6 water, 8 alley, 9 deep water, 11 sand; 16..31 event planes (bridges),
 0x4000|curve = curved road plane.
 
-    s = Surface("work/d2_CHICAGO.LEV")
+    s = Surface(inputs.path("d2_CHICAGO.LEV"))   # inputs.py: from the player's Driver 2 disc
     s.levels(x, z) -> [(height, surface type), ...]   (y down: street ~ 0)
 """
 from __future__ import annotations

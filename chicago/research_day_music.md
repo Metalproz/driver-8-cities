@@ -36,7 +36,7 @@ Recommendation: option 1 with a path-override hook. Engine change: needs the use
 ## B. Music
 
 ### B1. Driver 2 MUSIC.BIN
-- Disc: `/DRIVER2/SOUND/MUSIC.BIN` (777944 B) on `D:/recomps/games/Driver 2 (Disc 1) (v1.1).bin`. Local and usable.
+- Disc: `/DRIVER2/SOUND/MUSIC.BIN` (777944 B) on `D:/recomps/games/Driver 2 (USA) (Disc 1) (v1.1).bin`. Local and usable.
 - Format (DriverSoundTool `driver_sound.cpp`): 8 entries of `{xm_offset, bank_offset}` (`XM_SONGS 8`), then per song a compressed XM module and its own VAG sample bank (`LoadSoundBank`).
 - Parsed: all 8 songs are "Extended Module", 8 channels. Driver 1's MUSIC.BIN has the same layout (886840 B).
 - Extraction done in the EXP scratchpad: `DriverSoundTool.exe -bin2xm MUSIC.BIN` gives `MUSIC_song0..7.xm` (decompressed XM). `-bin2xm` did not write the sample banks as WAV (log: "sample count 0/1"). VAG export needs another option (`-psx2xm` / `-sbk2wav` exist in the tool; not tested).

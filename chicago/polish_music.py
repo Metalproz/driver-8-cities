@@ -13,7 +13,7 @@ Driver 1's music (exe facts, original exe):
 
 Files (`python polish_music.py D1_MUSIC D2_MUSIC OUT [--inplace]`):
 - default: a 10-song MUSIC.BIN = Driver 1's songs 0-7 unchanged + 8 = D2 song 2 (Chicago day) + 9 = D2 song 6
-  (Chicago night). Shipped relocated like SKY.BIN (CHI_POLISH_MUSIC=1 in build_package); Chicago needs the
+  (Chicago night). Shipped relocated like SKY.BIN (build_package default since 16.10., CHI_POLISH_MUSIC=0 = off); Chicago needs the
   song word set to 8/9 (engine spec below), every other city keeps (mission + 3) & 7 -> 0..7.
 - --inplace: TEST ONLY, same size as Driver 1's file: song 7 (LA, and Chicago today) replaced by D2 song 2, so
   the D1 driver can be tested with D2 data through an in-place disc overlay (LA plays it too).
@@ -71,3 +71,18 @@ if __name__ == "__main__":
     open(a[2], "wb").write(data)
     t = struct.unpack_from("<%di" % (data[0:4] and (21 if "--inplace" not in a else 17)), data, 0)
     print(a[2], len(data), "table", t)
+
+
+# --- chase music (C60, Polish 16.10.) ------------------------------------------------------------
+# Driver 1 = Driver 2's FunkUpDaBGMTunez at 0x8004CF50: when copmusic (gp+0x500 = 0x80096C70) is 0 and the felony
+# 0x80097708 >= 0x293, copmusic = 1 and the song jumps to the pattern-order position xm_coptrackpos[current song
+# *0x80097298] (table 0x8008AA04, 8 ints read with lhu) via 0x80073020 (XM set position). Chicago's songs 8 / 9
+# index past the table (entries 8 / 9 are InitSound's SPU words 0x28000 / 0x400): no chase music.
+# Driver 2's chase positions (REDRIVER2 gamesnd.c xm_coptrackpos_d2): song 2 (Chicago day) 7, song 6 (night) 8.
+D1_COPTRACKPOS = (0xB, 0xC, 0xB, 0xB, 8, 0xB, 0xF, 0xC)
+CHASE_POS = {8: 7, 9: 8}
+
+
+def coptrackpos_table() -> bytes:
+    """10 ints for a relocated xm_coptrackpos (Driver 1's 8 + Chicago day / night)."""
+    return struct.pack("<10i", *D1_COPTRACKPOS, CHASE_POS[8], CHASE_POS[9])

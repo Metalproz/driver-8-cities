@@ -27,7 +27,7 @@ sys.path.insert(0, str(HERE / "_pylib"))
 # --- game addresses -----------------------------------------------------------
 POS = 0x8009B0BC          # player x, y, z (i32)
 AREA, REGION, LOADING = 0x800972C0, 0x8009732C, 0x800969E8
-BUILD = os.environ.get("CHI_TEST_BUILD", "build-dev")   # exe/packages the test copies come from
+BUILD = os.environ.get("CHI_TEST_BUILD", "build-test")   # exe/packages the test copies come from (build-test since 16.10.: build-dev can lag the patches)
 SPOOL_LEFT = 0x800971F8                  # spool sectors still to read
 DRAWBUF = 0x80097530      # current draw buffer struct (primptr, ot, base)
 VCOUNT = 0x80095250       # libetc VSync counter
@@ -234,6 +234,19 @@ def prepare(name, start=None, lev=None):
                 shutil.copytree(s, t)
         elif not t.exists() or s.stat().st_mtime > t.stat().st_mtime or s.stat().st_size != t.stat().st_size:
             shutil.copy2(s, t)
+    # C109 side finding (27.10.): copies had no settings.toml, so every test ran with the runtime defaults (rewind OFF)
+    # while the user plays with build-dev's (rewind ON every 15 frames, OpenGL, ...). Copy build-dev's settings, minus
+    # its [memcard] section (it names the user's saves: a copy keeps its own cards) and with the launcher skipped.
+    # Tests that need other values use RUNNER_SETTINGS (session.py) on top.
+    sd = APP / "build-dev" / "settings.toml"
+    if sd.exists():
+        import re as _re
+        txt = sd.read_text(encoding="utf-8")
+        txt = _re.sub(r"(?ms)^\[memcard\].*?(?=^\[|\Z)", "", txt)
+        txt = _re.sub(r"(?m)^(skip_launcher\s*=\s*).*$", r"\g<1>true", txt)
+        if "[memcard]" in txt or "/saves/" in txt:
+            raise SystemExit("prepare: build-dev settings still name the user's saves")
+        (d / "settings.toml").write_text(txt, encoding="utf-8")
     # Without bios.cfg the runtime silently boots OpenBIOS (LLE) instead of the retail
     # SCPH1001 that build-dev uses (2026-10-11: every build-test copy did). Take
     # build-dev's when the source build has none; refuse to run without a usable one.
@@ -249,6 +262,8 @@ def prepare(name, start=None, lev=None):
     for key in ('exe = "disc/', 'disc = "disc/'):
         gt = gt.replace(key, key.replace('"disc/', '"%s/disc/' % base))
     gt = gt.replace('out_dir = "disc"', 'out_dir = "%s/disc"' % base)
+    # Option A r3: no automatic Chicago build in a test copy (its package is the test's own)
+    gt = "".join(l for l in gt.splitlines(True) if not l.lstrip().startswith("prelaunch"))
     (d / "game.toml").write_text(gt, encoding="utf-8")
     pk = d / "mods" / "packages"
     shutil.rmtree(pk, ignore_errors=True)
@@ -281,7 +296,9 @@ def launch(name, port, timeout=90):
     # BELOW_NORMAL priority (C47, 14.10.): headless copies run uncapped (~300 %) and must not take CPU
     # from the user's game; DT_NORMAL_PRIORITY=1 for measurement runs that need full priority
     flags = 0 if os.environ.get("DT_NORMAL_PRIORITY") == "1" else getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
-    p = subprocess.Popen([str(d / "Driver_Recompiled.exe"), "--headless", "--no-launcher",
+    # DT_WINDOWED=1 (C103 profiling): a normal window (paced, GL renderer, audio) instead of --headless
+    args = [str(d / "Driver_Recompiled.exe")] + ([] if os.environ.get("DT_WINDOWED") == "1" else ["--headless"])
+    p = subprocess.Popen(args + ["--no-launcher",
                           "--memcard-dir", str(d / "cards"), "--debug-port", str(port)],
                          cwd=d, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
     dbg = Dbg(port=port)

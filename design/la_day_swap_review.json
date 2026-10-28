@@ -1,0 +1,1258 @@
+{
+ "bad_donors": [
+  "CCHINASN",
+  "CHINA1",
+  "CHINAPCE",
+  "CREAM1",
+  "DIFFRNT",
+  "FRONT",
+  "MICK81",
+  "MURAL01",
+  "NEWTRAN5",
+  "NIKI",
+  "PISTON",
+  "PISTON3",
+  "PISTON4",
+  "POSTSTPS",
+  "SE-FIN04",
+  "TOP02",
+  "TOP04",
+  "TOP05",
+  "TOP1",
+  "TRAMBUSB",
+  "TRINSPI2"
+ ],
+ "sign_keep": [
+  "DT2-03",
+  "DT2-08B",
+  "DT2-12",
+  "DT3-04",
+  "DT53",
+  "RODPOST",
+  "SM01B",
+  "SM27C",
+  "SS05B",
+  "SS06",
+  "SS07B",
+  "SS09B",
+  "SS10",
+  "SS11B",
+  "SS13",
+  "SS17B",
+  "SS18",
+  "SS2-03",
+  "SS2-08",
+  "SS2-11C",
+  "SS2-28",
+  "SS21",
+  "SS38",
+  "UNTITLED_X"
+ ],
+ "swaps": [
+  {
+   "i": 0,
+   "la": "SMTRASH2",
+   "donor": "TOP06",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 1,
+   "la": "ROOF",
+   "donor": "BLDBOT25",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 2,
+   "la": "NEWROAD3",
+   "donor": "ROAD3",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 3,
+   "la": "NEWROAD4",
+   "donor": "ROAD3",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 4,
+   "la": "ROAD01A",
+   "donor": "ROAD01A",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 5,
+   "la": "ROAD2A",
+   "donor": "ROAD1",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 6,
+   "la": "PATHC",
+   "donor": "ROAD2A",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 7,
+   "la": "DT3-04",
+   "donor": "BILTM03",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 8,
+   "la": "SS17B",
+   "donor": "BILTM03",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 9,
+   "la": "DT2-03",
+   "donor": "CHINAPCE",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 10,
+   "la": "SS2-28",
+   "donor": "CINMATOP",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 11,
+   "la": "SS2-39",
+   "donor": "WALLBNK2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 12,
+   "la": "RODPOST",
+   "donor": "CHINAPCE",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 13,
+   "la": "BCKLANE",
+   "donor": "ROAD1",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 14,
+   "la": "BCKLANE2",
+   "donor": "ROAD01",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 15,
+   "la": "SS2-50",
+   "donor": "WH102",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 16,
+   "la": "SS2-48",
+   "donor": "WBUILD1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 17,
+   "la": "SS2-57",
+   "donor": "TOP15",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 18,
+   "la": "SS2-58",
+   "donor": "CUT01",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 19,
+   "la": "SS33",
+   "donor": "VWALLNAS",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 20,
+   "la": "SS2-65",
+   "donor": "PENNSTN2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 21,
+   "la": "SS2-64",
+   "donor": "PISS",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 22,
+   "la": "SS2-59",
+   "donor": "BILTM07",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 23,
+   "la": "SS2-60",
+   "donor": "DT18",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 24,
+   "la": "SS2-53",
+   "donor": "THEATRET",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 25,
+   "la": "SS2-63C",
+   "donor": "BLDBOT36",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 26,
+   "la": "SM07C",
+   "donor": "CUT01",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 27,
+   "la": "SM06B",
+   "donor": "ROOF",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 28,
+   "la": "SM01B",
+   "donor": "GARAGE01",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 29,
+   "la": "SM08",
+   "donor": "TOP03",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 30,
+   "la": "SM02B",
+   "donor": "SCRAPR02",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 31,
+   "la": "SM16C",
+   "donor": "MICK81",
+   "from": "d1_NEWYORK",
+   "verdict": "replace",
+   "replace_with": "RAGTIME",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 32,
+   "la": "SM03CLIF",
+   "donor": "DT12",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 33,
+   "la": "SM2-09",
+   "donor": "ESBUILDT",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 34,
+   "la": "SM04",
+   "donor": "TOP07",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 35,
+   "la": "SM05",
+   "donor": "OFFICE5",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 36,
+   "la": "SM09C",
+   "donor": "MART",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 37,
+   "la": "SM11",
+   "donor": "CT02",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 38,
+   "la": "SM12B",
+   "donor": "POSTSTPS",
+   "from": "d1_NEWYORK",
+   "verdict": "replace",
+   "replace_with": "WBUILD1",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 39,
+   "la": "SM13",
+   "donor": "SHHOP2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 40,
+   "la": "SM15",
+   "donor": "TOP03",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 41,
+   "la": "SM09B",
+   "donor": "TOP15",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 42,
+   "la": "SM10",
+   "donor": "MART",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 43,
+   "la": "SM14",
+   "donor": "CUT19",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 44,
+   "la": "SM17",
+   "donor": "CT02",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 45,
+   "la": "SM2-01",
+   "donor": "BLDTOP26",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 46,
+   "la": "SM2-07",
+   "donor": "WBUILD1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 47,
+   "la": "SM19",
+   "donor": "TOP10",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 48,
+   "la": "SM2-01C",
+   "donor": "SCRAPR07",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 49,
+   "la": "SM28",
+   "donor": "DT04B",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 50,
+   "la": "SM2-02",
+   "donor": "CUT01",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 51,
+   "la": "SM27C",
+   "donor": "BLDBOT12",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 52,
+   "la": "SM2-10",
+   "donor": "THEATER1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 53,
+   "la": "NEW15",
+   "donor": "SHOP11",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 54,
+   "la": "NEW22",
+   "donor": "WALL6",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 55,
+   "la": "FRNT02",
+   "donor": "HSEBOT01",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 56,
+   "la": "LA6",
+   "donor": "TOP02",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "BLDTOP26",
+   "replace_from": "d1_MIAMI",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 57,
+   "la": "NEW01",
+   "donor": "SCRAPR32",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 58,
+   "la": "NEW02",
+   "donor": "TRAMBUSB",
+   "from": "d1_FRISCO",
+   "verdict": "replace",
+   "replace_with": "BUILD4B",
+   "replace_from": "d1_FRISCO",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 59,
+   "la": "NEW05",
+   "donor": "BLDBOT42",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 60,
+   "la": "NEW03",
+   "donor": "DOCKBLD1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 61,
+   "la": "FRONT",
+   "donor": "RD-X",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 62,
+   "la": "ROD04",
+   "donor": "BILTM07",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 63,
+   "la": "ROD05B",
+   "donor": "WH102",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 64,
+   "la": "ROD15B",
+   "donor": "BANK1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 65,
+   "la": "ROD41",
+   "donor": "RESTNT2",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 66,
+   "la": "ROD18",
+   "donor": "DOKFIN1",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 67,
+   "la": "ROD16",
+   "donor": "SHOPP1",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 68,
+   "la": "ROD20",
+   "donor": "NIKI",
+   "from": "d1_NEWYORK",
+   "verdict": "replace",
+   "replace_with": "BILTM02",
+   "replace_from": "d1_MIAMI",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 69,
+   "la": "ROD19",
+   "donor": "SHOP08",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 70,
+   "la": "ROD03",
+   "donor": "TOP04",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "TOP07",
+   "replace_from": "d1_MIAMI",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 71,
+   "la": "ROD37B",
+   "donor": "BACKST05",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 72,
+   "la": "ROD01",
+   "donor": "DOKFIN3",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 73,
+   "la": "ROD37",
+   "donor": "WINDOW02",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 74,
+   "la": "ROD36",
+   "donor": "BANK2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 75,
+   "la": "ROD42",
+   "donor": "GEN222",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 76,
+   "la": "ROD2-08B",
+   "donor": "CLOCUT4",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 77,
+   "la": "ROD2-12B",
+   "donor": "YFINANCL",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 78,
+   "la": "ROD2-11",
+   "donor": "SHOP09",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 79,
+   "la": "ROD2-16",
+   "donor": "PISTON4",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "DT16B",
+   "replace_from": "d1_FRISCO",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 80,
+   "la": "ROD2-19",
+   "donor": "BLDTOP04",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 81,
+   "la": "ROD30",
+   "donor": "TOP05",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "STONEWAL",
+   "replace_from": "d1_FRISCO",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 82,
+   "la": "ROD29",
+   "donor": "TUNNLTOP",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 83,
+   "la": "ROD31",
+   "donor": "SCRAPR02",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 84,
+   "la": "SS03",
+   "donor": "SCRAPR26",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 85,
+   "la": "SS10",
+   "donor": "NEWTRAN5",
+   "from": "d1_FRISCO",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 86,
+   "la": "SS01",
+   "donor": "TOP15",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 87,
+   "la": "SS02",
+   "donor": "BLDTOP24",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 88,
+   "la": "SS05B",
+   "donor": "TOP06",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 89,
+   "la": "SS01D",
+   "donor": "TTRACK",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 90,
+   "la": "SS2-23",
+   "donor": "WH203",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 91,
+   "la": "SS11B",
+   "donor": "PISSBOT",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 92,
+   "la": "SS13",
+   "donor": "SHOP11",
+   "from": "d1_FRISCO",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 93,
+   "la": "SS2-11C",
+   "donor": "PISTON4",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 94,
+   "la": "SS2-03",
+   "donor": "PISSBOT",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 95,
+   "la": "SS21",
+   "donor": "PISTON3",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 96,
+   "la": "SS38",
+   "donor": "CHINA1",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 97,
+   "la": "SS2-29",
+   "donor": "MICK6",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 98,
+   "la": "SS22B",
+   "donor": "TOP02",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "CT02",
+   "replace_from": "d1_FRISCO",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 99,
+   "la": "SS09B",
+   "donor": "OLDBRIKA",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 100,
+   "la": "SS2-18",
+   "donor": "SCRAPR11",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 101,
+   "la": "SS06",
+   "donor": "BLDTOP16",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 102,
+   "la": "SS18",
+   "donor": "TRINSPI2",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 103,
+   "la": "SS2-08",
+   "donor": "DIFFRNT",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 104,
+   "la": "SS07B",
+   "donor": "CREAM1",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 105,
+   "la": "SS2-27",
+   "donor": "PISTON",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "HSEBOT01",
+   "replace_from": "d1_MIAMI",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 106,
+   "la": "SS2-45",
+   "donor": "VWALLNAS",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 107,
+   "la": "SS2-46",
+   "donor": "FRONT",
+   "from": "d1_FRISCO",
+   "verdict": "replace",
+   "replace_with": "VWALLNAS",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 108,
+   "la": "SS25",
+   "donor": "CUT19",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 109,
+   "la": "SS2-41",
+   "donor": "PINKB1",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 110,
+   "la": "DT3-01",
+   "donor": "RESTNT3",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 111,
+   "la": "DT3-02",
+   "donor": "WALLBNK2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 112,
+   "la": "DT3-17",
+   "donor": "MICK6",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 113,
+   "la": "DT3-19",
+   "donor": "RESTNT2",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 114,
+   "la": "DT3-10",
+   "donor": "MICK6",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 115,
+   "la": "DT3-07",
+   "donor": "CT02",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 116,
+   "la": "DT72B",
+   "donor": "POSTSTPS",
+   "from": "d1_NEWYORK",
+   "verdict": "replace",
+   "replace_with": "SHHOP2",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 117,
+   "la": "DT2-05",
+   "donor": "PENN3",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 118,
+   "la": "DT3-03",
+   "donor": "SCRAPR25",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 119,
+   "la": "DT17",
+   "donor": "BLDTOP05",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 120,
+   "la": "DT40",
+   "donor": "SCRAPR20",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 121,
+   "la": "DT48",
+   "donor": "WTCNTRE2",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 122,
+   "la": "DT50",
+   "donor": "DOKFIN3",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 123,
+   "la": "DT3-21",
+   "donor": "DOCKBRZE",
+   "from": "d1_NEWYORK",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 124,
+   "la": "DT53",
+   "donor": "MURAL01",
+   "from": "d1_FRISCO",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 125,
+   "la": "DT2-27",
+   "donor": "PISS",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 126,
+   "la": "DT2-32",
+   "donor": "WINDOW02",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 127,
+   "la": "DT2-15",
+   "donor": "SHOP07",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 128,
+   "la": "DT2-06",
+   "donor": "SHPBOT14",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 129,
+   "la": "DT2-10B",
+   "donor": "GARAGE01",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 130,
+   "la": "DT2-08B",
+   "donor": "CCHINASN",
+   "from": "d1_NEWYORK",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 131,
+   "la": "DT2-12",
+   "donor": "TOP04",
+   "from": "d1_MIAMI",
+   "verdict": "exclude",
+   "repaint": true,
+   "why": "LA sign/poster texture: no donor swap; day-repaint by la_day_repaint.EXTRA (CLUT remap)"
+  },
+  {
+   "i": 132,
+   "la": "DT22",
+   "donor": "SE-FIN04",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "WTCNTRE2",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 133,
+   "la": "DT2-20B",
+   "donor": "DT18",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 134,
+   "la": "DT2-20",
+   "donor": "RESTNT2",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 135,
+   "la": "DT2-23",
+   "donor": "BLDBOT44",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 136,
+   "la": "DT54",
+   "donor": "DOKFIN2",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 137,
+   "la": "DT71",
+   "donor": "BLDBOT12",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 138,
+   "la": "DT49",
+   "donor": "BLDTOP27",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 139,
+   "la": "DT45",
+   "donor": "TOP05",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "TOP06",
+   "replace_from": "d1_MIAMI",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 140,
+   "la": "DT01",
+   "donor": "SCRAPR08",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 141,
+   "la": "DT46",
+   "donor": "TOP1",
+   "from": "d1_MIAMI",
+   "verdict": "replace",
+   "replace_with": "PENNSTN2",
+   "replace_from": "d1_NEWYORK",
+   "why": "donor has branding/person/vehicle/other-city landmark"
+  },
+  {
+   "i": 142,
+   "la": "DT25",
+   "donor": "SCRAPR27",
+   "from": "d1_MIAMI",
+   "verdict": "keep",
+   "why": ""
+  },
+  {
+   "i": 143,
+   "la": "ROD14",
+   "donor": "RESTNT1",
+   "from": "d1_FRISCO",
+   "verdict": "keep",
+   "why": ""
+  }
+ ]
+}

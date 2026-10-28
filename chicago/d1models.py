@@ -58,7 +58,14 @@ SPRITE_FLAG = 0x4000               # trees: billboard + shadow, drawn by 0x8002C
 
 
 def is_tile(m: Model) -> bool:
-    return bool(m.shape_flags & TILE_FLAGS)
+    """M3 Las Vegas: a model flagged 0x2000 alone with textured polygons (10 / 11, Vegas 385) is no ground tile for
+    Driver 1: kept as is, the world renderer read its polygon block as a group table (crash 'unknown dispatch' at
+    0x80030B5C). Only 0x0400 or 0x2000 with type-21 polygons (every Chicago / Havana tile) stays a tile."""
+    if m.shape_flags & 0x0400:
+        return True
+    if m.shape_flags & 0x2000:
+        return all(t == 21 for t in m.poly_types())
+    return False
 
 
 def is_sprite(m: Model) -> bool:
@@ -94,11 +101,54 @@ if _SUBDIV == "light":
     _SUBDIV = "0,1000000"
 
 
+# CHI_POLISH_SUBDIV_LONG=L (Polish, quay artefact 16.10.; off when unset): models longer than L units (river quay
+# walls 1113-1115, 9462 long) keep Driver 2's near flag 0x20 under "light": 0x60 picks the fixed light level
+# (handler +0x10) even next to the camera, so their wall strips beside / behind the camera were drawn
+# stretched (no near clipping); 0x20 gets the full near subdivision (< 6000 units, handler +0x20) like LA's walls.
+_SUBDIV_LONG = int(__import__("os").environ.get("CHI_POLISH_SUBDIV_LONG", "0") or 0)
+_SUBDIV_TALL = int(__import__("os").environ.get("CHI_POLISH_SUBDIV_TALL", "0") or 0)   # C67 (Polish 16.10.)
+
+
+# CHI_POLISH_NEARALL=E (Polish, C45 quay round 3, 16.10.; off when unset): Driver 2 subdivides EVERY textured quad
+# near the camera (REDRIVER2 PlotBuildingModelSubdivNxN: 2x2 / 4x4 when diff*4 > minZ-350, sub-quads with
+# avg z <= 5 dropped), whatever its flags; Driver 1 only subdivides polygons flagged 0x20 / 0x40. Here every
+# polygon whose longest edge is >= E units (all models, also the converter's own: shore walls, far water, the
+# water tile) gets the full near flag 0x20 (handler +0x20 below 6000 units) - the D2 rule in D1's terms.
+_NEARALL = int(__import__("os").environ.get("CHI_POLISH_NEARALL", "0") or 0)
+
+
+def polish_nearall(polys, verts):
+    out, n = [], 0
+    for p in polys:
+        t = p[0] & 31
+        off = VERT_OFF.get(t)
+        if off is not None and t in (9, 11, 21, 10, 20, 8, 22):
+            nv = 4 if t in (9, 11, 21) else 3
+            pts = [verts[i] for i in p[off:off + nv] if i < len(verts)]
+            edge = max((math.dist(a, b) for a in pts for b in pts), default=0)
+            if edge >= _NEARALL and (p[0] & 0x60) != 0x20:
+                p = bytes([(p[0] & ~0x60) | 0x20]) + p[1:]
+                n += 1
+        out.append(p)
+    return out, n
+
+
 def polish_subdiv(polys, verts):
+    if _NEARALL:
+        polys, n = polish_nearall(polys, verts)
+        return polys, {"nearall": n}
     if not _SUBDIV:
         return polys, None
     lo, hi = (int(v) for v in _SUBDIV.split(","))
-    out, st = [], {"cleared": 0, "light": 0, "kept": 0}
+    out, st = [], {"cleared": 0, "light": 0, "kept": 0, "long_kept": 0}
+    if _SUBDIV_LONG and verts:
+        xs, zs = [v[0] for v in verts], [v[2] for v in verts]
+        if max(max(xs) - min(xs), max(zs) - min(zs)) >= _SUBDIV_LONG:
+            for p in polys:
+                t = p[0] & 31
+                if VERT_OFF.get(t) is not None and p[0] & 0x60 == 0x20:
+                    st["long_kept"] += 1
+            return polys, st
     for p in polys:
         t = p[0] & 31
         off = VERT_OFF.get(t)
@@ -108,6 +158,13 @@ def polish_subdiv(polys, verts):
         nv = 4 if t in (9, 11, 21) else 3
         pts = [verts[i] for i in p[off:off + nv] if i < len(verts)]
         edge = max((math.dist(a, b) for a in pts for b in pts), default=0)
+        if _SUBDIV_TALL and pts and max(v[1] for v in pts) - min(v[1] for v in pts) >= _SUBDIV_TALL and nv == 4:
+            # C67: tall facade quads get the full near subdivision (0x20) like D2 gives every near quad: the
+            # light fixed level left large affine triangle seams (diagonal cuts across window grids, user 16.10.)
+            b0, k = (p[0] & ~0x60) | 0x20, "tall"
+            st[k] = st.get(k, 0) + 1
+            out.append(bytes([b0]) + p[1:])
+            continue
         if edge < lo:
             b0, k = p[0] & ~0x60, "cleared"
         elif edge < hi:
@@ -161,33 +218,52 @@ def plane(q, members, polys, verts):
     return (*n, d) if -32768 < d < 32767 else None
 
 
-def plan_groups(polys, verts):
+# C70 (16.10.): model id -> model-space y below which a polygon lies wholly under the street at every placement
+# (convert.py fills it for the low quay walls). Those polygons go into groups ahead of the 'sorted' group, so
+# Driver 1 draws them at the object's depth (behind the road) instead of sorting each one (drawn over the road).
+BELOW_Y = {}
+
+
+def _below(poly, verts, below_y):
+    if below_y is None:
+        return False
+    t = poly[0] & 31
+    if t not in VERT_OFF:
+        return False
+    n = 4 if t in (9, 11, 21) else 3
+    idx = [i for i in poly[VERT_OFF[t]: VERT_OFF[t] + n] if i < len(verts)]
+    return bool(idx) and all(verts[i][1] >= below_y for i in idx)
+
+
+def plan_groups(polys, verts, below_y=None):
     """-> (order, groups): order = new polygon order (old indices); groups =
-    [(absolute, light, plane or None, count, nbytes)]."""
+    [(absolute, light, plane or None, count, nbytes, below)]; below groups first (C70). below_y: a y threshold
+    (every polygon wholly below it) or a set of polygon indices (C70 round 3: the underground faces only)."""
     buckets = {}
     for i, p in enumerate(polys):
-        buckets.setdefault(group_key(p, verts), []).append(i)
+        below = (i in below_y) if isinstance(below_y, (set, frozenset)) else _below(p, verts, below_y)
+        buckets.setdefault((not below,) + group_key(p, verts), []).append(i)
     if len(buckets) > MAX_GROUPS // 2:          # too many facings: no culling planes
         merged = {}
-        for (absolute, light, _q), members in buckets.items():
-            merged.setdefault((absolute, light, None), []).extend(members)
+        for (above, absolute, light, _q), members in buckets.items():
+            merged.setdefault((above, absolute, light, None), []).extend(members)
         buckets = merged
     order, groups = [], []
-    for key in sorted(buckets, key=lambda k: (k[0], k[1], k[2] or ())):
-        absolute, light, q = key
+    for key in sorted(buckets, key=lambda k: (k[0], k[1], k[2], k[3] or ())):
+        above, absolute, light, q = key
         members = buckets[key]
         pl = plane(q, members, polys, verts) if q is not None else None
         cur, nbytes = [], 0
         for i in members:
             size = len(polys[i])
             if cur and (len(cur) == MAX_GROUP_POLYS or nbytes + size > MAX_GROUP_BYTES):
-                groups.append((absolute, light, pl, len(cur), nbytes))
+                groups.append((absolute, light, pl, len(cur), nbytes, not above))
                 order += cur
                 cur, nbytes = [], 0
             cur.append(i)
             nbytes += size
         if cur:
-            groups.append((absolute, light, pl, len(cur), nbytes))
+            groups.append((absolute, light, pl, len(cur), nbytes, not above))
             order += cur
     if len(groups) > MAX_GROUPS:
         raise ValueError("model needs %d polygon groups (max %d)" % (len(groups), MAX_GROUPS))
@@ -205,9 +281,10 @@ def group_table(groups) -> bytes:
         bk = [r[3] for r in rows]
         out += struct.pack("<10h", L[0], L[1], L[2], L[3], L[4], L[5], L[6], L[7], L[8], bk[0])
         out += struct.pack("<2h", bk[1], bk[2])
-    for k, (absolute, light, _pl, count, nbytes) in enumerate(groups):
+    first_sorted = next((k for k, g in enumerate(groups) if not g[5]), None)   # C70: below-street groups unsorted
+    for k, (absolute, light, _pl, count, nbytes, _below) in enumerate(groups):
         out += struct.pack("<I", count | (4 << 8) | (nbytes << 16) | (light << 26)
-                           | (int(absolute) << 30) | ((1 if k == 0 else 0) << 31))
+                           | (int(absolute) << 30) | ((1 if k == first_sorted else 0) << 31))
         out += struct.pack("<I", min(count, 31) | ((nbytes // 4) << 16) | (4 << 24))
     return bytes(out)
 
@@ -256,16 +333,64 @@ def standalone(m: Model, src: Model) -> Model:
     return Model.parse(m.index, bytes(hdr) + verts + coll + polys)
 
 
+# C67 (16.10.): the exe's light-handler cave (exe_patches c67) can send 0x20 / 0x40 / 0x60 quads of a Driver 2 city
+# to the plain handler too, which reads the screen cache: count every polygon's vertices (default). "plain" = only the
+# always-plain polygons (the C45 round 5 rule; for an exe without C67).
+import os as _os
+TRI_VERTS_ALL = _os.environ.get("CHI_TRI_VERTS", "plain") == "all"
+
+
+def near_vertex_count(data: bytes) -> bytes:
+    """C45 (Infrastructure 16.10.): set the header byte +6 ("tri_verts") so a model's always-plain polygons work
+    near the camera. Driver 1's world renderer (0x800307FC) transforms only the first tri_verts vertices into the
+    screen-coordinate cache when the object is near (depth - radius < 9000, near level != 0) and the model lacks
+    shape flag 0x8000; polygons flagged 0x20 / 0x40 recompute their own vertices (subdivision handlers), but a
+    plain one (flags & 0x60 == 0) reads the cache, so a vertex index >= tri_verts gets a stale screen point from
+    the previous object: the dark diagonal beams / wedges at the quay (SHOREWALL, tri_verts 0). Driver 2's byte
+    means something else; Chicago's models carry 0. Value = highest vertex index of a plain polygon + 1 (with TRI_VERTS_ALL: of any polygon)."""
+    m = Model.parse(0, data)
+    if m.num_polys == 0 or m.poly_block >= len(data) or is_tile(m) or is_sprite(m):
+        return data
+    q, mx = m.poly_block, -1
+    for _ in range(m.num_polys):
+        t = data[q] & 31
+        size = POLY_SIZES.get(t)
+        if size is None:
+            break
+        if (TRI_VERTS_ALL or data[q] & 0x60 == 0) and t in VERT_OFF:
+            n, o = (4 if t in (9, 11, 21) else 3), VERT_OFF[t]
+            mx = max(mx, max(data[q + o: q + o + n]))
+        q += size
+    if mx < data[6]:
+        return data
+    b = bytearray(data)
+    b[6] = min(255, mx + 1)
+    return bytes(b)
+
+
 def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
     """Convert a set of Driver 2 models (index -> data, instances resolved
     within the set). Returns (index -> new data, stats)."""
+    import polish_tess                     # CHI_POLISH_TESS=MAXSPAN (Polish, quay_wall): split oversized quads
+    models, tstats = polish_tess.tessellate_all(models)
     parsed = {i: Model.parse(i, d) for i, d in models.items()}
     out, plans = {}, {}
-    stats = {"models": 0, "groups": 0, "tiles": 0, "sprites": 0, "instances": 0, "deinstanced": 0}
+    stats = {"models": 0, "groups": 0, "tiles": 0, "sprites": 0, "instances": 0, "deinstanced": 0, **tstats}
     for i, m in parsed.items():
         if is_tile(m) or is_sprite(m):
             data = bytearray(m.data)
             struct.pack_into("<i", data, 0x1C, m.poly_block)
+            if _NEARALL and is_tile(m) and m.poly_block < len(data):   # flag byte only, in place
+                try:
+                    vs = vertices(m)
+                except struct.error:              # tiles without own corner vertices: unchanged
+                    vs = []
+                q = m.poly_block
+                for _ in range(m.num_polys):
+                    size = POLY_SIZES[data[q] & 31]
+                    fixed, _ = polish_nearall([bytes(data[q:q + size])], vs)
+                    data[q] = fixed[0][0]
+                    q += size
             out[i] = bytes(data)
             stats["sprites" if is_sprite(m) and not is_tile(m) else "tiles"] += 1
             continue
@@ -276,9 +401,11 @@ def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
         if sst:
             for k, v in sst.items():
                 stats["subdiv_" + k] = stats.get("subdiv_" + k, 0) + v
-        order, groups = plan_groups(polys, vertices(m))
+        order, groups = plan_groups(polys, vertices(m), BELOW_Y.get(i))
         plans[i] = (order, [len(polys[k]) for k in order])
         out[i] = rebuild(m, polys, order, group_table(groups))
+        if m.shape_flags & 0x2000:                  # M3 Vegas 385 (see is_tile): no tile path for its group table
+            out[i] = struct.pack("<H", struct.unpack_from("<H", out[i], 0)[0] & ~0x2000) + out[i][2:]
         stats["models"] += 1
         stats["groups"] += len(groups)
     for i, m in parsed.items():
@@ -300,7 +427,7 @@ def convert_models(models: dict[int, bytes]) -> tuple[dict[int, bytes], dict]:
             raise ValueError("model %d instances %d, which is not in the set" % (i, src))
         alone = standalone(m, parsed[src])
         polys, _ = polish_subdiv(split_polys(alone), vertices(alone))
-        order, groups = plan_groups(polys, vertices(alone))
+        order, groups = plan_groups(polys, vertices(alone), BELOW_Y.get(i))
         out[i] = rebuild(alone, polys, order, group_table(groups))
         stats["deinstanced"] += 1
     return out, stats

@@ -1,50 +1,22 @@
 {
-  "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop).",
-  "city selector": {
-    "lev": "work/var_roads_b16b_day.lev",
-    "night": "work/var_roads_b16b_night.lev",
-    "build": "build-test",
-    "slot": true,
-    "menu": "pages",
-    "what": "Two-page city selector: page 1 'Driver 1 cities' (Miami, SF, LA, NY, Newtown, Interview, Training), page 2 'Driver 2 cities' (Chicago day/night; Havana/Las Vegas/Rio greyed). Chicago = b16b: FPS improvement, Miami's cars by day (correct damage dents + damaged-car textures), D2-style night, minimap centred, own sky, trench-curve flip fixed, more of D2's road network with traffic; Play Again/quit freezes fixed on all maps; b16: lakeshore fixes (cars drown properly instead of getting stuck under the street; raised Lake Shore Drive deck joined up)."
+ "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop). NOTE: 'env' only feeds the PACKAGE BUILD (converter/build_package switches); runtime/plugin switches (e.g. CHI_C88_*) are NOT passed to the running game, so a runtime variant needs its own build/default.",
+ "d2 cities 2": {
+  "lev": "work/var_polish_cheats6_day.lev",
+  "night": "work/var_polish_cheats6_night.lev",
+  "build": "build-test",
+  "slot": true,
+  "menu": "pages",
+  "env": {
+   "CHI_POLISH_MUSIC": "1",
+   "CHI_LA_DAY_LEV": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_la_day_15.lev",
+   "CHI_XD_LEVELS": "1",
+   "CHI_HAVANA_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav6_day.lev",
+   "CHI_HAVANA_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav7_night.lev",
+   "CHI_VEGAS_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas2_day.lev",
+   "CHI_VEGAS_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas3_night.lev",
+   "CHI_RIO_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio2_day.lev",
+   "CHI_RIO_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio3_night.lev"
   },
-  "sky d2": {
-    "lev": "work/var_roads_b16b_day.lev",
-    "night": "work/var_roads_b16b_night.lev",
-    "build": "build-test",
-    "slot": true,
-    "menu": "pages",
-    "what": "C46 sky test: same as 'city selector' (b16) but Chicago's sky built like Driver 2's: the skyline band starts higher (larger, less squeezed) and D2's mirrored reflection rows appear below the horizon. Compare the sky with 'city selector'.",
-    "env": {
-      "CHI_POLISH_SKY": "mirror",
-      "CHI_POLISH_SKY_TOP": "42"
-    }
-  },
-  "smooth loading": {
-    "lev": "work/var_polish_c45_corr4b15_day.lev",
-    "night": "work/var_roads_b16b_night.lev",
-    "build": "build-test",
-    "slot": true,
-    "menu": "pages",
-    "what": "C45 loading test: Chicago DAY with the new corridor chunk layout (b15 + corridors). In route tests it cut loading stalls from 9 to 1 on 6 routes, but at one area switch a dark triangle can flash against the sky for about a second. Judge: is driving smoother (fewer short freezes) and is the flash acceptable? Night = b16b."
-  },
-  "diagonals": {
-    "lev": "work/var_c37_diag_day.lev",
-    "night": "work/var_roads_b16b_night.lev",
-    "build": "build-test",
-    "slot": true,
-    "menu": "pages",
-    "what": "C37 diagonal surfaces test: Chicago DAY where diagonal embankments, trench walls and bridge-deck edges were square steps; now 165 cells use diagonal halves (D2-like). Judge: do diagonal edges look/drive right (no staircase bumps)? Night = b16b."
-  },
-  "d2 cars": {
-    "lev": "work/var_polish_c42_mix3_day.lev",
-    "night": "work/var_roads_b16b_night.lev",
-    "build": "build-test",
-    "slot": true,
-    "menu": "pages",
-    "what": "Driver 2 cars + Chicago music: Chicago DAY traffic and police are Driver 2's own Chicago cars (your car stays a Miami car); Chicago plays Driver 2's own Chicago music (day track by day, night track at night); other cities keep their music. Known: a D2 car's front wheel can look too big/off its arch (wheel tables, next engine step). Night traffic = b15 (LA cars).",
-    "env": {
-      "CHI_POLISH_MUSIC": "1"
-    }
-  }
+  "what": "Probe 'd2 cities 2' (= havana 2 + Las Vegas + Rio + dark night roads in Havana/Las Vegas/Rio like Driver 2) (3-disc). NEW: Las Vegas and Rio on page 2 of the city menu (Day/Night, own picture, sky, music + chase music, Driver 2 cars and car sounds, traffic-light glows, pause-menu map; Rio's sea drowns you; both start you in Driver 2's normal car). From havana 2: Havana chase music; Chicago/Havana Driver 2 engine + traffic sounds; pause-menu map in all Driver 2 cities (centred on you, d-pad pans, other buttons close; Driver 1 cities unchanged); reworked Uncap/Extra draw speed guard. Known: police sirens are still Driver 1's; Las Vegas lake is walled (no drowning there); Rio misses 2 special cars; Rio textures partly half resolution; Havana lights glow on the middle lamp only; ferries do not move; Chicago/Havana still start in the secret car (Q69)."
+ }
 }

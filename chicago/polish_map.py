@@ -30,11 +30,22 @@ import worldscale as ws
 
 # Scale (C12 follow-up, default since b14): 1.5 = 448 x 256 (14 x 8 tiles), within Driver 1's 448 px
 # minimap width; CHI_POLISH_MAP_F=4/3 = the old 512 x 288 (16 x 9 tiles).
-F = 4.0 / 3.0 if os.environ.get("CHI_POLISH_MAP_F") == "4/3" else 1.5   # D2 overlay pixels per new pixel (default 1.5 since b14)
-ACROSS, DOWN = (14, 8) if F == 1.5 else (16, 9)   # tiles (Driver 1 maps are turned: columns = world z, rows = world x)
+# CHI_POLISH_MAP_F=1 (C12 zoom, Polish 15.10.): Driver 2's own scale (1 D2 map pixel = 1 minimap pixel; D2 shows
+# its map 1:1 in a 64 x 60 window). Needs more than Driver 1's 160 tile slots (Chicago: 21 x 12 = 252), so the
+# tile table grows and the CLUT moves behind it (CLUT_AT): the exe reads the CLUT at map + 0x148 (immediate at
+# 0x80054194, `addiu a1,a1,0x148`), which must then read CLUT_AT for a Driver 2 city (plugin code word, see NOTES).
+_FENV = os.environ.get("CHI_POLISH_MAP_F", "1")      # C12 adopted 16.10. (user verified): D2 zoom; "1.5" = old
+F = 1.0 if _FENV == "1" else 4.0 / 3.0 if _FENV == "4/3" else 1.5   # D2 overlay pixels per new pixel (default 1.5 since b14)
+NATIVE = F == 1.0
+if NATIVE:
+    _OV = __import__("d2overlay").CITY[__import__("cityprofile").P.name]   # M3: the city's D2 overlay size
+    ACROSS, DOWN = _OV[3] // 32, _OV[2] // 32       # Chicago: 21 x 12 = 672 x 384 (D2 384 x 672 turned)
+else:
+    ACROSS, DOWN = (14, 8) if F == 1.5 else (16, 9)   # tiles (Driver 1 maps are turned: columns = world z, rows = world x)
 W, H = ACROSS * 32, DOWN * 32
-MAX_TILES = 160
-CLUT_AT, DATA_AT = 0x148, 0x168
+MAX_TILES = max(160, ACROSS * DOWN)
+CLUT_AT = 0x148 if MAX_TILES == 160 else (2 * MAX_TILES + 8 + 3) // 4 * 4   # behind the table + the 8-byte block
+DATA_AT = CLUT_AT + 32
 TABLE = 0x8008B080                # exe: per-city minimap parameters, 24 bytes each
 
 
@@ -52,7 +63,11 @@ def params(ov: Overlay):
     # the exe's offsets name the minimap WINDOW's corner; the car sits WINDOW (48) pixels in from it
     # (like Driver 2's overmap.c +48), measured in game 14.10.: without this the map showed the area
     # ~50 px down-right of the car (Gold Coast instead of the L downtown)
-    return round(xo) - WINDOW, round(yo) - WINDOW, W, H, ACROSS * DOWN | (ov.dummy & 15) << 8, round(k * F)
+    # C12 dot calibration (Polish 16.10.): marks at 5 spots (corners, Loop, lakeshore, river) showed the dot the same
+    # 1 map row below the true pixel everywhere (no scale drift; column within 1/3 px): CHI_POLISH_MAP_NUDGE="dc,dr"
+    # (map pixels added to the exe offsets; "0,-1" = the measured fix)
+    dc, dr = (int(v) for v in os.environ.get("CHI_POLISH_MAP_NUDGE", "1,0").split(","))   # C12 default 16.10.
+    return round(xo) - WINDOW + dc, round(yo) - WINDOW + dr, W, H, ACROSS * DOWN | (ov.dummy & 15) << 8, round(k * F)
 
 
 def bitmap(ov: Overlay) -> bytearray:
@@ -164,9 +179,33 @@ def _crc(data: bytes) -> int:
     return c
 
 
+def marks(ov: Overlay, bm: bytearray):
+    """TEST ONLY (C12 dot calibration): CHI_POLISH_MAP_MARKS="x,z;..." (Driver 1 coordinates) paints a 7 x 7 dark
+    frame around the pixel where the car at (x, z) should be (engine map position + 48, C truncating division);
+    in game the dot's offset from the frame's centre is the calibration error in map pixels."""
+    v = os.environ.get("CHI_POLISH_MAP_MARKS", "")
+    if not v:
+        return
+    nudge = os.environ.pop("CHI_POLISH_MAP_NUDGE", None)
+    P = params(ov)
+    if nudge is not None:
+        os.environ["CHI_POLISH_MAP_NUDGE"] = nudge
+    dark = min(range(16), key=lambda i: sum(ov.rgb(i)))
+    for item in v.split(";"):
+        x, z = (int(t) for t in item.split(","))
+        col = P[0] + WINDOW + int(z / P[5])
+        row = P[1] + WINDOW + int(x / P[5])
+        for dy in range(-3, 4):
+            for dx in range(-3, 4):
+                if max(abs(dx), abs(dy)) == 3 and 0 <= row + dy < H and 0 <= col + dx < W:
+                    bm[(row + dy) * W + col + dx] = dark
+        print("minimap mark: (%d, %d) -> map px col %d row %d" % (x, z, col, row))
+
+
 def lump(d2_lev: str, base_lump: bytes) -> tuple[bytes, tuple]:
     ov = Overlay(d2_lev)
     bm = bitmap(ov)
+    marks(ov, bm)
     tiles = []
     for ty in range(DOWN):
         for tx in range(ACROSS):
@@ -176,7 +215,7 @@ def lump(d2_lev: str, base_lump: bytes) -> tuple[bytes, tuple]:
                 t += bytes(row[x] | row[x + 1] << 4 for x in range(0, 32, 2))
             tiles.append(bytes(t))
     out = bytearray(DATA_AT)
-    out[320:328] = base_lump[320:328]
+    out[CLUT_AT - 8:CLUT_AT] = base_lump[320:328]      # the 8-byte block right before the CLUT (unused by the exe code found)
     out[CLUT_AT:CLUT_AT + 32] = struct.pack("<16H", *ov.clut)
     seen = {}
     offs = []
@@ -191,14 +230,36 @@ def lump(d2_lev: str, base_lump: bytes) -> tuple[bytes, tuple]:
         offs.append(seen[t])
     offs += [offs[0]] * (MAX_TILES - len(offs))
     struct.pack_into("<%dH" % MAX_TILES, out, 0, *offs)
-    assert len(out) < 0x10000, "tile offsets are 16-bit"
-    return bytes(out), params(ov)
+    if CLUT_AT != 0x148 and os.environ.get("CHI_POLISH_MAP_TESTCLUT") == "1":
+        # TEST ONLY (no exe change): a second CLUT copy where today's exe reads it (map + 0x148); this
+        # overwrites the offsets of tiles 164..179, which then show garbage
+        out[0x148:0x168] = struct.pack("<16H", *[c for c in struct.unpack_from("<16H", out, CLUT_AT)])
+    prm = params(ov)
+    out += TRAILER + struct.pack("<6i", *prm)            # the frame travels with the lump (C12 r2, see below)
+    assert len(out) < 0x8000, "tile offsets are read signed (lh at 0x80056390)"
+    return bytes(out), prm
+
+
+# C12 round 2 (Polish 16.10.): probe 'minimap' showed a sheared map with no zoom: the level carried the F=4/3 lump
+# (512 x 288, 16 tiles across) but build_package recomputed the exe frame from the environment at package time
+# (CHI_POLISH_MAP_F unset there -> F=1.5: 448 x 256, 14 across, scale 4247). The frame the lump was built for is
+# now stored after the tile data (the exe reads tiles by offset only) and build_package takes it from there.
+TRAILER = b"PMAP"
+
+
+def stored_params(lump_data: bytes):
+    """The exe frame a lump was built with, or None (older lumps)."""
+    at = len(lump_data) - 28
+    if at >= 0 and lump_data[at:at + 4] == TRAILER:
+        return struct.unpack_from("<6i", lump_data, at + 4)
+    return None
 
 
 if __name__ == "__main__":      # python polish_map.py out.png : preview the resampled map + params
     import sys
     from PIL import Image
-    ov = Overlay("work/d2_CHICAGO.LEV")
+    import inputs
+    ov = Overlay(inputs.path(__import__("cityprofile").P.lev_day))
     bm = bitmap(ov)
     im = Image.new("RGB", (W, H))
     im.putdata([ov.rgb(v) for v in bm])

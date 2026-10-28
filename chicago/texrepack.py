@@ -38,6 +38,12 @@ SHARED_TO_PERM = int(__import__("os").environ.get("CHI_SHARED", "99"))   # textu
 MAX_SHRINK = int(__import__("os").environ.get("CHI_SHRINK", "3"))       # halvings allowed per texture
 # Per-area page contents need every area switch to reload its pages (Driver 1
 # keeps pages that stay listed); shared contents keep Driver 1's behaviour.
+CLUT_SHARE = __import__("os").environ.get("CHI_POLISH_CLUTSHARE", "") == "1"   # S1: identical CLUTs on a permanent page share a detail
+PLACE_STATS = {}
+INMEM_KEEP = None       # Q36 B: in-memory models that stay resident (None = all)
+SHORT_ROWS = 170        # S1 slot 15: rows v 0..169 (row 426 of VRAM = loading-screen CLUT)
+S1_RESERVE = {}         # Polish S1: area -> pages kept free for its local textures
+S1_LOCAL = []           # Polish S1: local (per-area packed) Chicago textures
 PER_AREA_CONTENT = __import__("os").environ.get("CHI_PER_AREA", "1") == "1"
 
 # texture names the Driver 1 EXE looks up (strings in SLUS_008.42)
@@ -46,6 +52,7 @@ SUN2 SKID FLARE1 SPLASH SWBIRD1 SWBIRD2 SKYSUN DROP DIGIT COLLON JEANS1 ARM1 CHE
 ADDCAM AUTO CHASEC CLOCK DELCAM EDITCAM FIXEDCA INCAR LENSCHA LOOKCAR MOVECMP MOVECAM PAUSE
 PLAYCAM PLAYPAU SAVE2CA RESTREP SEA""".split())
 # + per-city event models the loader requires for the replaced slot (LA: BOEING, table @0x80089E84)
+EXTRA_MODELS = {}   # C42 r3 (c): key -> (Model, areas) whose textures join those areas' sets (convert sets it)
 SKY_SLOTS = 4   # every Driver 1 city keeps its sky models in slots 0..3
 ENGINE_MODEL_NAMES = "CLEANWHEEL FASTWHEEL DAMWHEEL HUBCAP1 PEDHEAD1 PEDHEAD2 PEDHEAD3 PEDHEAD4 BOEING".split()
 
@@ -202,7 +209,7 @@ def pack_group(items: list, group) -> list[PackedPage]:
 
 FORCE_PERM = {b"RIVER3A"}   # Chicago textures of generated models (convert.shore_wall_model), kept in FORCED_AREAS
 FORCED_AREAS = set()        # set by convert.py: areas in which the shore walls are seen
-WATER_TEXTURE = (b"LASEA", "work/d1_MIAMI.lev", b"SEA")   # LA's 16x16 sea -> Miami's 64x64 (calmer, darker)
+WATER_TEXTURE = (b"LASEA", "d1_MIAMI.lev", b"SEA")   # inputs.py name   # LA's 16x16 sea -> Miami's 64x64 (calmer, darker)
 
 
 NIGHT_WATER = 0.17            # night: Miami Night's rendered sea / Chicago night's (measured 0.161-0.181 per channel, no tint)
@@ -218,9 +225,10 @@ def water_from_miami(items, night=False):
         return
     old_name, path, new_name = WATER_TEXTURE
     it = next((i for i in items if i.src == "B" and i.name == old_name), None)
-    if it is None or not os.path.exists(path):
+    if it is None:
         return
-    lev = Lev.parse(open(path, "rb").read())
+    import inputs
+    lev = Lev.parse(inputs.read(path))
     ti, pages = read_pages(lev)
     names = lev.loadtime.get(5).data
     for p, dl in enumerate(ti.details):
@@ -239,7 +247,7 @@ def water_from_miami(items, night=False):
                 return
 
 
-DAY_LEV = "work/d2_CHICAGO.LEV"
+DAY_LEV = __import__("cityprofile").P.lev_day     # inputs.py name (M3: the city profile's day level) (Option A: from the player's Driver 2 disc)
 
 
 def darken_clut(clut: bytes, f: float, rnd: bool = False) -> bytes:
@@ -281,11 +289,12 @@ def night_same_as_day(chicago: Lev):
     (ground, roads, many props) as bright as by day, darkening them in its renderer; Driver 1 with
     LA's night look does not, so those are darkened here. None for a day conversion."""
     import os
-    src = os.environ.get("CHI_D2_LEV", DAY_LEV)
+    import inputs
+    src = inputs.d2_lev()
     f = float(os.environ.get("CHI_NIGHT_DARKEN", "0.3"))
-    if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(DAY_LEV)) or f >= 1.0:
+    if inputs.is_input(src, DAY_LEV) or f >= 1.0:
         return None, f
-    day = Lev.parse(open(DAY_LEV, "rb").read())
+    day = Lev.parse(inputs.read(DAY_LEV))
     dti, dpages = read_pages(day)
     dnames = day.loadtime.get(5).data
     out = {}
@@ -305,6 +314,13 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
     cti, cpages = read_pages(chicago)
     day_tex, dark_f = night_same_as_day(chicago)
     ndark = 0
+    night_tiles = set()                       # C125 (CityProfile.night_tiles_third): textures of ground tile models
+    if day_tex is not None and __import__("cityprofile").P.night_tiles_third:
+        _cm, _ = inmem_models(chicago)
+        for _m in {**area_models(chicago), **_cm}.values():
+            if _m.shape_flags & 0x0400:
+                night_tiles |= model_texrefs(_m, {})
+        print("night: %d ground-tile textures darkened x1/3 (C125)" % len(night_tiles))
     bti, bpages = read_pages(base)
     cnames = chicago.loadtime.get(5).data
     bnames = base.loadtime.get(5).data
@@ -322,6 +338,12 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
                 tex_areas[t] |= model_areas.get(i, set())
                 if model_near is not None:
                     tex_near[t] |= model_near.get(i, set())
+    for _key, (m, areas) in EXTRA_MODELS.items():   # C42 r3 (c): the regional specials (polish_specials)
+        refs = model_texrefs(m, {})
+        cused |= refs
+        if model_areas is not None:
+            for t in refs:
+                tex_areas[t] |= set(areas)
     cused = {t for t in cused if t[0] < cti.num_pages and t[1] < len(cti.details[t[0]]) and t[0] in cpages}
     import os
     walls = not any(e in ("no_walls", "no_water") for e in os.environ.get("CHI_EXPERIMENT", "").split(","))
@@ -371,10 +393,13 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
         clut = pg.cluts[t[1]] if t[1] < len(pg.cluts) else bytes(32)
         rows = pg.rect(x, y, w, h)
         nm = name_at(names, noff)
-        if src == "C" and day_tex is not None and day_tex.get(nm) and \
+        nonlocal ndark
+        if src == "C" and day_tex is not None and t in night_tiles:
+            clut = darken_clut(clut, 1.0 / 3)           # C125: D2 draws night tiles at combointensity / 3
+            ndark += 1
+        elif src == "C" and day_tex is not None and day_tex.get(nm) and \
                 mean_brightness(rows, clut) >= NIGHT_KEEP_RATIO * day_tex[nm]:
             clut = darken_clut(clut, dark_f)            # as bright as by day in D2: darkened
-            nonlocal ndark
             ndark += 1
         it = Item(src, t[0], t[1], nm, x, y, w, h, clut, rows, ident)
         it.ow, it.oh = w, h
@@ -406,13 +431,32 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
             if t[0] not in cspecial and t[0] in cpages and t[1] < len(cti.details[t[0]]):
                 groups["perm"].append(make("D", cti, cpages, cnames, t))
     water_from_miami(groups["perm"], night=day_tex is not None)
+    import polish_moon                         # CHI_NIGHT_MOON=1 (Polish/Design): D2's moon in the night SKYSUN slot
+    if polish_moon.enabled() and day_tex is not None:
+        print("night moon: SKYSUN replaced by D2's SKYMOON in %d item(s)" % polish_moon.apply(groups["perm"]))
+    import polish_tex
+    theights = polish_tex.texture_heights(call) if polish_tex.HEIGHT else {}
+    import polish_s1
+    S1_LOCAL.clear()
+    s1_local, s1_areas = set(), {}
+    if polish_s1.ENABLED and model_areas is not None:
+        extra = set()
+        for _key, (m_, _a) in EXTRA_MODELS.items():
+            extra |= model_texrefs(m_, {})
+        s1_local, s1_areas = polish_s1.classify(call, {i: m for i, m in cmem.items() if INMEM_KEEP is None or i in INMEM_KEEP},
+                                                lambda m_: model_texrefs(m_, call), extra, forced)
     for t in sorted(cused):
         it = make("C", cti, cpages, cnames, t)
+        it.height = theights.get(t, 0)
         it.near = frozenset(tex_near.get(t, ()))
         if it.name.decode("latin-1") in EXE_TEXTURE_NAMES:
             it.name = b"_" + it.name[1:]          # the base city's version must win lookups
         if t in forced:                       # generated models (shore walls): the areas they are seen in
             tex_areas[t] |= FORCED_AREAS      # (forcing it permanent added a page: wrong area textures, C29)
+        if t in s1_local:                       # S1: packed per area later (polish_s1)
+            it.s1_areas = s1_areas[t]
+            S1_LOCAL.append(it)
+            continue
         if model_areas is not None:
             # residency from where each texture's models are visible (convert.build_world)
             if len(tex_areas.get(t, ())) >= SHARED_TO_PERM:
@@ -525,7 +569,7 @@ def pack_per_area(groups: dict, budget: int, preload=None):
         best = None
         for pg in pages:
             new = S - pg["areas"]
-            if any(lists[a] + 1 > cap for a in new):
+            if any(lists[a] + 1 > cap - S1_RESERVE.get(a, 0) for a in new):
                 continue
             used = set()
             for a in S:
@@ -546,7 +590,7 @@ def pack_per_area(groups: dict, budget: int, preload=None):
                 if cost[0] == 0:
                     break
         if best is None:
-            if any(lists[a] + 1 > cap for a in S):
+            if any(lists[a] + 1 > cap - S1_RESERVE.get(a, 0) for a in S):
                 return None, None, S
             pg = {"areas": set(), "occ": {}, "cluts": {}, "items": []}
             pages.append(pg)
@@ -567,7 +611,7 @@ def pack_per_area(groups: dict, budget: int, preload=None):
 def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev = None) -> RepackResult:
     # bti / base_lev below: the level whose special (car) pages are taken (the car set's)
     groups, bti, base_lev, csp = collect(chicago, base, model_areas, model_near, cars)
-    budget = SLOTS - CLUT_SLOT_COST - SPECIAL_LOADED
+    budget = SLOTS - CLUT_SLOT_COST - SPECIAL_LOADED + int(__import__("os").environ.get("CHI_POLISH_EXTRA_PAGES", "0"))   # estimate only
     import polish_cars                        # CHI_POLISH_CARPAGES=1 (Polish, C42): traffic/cop car pages kept whole
     fixed = polish_cars.fixed_pages(base_lev, [p for p, _ in bti.special]) if polish_cars.carpages_enabled() else []
     fsrc = "B" if base_lev is base else "K"
@@ -585,11 +629,18 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
             npairs = polish_cars.attach_twins(groups, chicago, "D", [p for p, _ in cti_.special])
         else:
             npairs = polish_cars.attach_twins(groups, base_lev, fsrc, [p for p, _ in bti.special])
+            if polish_cars.enabled():
+                print("car CLUT table: %d palettised textures first" % polish_cars.mark_palette_items(groups, base_lev, fsrc, base))
         print("car damage twins kept at u+128 (CHI_POLISH_CARPAGES=2): %d" % npairs)
-        if polish_carmix.enabled() and polish_carmix.HALF:   # mix2: the D2 car textures take the cost, not the city
+        if (polish_carmix.enabled() or polish_cars.enabled()) and polish_carmix.HALF:   # mix2: the D2 car textures take the cost, not the city
             nh = 0
+            # CHI_POLISH_D2CARS=1 (C42 engine step): the Driver 2 car textures are source "K" (the car set = the D2
+            # level); COPFULL keeps the cop's (slot 0) pages full, shared with civilian slot 1 (same D2 model 3)
+            csrc_, keep_ = ("D", polish_carmix.cop_pages(chicago) if polish_carmix.COP_FULL else set())
+            if polish_cars.enabled():
+                csrc_, keep_ = "K", (polish_carmix.slot_pages(chicago, 0) if polish_carmix.COP_FULL else set())
             for it in groups.get("perm", []):
-                if it.src == "D":
+                if it.src == csrc_ and it.page not in keep_:
                     for _ in range(polish_carmix.HALF):
                         it.halve()
                         if getattr(it, "twin", None) is not None:
@@ -598,8 +649,84 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
             print("mixed car set: %d Driver 2 car textures halved x%d (twins alike)" % (nh, polish_carmix.HALF))
     shrunk = 0
     area_packed = None
+    if __import__("os").environ.get("CHI_POLISH_PACKSTAT") == "1":      # Polish S1 diagnostic: per-area need vs capacity
+        import hashlib as _h
+        _perm = pack_group(groups.get("perm", []), "perm")
+        _cap = (budget - len(_perm)) * PAGE * PAGE
+        _need = collections.Counter(); _uniq = {}
+        for g, its in groups.items():
+            if g == "perm":
+                continue
+            for it in its:
+                for a in g:
+                    _need[a] += it.w * it.h
+                key = _h.md5(b"".join(bytes(r) for r in it.rows) + it.clut + b"%d,%d" % (it.w, it.h)).hexdigest()
+                _uniq.setdefault(key, []).append(it)
+        dup = sum(sum(i.w * i.h for i in v[1:]) for v in _uniq.values() if len(v) > 1)
+        print("PACKSTAT perm pages %d, area capacity %d texels (%.1f pages); exact-duplicate area textures %d texels in %d groups"
+              % (len(_perm), _cap, _cap / 65536, dup, sum(1 for v in _uniq.values() if len(v) > 1)))
+        for a in sorted(_need):
+            print("PACKSTAT area %2d needs %7d texels = %.2f pages (%.0f %% of capacity)" % (a, _need[a], _need[a] / 65536, 100 * _need[a] / _cap))
+        import heapq
+        for extra in (0, 1, 2, 3):
+            cap2 = _cap + extra * PAGE * PAGE
+            halved_any, halvings, lost = set(), 0, 0
+            for a in sorted(_need):
+                its = [[it.w * it.h, id(it), it.w, it.h, 0, it] for g, its_ in groups.items() if g != "perm" and a in g for it in its_]
+                tot = sum(e[0] for e in its)
+                h = [(-e[0], e[1], k) for k, e in enumerate(its)]; heapq.heapify(h)
+                while tot > 0.92 * cap2 and h:
+                    _, _, k = heapq.heappop(h); e = its[k]
+                    if e[4] >= 3 or max(e[2], e[3]) < 16:
+                        continue
+                    if e[2] >= e[3]: e[2] //= 2
+                    else: e[3] //= 2
+                    new_a = e[2] * e[3]; tot -= e[0] - new_a; lost += e[0] - new_a; e[0] = new_a; e[4] += 1
+                    halved_any.add(e[1]); halvings += 1
+                    heapq.heappush(h, (-e[0], e[1], k))
+            print("PACKSTAT ideal per-area packing (92 %% fill) with +%d page(s) per area: %d textures halved somewhere, %d area-halvings, %.1f page-area units lost"
+                  % (extra, len(halved_any), halvings, lost / 65536))
     import polish_pages                       # CHI_POLISH_SHAREDPAGES=1 (Polish, C45): stable shared pages
     stable, stable_load = polish_pages.extract(groups) if (model_areas is not None and PER_AREA_CONTENT) else ({}, None)
+    short_items = []                          # S1 slot 15 (CHI_POLISH_S1_SLOT15): 5th permanent page, rows 0..169
+    if __import__("os").environ.get("CHI_POLISH_S1_SLOT15") == "1" and model_areas is not None:
+        import numpy as np
+        occ = np.zeros((PAGE, PAGE), dtype=bool); occ[SHORT_ROWS:, :] = True
+        nareas = lambda g: 99 if g == "perm" else len(g)
+        cands = sorted(((g, it) for g, its in groups.items() for it in its if it.src == "C"),
+                       key=lambda e: (-nareas(e[0]), -(e[1].w * e[1].h)))
+        for g, it in cands:
+            if len(short_items) >= MAX_CLUTS:
+                break
+            if it.h > SHORT_ROWS:
+                continue
+            pos = _free_spot(occ, it.w, it.h)
+            if pos is None:
+                continue
+            x, y = pos
+            occ[y:y + it.h, x:x + it.w] = True
+            short_items.append((it, x, y))
+            groups[g].remove(it)
+        for g in [g for g, its in groups.items() if not its and g != "perm"]:
+            del groups[g]
+        print("S1 slot 15: %d shared textures on the short permanent page (%d texels)"
+              % (len(short_items), sum(it.w * it.h for it, _x, _y in short_items)))
+    S1_RESERVE.clear()
+    if S1_LOCAL:                              # S1: split each area's pages between global and local textures by need
+        _permn = len(pack_group(groups.get("perm", []), "perm"))
+        _cap = budget - _permn
+        _g, _l = collections.Counter(), collections.Counter()
+        for g, its in groups.items():
+            if g != "perm":
+                for it in its:
+                    for a in g:
+                        _g[a] += it.w * it.h
+        for it in S1_LOCAL:
+            for a in it.s1_areas:
+                _l[a] += it.w * it.h
+        for a in set(_g) | set(_l):
+            S1_RESERVE[a] = min(_cap - 1, int(round(_cap * _l[a] / max(1, _g[a] + _l[a]))))
+        print("S1 reserve (pages per area for local textures): %s" % dict(sorted(S1_RESERVE.items())))
     while model_areas is not None:
         if PER_AREA_CONTENT:
             perm_pages, area_packed, failed = pack_per_area(groups, budget, stable_load)
@@ -626,7 +753,8 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
         fail_areas = failed if failed != "perm" else frozenset()
         # (only textures that stay at least 16 pixels on the halved side)
         import polish_tex                     # CHI_POLISH_TEX=cost: halve by visual loss (Polish, C7)
-        (polish_tex.pick(cands, fail_areas) if polish_tex.COST else
+        (polish_tex.pick_height(cands, fail_areas) if polish_tex.HEIGHT else
+         polish_tex.pick(cands, fail_areas) if polish_tex.COST else
          max(cands, key=lambda it: (not (it.near & fail_areas) and max(it.w, it.h) >= 32,
                                     it.w * it.h))).halve()
         shrunk += 1
@@ -682,17 +810,34 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
         return idx
 
     report_fixed = []
+    clut_saved = 0
     order = ["perm"] + sorted((g for g in packed if g != "perm"), key=lambda g: sorted(g))
     for g in order:
         for pp in packed[g]:
             idx = take_index()
             page = Page()
             dets = []
-            for k, (it, x, y) in enumerate(sorted(pp.items, key=lambda e: (not getattr(e[0], "carfirst", False), e[2], e[1]))):
+            k = -1
+            shared_at = {}
+            for it, x, y in sorted(pp.items, key=lambda e: (not getattr(e[0], "palette", False),
+                                                            not getattr(e[0], "carfirst", False), e[2], e[1])):
                 page.blit(x, y, it.rows)
+                if getattr(it, "pixels_only", False):     # C42 r3 (b): damage twin, drawn through its clean texture
+                    continue
+                if (g == "perm" and CLUT_SHARE and it.src == "C" and not it.name.startswith(b"_")
+                        and not getattr(it, "palette", False) and not getattr(it, "carfirst", False)
+                        and getattr(it, "twin", None) is None and it.clut in shared_at):
+                    # S1 CLUT sharing: a polygon takes its CLUT from (page, detail) and its UVs from itself, so a
+                    # Chicago texture with the same 16 colours as an earlier one on this page reuses that detail
+                    remap[(it.src, it.page, it.detail)] = (idx, shared_at[it.clut], x, y, it.x, it.y, it.ow, it.oh, it.w, it.h)
+                    clut_saved += 1
+                    continue
+                k += 1
                 page.cluts.append(it.clut)
                 dets.append((it.ident, it.name, x, y, it.w, it.h))
                 remap[(it.src, it.page, it.detail)] = (idx, k, x, y, it.x, it.y, it.ow, it.oh, it.w, it.h)
+                if it.src == "C" and not it.name.startswith(b"_"):
+                    shared_at.setdefault(it.clut, k)
             pages[idx], details[idx] = page, dets
             if g == "perm":
                 flags[idx] = 1
@@ -721,9 +866,22 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
                 permanent.append(idx)
                 report_fixed.append("%d->%d (%d textures)" % (fp, idx, len(dets)))
 
+    if short_items:
+        idx = take_index()
+        page = Page(); dets = []
+        for k, (it, x, y) in enumerate(short_items):
+            page.blit(x, y, it.rows); page.cluts.append(it.clut)
+            dets.append((it.ident, it.name, x, y, it.w, it.h))
+            remap[(it.src, it.page, it.detail)] = (idx, k, x, y, it.x, it.y, it.ow, it.oh, it.w, it.h)
+        pages[idx], details[idx] = page, dets
+        flags[idx] = 1 | 0x80                 # Infrastructure: loaded into slot 15 (960,256), 64 x 170
+        permanent.append(idx)
+        report_fixed.append("short slot-15 page %d (%d textures)" % (idx, len(short_items)))
+
     area_page_content = {}
     for pg in (area_packed or []):
         idx = take_index()
+        pg["idx"] = idx
         flags[idx] = 2
         dets = {}
         for it, S, d, x, y in pg["items"]:
@@ -742,8 +900,80 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
             area_pages[a].append(idx)
         pages[idx] = area_page_content[(min(pg["areas"]), idx)]
 
+    remap_area = {}
+    PLACE_STATS.clear(); PLACE_STATS.update(placements=0, halved=0, lost=0)
+    if S1_LOCAL:                              # Polish S1: every area packs its own local textures
+        import polish_s1, hashlib, numpy as np, polish_tex
+        remap.update(polish_s1.assign_virtual(S1_LOCAL))
+        B0 = SLOTS - CLUT_SLOT_COST - SPECIAL_LOADED
+        local_idx, s1_halved, s1_halvings, s1_new = [], set(), 0, {}
+
+        def pick(cands, a):          # largest current copy first (spreads the halvings), high / far-only weighted up
+            return max(cands, key=lambda c: (not polish_tex.protected(c.it),
+                                             c.w * c.h * (1.5 if getattr(c.it, "height", 0) >= polish_tex.HIGH_FROM else 1.0)
+                                             * (1.5 if a not in c.it.near else 1.0)))
+        for a in sorted({x for it in S1_LOCAL for x in it.s1_areas}):
+            uniq = {}
+            for it in S1_LOCAL:
+                if a in it.s1_areas:
+                    k = hashlib.md5(b"".join(bytes(r) for r in it.rows) + it.clut + b"%d,%d,%d" % (it.w, it.h, it.shrink)).hexdigest()
+                    uniq.setdefault(k, []).append(it)
+            copies = []
+            for v in uniq.values():
+                c = polish_s1._Copy(v[0]); c.aliases = v; copies.append(c)
+            base_pages = [(pg["idx"], pg["occ"][a], pg["cluts"][a]) for pg in (area_packed or []) if a in pg["areas"]]
+            cap_new = B0 - len([i for i in permanent if not flags.get(i, 0) & 0x80]) - len(area_pages[a])
+            place, nnew, nh = polish_s1.pack_area(a, copies, base_pages, cap_new, _free_spot, PAGE, MAX_CLUTS, np, pick)
+            s1_halvings += nh; s1_new[a] = nnew
+            for c in copies:
+                n_al = len(c.aliases)
+                PLACE_STATS["placements"] += n_al
+                if c.shrink:
+                    PLACE_STATS["halved"] += n_al
+                    PLACE_STATS["lost"] += (c.it.ow * c.it.oh - c.w * c.h) * n_al
+            while len(local_idx) < nnew:
+                i_ = take_index(); local_idx.append(i_); flags[i_] = 2
+            rm = remap_area.setdefault(a, {})
+            for c, (ref, d, x, y) in place.items():
+                idx = ref[1] if ref[0] == "g" else local_idx[ref[1]]
+                page = area_page_content.get((a, idx))
+                if page is None:
+                    page = Page(); page.cluts = []; area_page_content[(a, idx)] = page
+                    area_pages[a].append(idx)
+                while len(page.cluts) <= d:
+                    page.cluts.append(bytes(32))
+                page.blit(x, y, c.rows); page.cluts[d] = c.it.clut
+                dl = details.setdefault(idx, [])
+                while len(dl) <= d:
+                    dl.append((0, b"_UNUSED", 0, 0, 1, 1))
+                if dl[d][1] == b"_UNUSED":
+                    dl[d] = (c.it.ident, c.it.name, x, y, c.w, c.h)
+                if c.shrink:
+                    s1_halved.add((c.it.src, c.it.page, c.it.detail))
+                for it in c.aliases:
+                    vp, vd = it.vkey
+                    rm[("X", vp, vd)] = (idx, d, x, y, it.x, it.y, it.ow, it.oh, c.w, c.h)
+        for i_ in local_idx:
+            pages[i_] = next(v for (a_, j), v in area_page_content.items() if j == i_)
+        print("S1 per-area packing: %d local textures, %d halved in some area (%d area-halvings), new pages per area %s"
+              % (len(S1_LOCAL), len(s1_halved), s1_halvings, s1_new))
+
     report = []
-    nperm = len(permanent)
+    for g, its in groups.items():                       # global placements (area sets; permanent = every area)
+        n_g = 16 if g == "perm" else len(g)
+        for it in its:
+            if it.src != "C":
+                continue
+            PLACE_STATS["placements"] += n_g
+            if it.shrink:
+                PLACE_STATS["halved"] += n_g
+                PLACE_STATS["lost"] += (it.ow * it.oh - it.w * it.h) * n_g
+    report.append("texture placements (" + __import__("cityprofile").P.label + ", per area): %d, halved %d (%.1f %%), texels lost %.1f page-area units"
+                  % (PLACE_STATS["placements"], PLACE_STATS["halved"], 100.0 * PLACE_STATS["halved"] / max(1, PLACE_STATS["placements"]),
+                     PLACE_STATS["lost"] / 65536.0))
+    if CLUT_SHARE:
+        report.append("CLUT sharing on permanent pages (CHI_POLISH_CLUTSHARE): %d palettes saved" % clut_saved)
+    nperm = len([i for i in permanent if not flags.get(i, 0) & 0x80])   # (the short slot-15 page has its own slot)
     report.append("downscaled textures: %d (%s)" % (shrunk, ", ".join(
         "%s %dx%d->%dx%d" % (it.name.decode("latin-1"), it.ow, it.oh, it.w, it.h)
         for items in groups.values() for it in items if it.shrink)))
@@ -756,6 +986,7 @@ def repack(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Lev
         report.append("area %2d: %d own pages -> %d resident of %d %s" % (
             a, len(area_pages[a]), total, budget, "OK" if total <= budget else "OVER by %d" % (total - budget)))
     res = RepackResult(pages, details, flags, permanent, special, dict(area_pages), remap, report, area_page_content)
+    res.remap_area = remap_area
     if "keep_carpages" not in __import__("os").environ.get("CHI_EXPERIMENT", "").split(","):
         renumber_permanent(res)
     return res
@@ -788,12 +1019,14 @@ def renumber_permanent(res: RepackResult):
     res.area_pages = {a: [f(i) for i in v] for a, v in res.area_pages.items()}
     res.remap = {k: (f(v[0]),) + tuple(v[1:]) for k, v in res.remap.items()}
     res.area_page_content = {(a, f(i)): v for (a, i), v in res.area_page_content.items()}
+    res.remap_area = {a: {k: (f(v[0]),) + tuple(v[1:]) for k, v in rm.items()} for a, rm in getattr(res, "remap_area", {}).items()}
     res.report.append("permanent pages renumbered for the car texture setup: %s" % sorted(m.items()))
 
 
 if __name__ == "__main__":
-    chi = Lev.parse(open("work/d2_CHICAGO.LEV", "rb").read())
-    base = Lev.parse(open("work/d1_LA.lev", "rb").read())
+    import inputs
+    chi = Lev.parse(inputs.read(DAY_LEV))
+    base = Lev.parse(inputs.read("d1_LA.lev"))
     res = repack(chi, base)
     print("\n".join(res.report))
     print("total pages: %d repacked + %d special, max index %d" % (len(res.pages), len(res.special), max(list(res.pages) + [p for p, _ in res.special])))

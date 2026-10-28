@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import struct
 
-WINDOW = 19
-ENTRIES = 368                 # 46 bytes; covers the window (361) + the decoder's extra entry
+import os as _os
+# cheats 6 / C94 (Polish 25.10.): CHI_POLISH_XDRAW=1 builds the "Extra draw distance" level variant: a 27 x 27 window
+# (radius <= 13, centre (13, 13)) under the feature's 0x50000 primitive buffers. Such a level only works with the feature
+# on (the engine then decodes 27 x 27 streams: *0x800973A8 = 729, as 361 today); normal levels are unchanged.
+XDRAW = _os.environ.get("CHI_POLISH_XDRAW") == "1"
+WINDOW = 27 if XDRAW else 19
+ENTRIES = 736 if XDRAW else 368   # covers the window (729 / 361) + the decoder's extra entry, multiple of 8
 REGION_CELLS = 30
 TABLE = 4 * REGION_CELLS * REGION_CELLS
-MAX_RADIUS = 9
+MAX_RADIUS = 13 if XDRAW else 9
 MIN_RADIUS = 5
 BYTES_PER_POLY = 20           # measured 8..18.7 per polygon in range (near ground tiles are subdivided)
-BUDGET = int(0x1E000 * 0.72)
+BUDGET = int((0x50000 if XDRAW else 0x1E000) * 0.72)
 
 
 def mask(radius: int) -> list[int]:
@@ -94,7 +99,8 @@ def region_block(radii: list[int]) -> bytes:
 if __name__ == "__main__":
     for r in range(MIN_RADIUS, MAX_RADIUS + 1):
         s = encode(mask(r))
-        assert decode(s, 362) == (mask(r) + [0] * 7)[:362], r
+        n = WINDOW * WINDOW + 1
+        assert decode(s, n) == (mask(r) + [0] * 7)[:n], r
         print("radius", r, "cells", sum(mask(r)), "stream", len(s), "bytes")
 
 

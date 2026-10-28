@@ -115,3 +115,45 @@ Sources: work/d2_CHICAGO.LEV and work/d1_LA.lev (read only); refs/OpenDriver2Too
 ### Open
 - Per-model handling, collision box and wheel tables are separate exe tables (not covered here).
 - The 9-vs-7 model question stands.
+
+## C57-C59 causes (EXP, 2026-10-16, offline; no game runs)
+### C57 smaller cars: missing model scale in lump 28 (cause found)
+- polish_cars.lump28() copies the D2 MODEL bytes unchanged (vertices, bounding_sphere). worldscale.SCALE = 1.32 (D2 -> D1 units) is applied to positions only (to_d1), not to the car models.
+- Evidence (MODEL bounding_sphere): D2 Chicago civ slots 0-4: 385-406; D1 LA civ/cop slots 0-2: 515-606; D1 Miami 555-608. Ratio ~0.65-0.76, which is 1/1.32 = 0.76 within noise. So the D2 bodies are authentic size but in D2 units, shown 1.32x too small.
+- Fix route: scale the mapped D2 models by 1.32 when writing lump 28 (vertex coordinates and bounding_sphere; the model's own pivot is already at 0). Check the same for the car cosmetics (wheel displacement, light positions) once they are used. Vertex extents were not measured (pointer decode not done).
+### C58 cars not rendered close (candidates, not verified)
+- Candidates in the lump 28 conversion: (a) bounding_sphere is unscaled (above), so object cull (0x8002C5F0 uses the sphere as margin) and the clean/low choice work on a too-small sphere; (b) D1 LA slots 6-8 (player cars) have no low model (low = -1) while the D2 slots carry low models, so the low path may read a model the exe expects to be absent; (c) slot map 5..8 <- 8, 9, 10, 12 with D2 slots 8 and 10 much larger (bsphere 663-672): the cull sphere and the model size disagree.
+- Next (one run): poke the D2 car to 2 m and check the clean model draw; compare the bsphere cull with the scaled sphere.
+### C59 civilian traffic uses the cop model (cause found)
+- D1 slot 0 is the cop model (LA: COP1..5) and the converter maps D2 civ residentCarModels[3] to D1 slot 0 (polish_cars.py D1_FROM_D2 = {0: 3, ...}) with the reason "Driver 2's cop is a civilian model". Civilian AI cars spawn with their D1 model slot (AI record byte 0x80098950 + (car-1)*0x50 + 0x10, see the damage section), so every civ car in slot 0 is drawn with the cop body.
+- Fix route: map D2 civ to D1 slots 1 and 2 (plus 3-4 if D1 has them unused) and keep slot 0 as the D1 cop model (LA COP1..5) unless a D2 police car is found in the Chicago lump (none in the 9 slots).
+### Spec: D2 hitboxes, D2 player car, damage on all D2 cars
+- D2 CAR_COSMETICS (REDRIVER2 dr2types.h:211): headLight, frontInd, backInd, brakeLight, revLight, policeLight, exhaust, smoke, fire (SVECTOR each), wheelDisp[4], extraInfo, powerRatio, cbYoffset, susCoeff, traction, wheelSize, cPoints[12] (collision points), colBox (collision box), cog (centre of gravity), twistRateX, ... car_cosmetics[] is indexed by resident model (cosmetic.c).
+- Hitboxes: D1 uses its own collision/handling per car slot in the exe; D2's colBox and cPoints would need a per-slot table in the exe (guest code, relocated table or patch of the collision routine). Effort: medium-high.
+- D2 player car: the player's handling (powerRatio, susCoeff, traction, wheelSize) and cosmetics come from car_cosmetics[] per model; D1 has them per slot in the exe. Needs the same per-slot table replacement plus the choice-to-slot map (D1 slots 5-8 = player cars). Effort: high.
+- Damage on all D2 cars: the dent tables (0x800973E0 etc., per slot, from the per-city tables at 0x8008A6DC) must cover every mapped slot; the damaged model (lump 28 'damage' entry) is present for all D2 slots (verified). Damaged textures: the damage texture pages must be in the car pages (>= 5). Effort: medium (data), high if the 6 zones of a D2 car need D1-sized tables.
+
+## C57/C59 verification run (EXP, 2026-10-16, scratchpad converter copy, not the shared files)
+- Converted work/var_exp_cars1_day.lev (14.4 MB, 1216 models) with CHI_POLISH_D2CARS=mixed, CHI_POLISH_CARMIX_COPFULL=1, CHI_POLISH_CARS_SCALE=1.32, from a scratchpad copy of chicago/*.py and work/ (shared files untouched).
+- Diff (scratchpad only, to be adopted behind CHI_POLISH_D2CARS):
+  - polish_cars.py: D1_FROM_D2 = {1: 3, 2: 0, 5: 8, 6: 9, 7: 10, 8: 12} (was {0: 3, 1: 0, 2: 1, ...}): civilians only in slots 1-2.
+  - polish_carmix.py: CIV_SLOTS = (1, 2); COP_SLOT = 0 with slot 0 taken from the car set (src "K"); CAR_SCALE = env CHI_POLISH_CARS_SCALE (default 1.32); new scale_model(): bounding_sphere (+8) and vertices (count +12, offset +16, 8 B per SVECTOR) scaled, applied to every D2-sourced model (src "D").
+  - Known gap: the mixed damage rows (<lev>.dmg.bin, slots 0-2) are still built from D2 civ rows, so slot 0 (cop) would get a civ damage row. Needs the same change in damage_civ().
+- Game run (one, devtest/exp, port 4450, dt.launch, start = l_down_e D2 -101562,106946, standing, 6 shots at 4 s): loaded (Chicago, CITY 3, pos 23662,164,54070), no fatal. No civilian car in view in any of the 6 frames, so C57 (size vs D1), C58 (visibility near/far) and C59 (cop body on civilians) are NOT verified by this run. Sheet: devtest/exp_work/cars1/exp_sheet.png.
+- Next: a traffic-dense spot (cellprobe CP_NEAR=1 puts the player next to the nearest live car) for the same level, and the same shot for a D1 baseline (var_roads_b11_day.lev) for the size comparison.
+
+## C57-C59 second run (EXP, 2026-10-16): traffic missing in the mixed build
+- Damage rows: damage_tables() already follows the slot map, so the cop row (slot 0) gets the empty row (0xFF), and slots 1-2 get D2 3 and D2 0. No extra change was needed; the earlier "known gap" was wrong.
+- Build: work/var_exp_cars2_day.lev (same converter output as cars1; cars1 deleted).
+- cellprobe CP_NEAR=1 at l_down_e: baseline (var_roads_b16b_day.lev) found traffic at once (near car at 1442 units, models 2 and 3); the mixed build found NO traffic car (no near lines, spawn.png only).
+- Scan (60 s, 5 s steps, same spot): baseline 10-11 active AI cars; mixed build 0 active cars at every sample. So C58 (vanishing) and C59 (cop body) cannot be judged in the mixed build: no civilian spawns. Traffic spawn is blocked by the mixed build (not diagnosed: candidates are the civ slots 1-2 (only 2 models), the cop slot 0 without its pages, or the residentCarModels indices, which the baseline uses as models 2 and 3).
+- Size baseline: base near0-5 shots (devtest/exp_work/cars2/build_base) exist; no mixed car to compare.
+- Sheet: devtest/exp_work/cars2/side_by_side.png (base near0, near3, near5; mixed spawn).
+
+## Spawn diagnosis and cars3 (EXP, 2026-10-16)
+- Cause of zero spawns: the converter run lacked CHI_ROADS=1. NOTES (mix3 entry): mix1/mix2 lacked the road lumps, so no AI cars spawned; the mix4 probe had CHI_ROADS=1. The slot map change was not the cause.
+- C59 rule kept: map {1: 3, 2: 0, 5..8: 8, 9, 10, 12} (civilians only in slots 1-2; slot 0 = the car-set cop). No change needed for the rule.
+- cars3 = mixed + CHI_ROADS=1 + CHI_POLISH_CARS_SCALE=1.32 + CHI_POLISH_CARMIX_COPFULL=1 (work/var_exp_cars3_day.lev; cars2 deleted).
+- cellprobe CP_NEAR=1 at l_down_e: traffic spawns (AI models 2, 3, 2, 2, 9, 3; no model 0 in six samples, so no cop body seen). Baseline: models 2 and 3.
+- Size: not measurable from these shots (player-to-car distances 10k-19k units in cellprobe's near frames). Side-by-side: devtest/exp_work/cars3/side_by_side.png.
+(see the quay section below)

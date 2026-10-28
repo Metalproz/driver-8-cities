@@ -25,7 +25,35 @@ def enabled():
 
 
 HALF = int(os.environ.get("CHI_POLISH_CARMIX_HALF", "0"))   # mix2: halve the D2 car textures N times (twins alike)
+COP_FULL = os.environ.get("CHI_POLISH_CARMIX_COPFULL", "") == "1"   # mix4: the cop keeps full-size textures
 CIV_SLOTS = (0, 1, 2)
+
+
+def cop_pages(chi_lev):
+    """Texture pages of the cop model (slot 0) that no civilian model uses."""
+    from models import Model
+    from texrepack import model_texrefs
+    cm = chi_lev.loadtime.get(28).data
+    ents = pc._entries(cm)
+    m = pc.slot_map()
+    pages = lambda d2: {p for off in (ents[d2][0], ents[d2][2]) if off != -1
+                        for p, _k in model_texrefs(Model.parse(-1, pc._model_bytes(cm, off)), {})}
+    cop = pages(m[0]) if m.get(0) is not None else set()
+    civ = set().union(*(pages(m[s]) for s in (1, 2) if m.get(s) is not None))
+    return cop - civ
+
+
+def slot_pages(chi_lev, slot):
+    """Texture pages of the D2 model mapped to a Driver 1 slot (clean + low)."""
+    from models import Model
+    from texrepack import model_texrefs
+    cm = chi_lev.loadtime.get(28).data
+    ents = pc._entries(cm)
+    d2 = pc.slot_map().get(slot)
+    if d2 is None:
+        return set()
+    return {p for off in (ents[d2][0], ents[d2][2]) if off != -1
+            for p, _k in model_texrefs(Model.parse(-1, pc._model_bytes(cm, off)), {})}
 PLAYER_SLOTS = (5, 6, 7, 8)
 
 
@@ -82,6 +110,8 @@ def lump28(chi_cm: bytes, cars_cm: bytes):
                 row.append(-1)
                 continue
             data = pc._model_bytes(cm, off)
+            if src == "D":                         # C57: Driver 2 units -> Driver 1 (x1.32)
+                data = pc.scale_model(data)
             row.append(len(body))
             body += struct.pack("<i", len(data)) + data
             while len(body) % 4:

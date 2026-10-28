@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import struct
 
+from cityprofile import P as _P
+
 SCALE = 1.32
-# D2 object extents: x -461056..222080, z -570880..702848 (centres -119488, 65984)
-OFFSET_X = -round(-119488 * SCALE)
-OFFSET_Z = -round(65984 * SCALE)
+# centre of the city's D2 object extents (Chicago: x -461056..222080, z -570880..702848 -> -119488, 65984)
+OFFSET_X = -round(_P.centre_d2[0] * SCALE)
+OFFSET_Z = -round(_P.centre_d2[1] * SCALE)
 # 18 x 19 regions = 342 (max 350) fills the engine's region table: at the map's top row the
 # 2x2 region window asks for the row above (index 342+), which from column 8 on reads past
 # the 350-entry table (C25: garbage region offset, CD read into address 0, kernel overwritten).
@@ -22,7 +24,7 @@ OFFSET_Z = -round(65984 * SCALE)
 # Chicago that ring (land: ~301 x 561 cells).
 import os as _os
 CELLS_ACROSS, CELLS_DOWN = (tuple(int(v) for v in _os.environ["CHI_WORLD"].split("x"))
-                            if _os.environ.get("CHI_WORLD") else (480, 630))   # default since 2026-10-11 18:05 (C25); 540x570 = the old grid
+                            if _os.environ.get("CHI_WORLD") else tuple(_P.cells))   # default since 2026-10-11 18:05 (C25); 540x570 = the old grid
 
 
 def s(v: float) -> int:

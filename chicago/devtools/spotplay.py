@@ -14,10 +14,11 @@ By default the menus are driven only to the Take a Ride city select (user, 2026-
 """
 from __future__ import annotations
 
-import re, shutil, subprocess, sys, time
+import os, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+os.environ.setdefault("CHI_TEST_BUILD", "build-dev")   # the user's spot launcher mirrors build-dev (dt defaults to build-test)
 import dt  # noqa: E402
 
 FAST_FORWARD = "5"         # PSX_FAST_FORWARD_SPEED for the copies (hold Tab = 500 %)

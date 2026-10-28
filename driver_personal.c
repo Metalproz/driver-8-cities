@@ -156,13 +156,34 @@ static void write_regs_json(const char* path) {
                 c->pc, c->hi, c->lo, c->cop0[12], c->cop0[13], c->cop0[14]);
         for (int i = 0; i < 32; i++)
             fprintf(f, "%s\"0x%08X\"", i ? ", " : "", c->gpr[i]);
-        fputs("]", f);
+        fprintf(f, "],\n  \"badvaddr\": \"0x%08X\"", c->cop0[8]);
     }
 #endif
+    {   /* C68 (16.10.): the interrupted guest context. When a hang sits in the BIOS exception handler, the CPU registers
+         * above are the handler's; the BIOS saved the game's registers in the current thread's TCB
+         * (0x108 -> process control block -> TCB; +8 r0..r31, +0x88 EPC, +0x8C hi, +0x90 lo, +0x94 SR, +0x98 cause).
+         * Also the 64 words at the guest's sp (locals of the faulting function, e.g. a model index). */
+        uint32_t pcb = psx_mod_read_word(0x80000108u), tcb = pcb ? psx_mod_read_word(0x80000000u | (pcb & 0x1FFFFFu)) : 0;
+        if (tcb) {
+            uint32_t t = 0x80000000u | (tcb & 0x1FFFFFu), g[32];
+            for (int i = 0; i < 32; i++) g[i] = psx_mod_read_word(t + 8u + 4u * (uint32_t)i);
+            fprintf(f, ",\n  \"guest_tcb\": \"0x%08X\", \"guest_epc\": \"0x%08X\", \"guest_sr\": \"0x%08X\", "
+                       "\"guest_cause\": \"0x%08X\",\n  \"guest_sp\": \"0x%08X\", \"guest_gp\": \"0x%08X\", \"guest_ra\": \"0x%08X\",\n"
+                       "  \"guest_gpr\": [", t, psx_mod_read_word(t + 0x88u), psx_mod_read_word(t + 0x94u),
+                    psx_mod_read_word(t + 0x98u), g[29], g[28], g[31]);
+            for (int i = 0; i < 32; i++) fprintf(f, "%s\"0x%08X\"", i ? ", " : "", g[i]);
+            fputs("],\n  \"guest_stack\": [", f);
+            uint32_t sp = g[29];
+            int ok = (sp >= 0x80000000u && sp < 0x80200000u - 0x100u) || (sp >= 0x1F800000u && sp < 0x1F800400u - 0x100u);
+            for (int i = 0; ok && i < 64; i++) fprintf(f, "%s\"0x%08X\"", i ? ", " : "", psx_mod_read_word(sp + 4u * (uint32_t)i));
+            fputs("]", f);
+        }
+    }
     fputs("\n}\n", f);
     fclose(f);
 }
 
+static char s_last_dump_dir[1200];   /* the newest snapshot dir (the watchdog renames a recovered "-hang" to "-stall") */
 static void dev_dump(const char* tag, int main_thread) {
     char ts[32], dir[1200], path[1300];
     dp_timestamp(ts, sizeof(ts));
@@ -172,31 +193,41 @@ static void dev_dump(const char* tag, int main_thread) {
     dp_mkdir(dir);
     snprintf(dir, sizeof(dir), "%s/dev/dumps/%s-v%u%s", dp_app_dir(), ts, s_vblanks, tag);
     dp_mkdir(dir);
+    snprintf(s_last_dump_dir, sizeof(s_last_dump_dir), "%s", dir);
 
+    /* C79 (23.10.): RAM and mod memory first, each write's result in dump.txt (a probe hang dump arrived without ram.bin /
+     * mod.bin: a failed or skipped write must leave a trace) */
+    int ok_ram, ok_sp, ok_mod = -1;
     snprintf(path, sizeof(path), "%s/ram.bin", dir);
-    write_file(path, g_psx_ram, 2u * 1024u * 1024u);
-
-    uint8_t sp[1024];
-    for (uint32_t i = 0; i < sizeof(sp); i++)
-        sp[i] = psx_mod_read_byte(0x1F800000u + i);
-    snprintf(path, sizeof(path), "%s/scratchpad.bin", dir);
-    write_file(path, sp, sizeof(sp));
-
-    /* Mod (Expansion 1) memory: the Chicago port's model table (0x9F000000),
-     * cell-object buffer and empty model - needed to check model pointers. */
+    ok_ram = write_file(path, g_psx_ram, 2u * 1024u * 1024u);
     {
         enum { MOD_DUMP_BYTES = 0x90000u };
         uint8_t* mod = (uint8_t*)malloc(MOD_DUMP_BYTES);
         if (mod) {
             for (uint32_t i = 0; i < MOD_DUMP_BYTES; i += 4u) {
-                uint32_t w = psx_mod_read_word(0x9F000000u + i);
+                uint32_t w = psx_mod_read_word(0x9F000000u + i);   /* cell objects (Chicago), carry, specials; model table: RAM 0x80115600 since S4a */
                 memcpy(mod + i, &w, 4);
             }
             snprintf(path, sizeof(path), "%s/mod.bin", dir);
-            write_file(path, mod, MOD_DUMP_BYTES);
+            ok_mod = write_file(path, mod, MOD_DUMP_BYTES);
             free(mod);
         }
     }
+    uint8_t sp[1024];
+    for (uint32_t i = 0; i < sizeof(sp); i++)
+        sp[i] = psx_mod_read_byte(0x1F800000u + i);
+    snprintf(path, sizeof(path), "%s/scratchpad.bin", dir);
+    ok_sp = write_file(path, sp, sizeof(sp));
+    snprintf(path, sizeof(path), "%s/dump.txt", dir);
+    {
+        FILE* df = fopen(path, "w");
+        if (df) {
+            fprintf(df, "tag %s vblanks %u\nram.bin %s\nmod.bin %s\nscratchpad.bin %s\n", tag, s_vblanks,
+                    ok_ram ? "ok" : "FAILED", ok_mod < 0 ? "no memory" : (ok_mod ? "ok" : "FAILED"), ok_sp ? "ok" : "FAILED");
+            fclose(df);
+        }
+    }
+    fprintf(stdout, "driver.personal: dump %s: ram %s, mod %s\n", dir, ok_ram ? "ok" : "FAILED", ok_mod > 0 ? "ok" : "FAILED");
 
     snprintf(path, sizeof(path), "%s/regs.json", dir);
     write_regs_json(path);
@@ -250,6 +281,15 @@ static DWORD WINAPI freeze_watchdog_thread(LPVOID arg);
  * primitive-base fields of both draw buffer structs and libetc's interrupt
  * chain node (see chicago/NOTES.md). */
 extern void psx_debug_add_write_guard(uint32_t lo, uint32_t hi);
+
+/* C116 (user 27.10.): "Developer recording tools" (feature dev-tools, default on) owns the runtime's developer tools:
+ * TCP debug server, recorders / rings, freeze heartbeat (psx_mod_request_dev_tools). Off = none of that background
+ * work, and no F9 / dump.request snapshot (it needs the recorders). Developer Mode keeps its log, overlay and keys. */
+static int s_dev_tools_on;
+static void dev_tools_activate(void) {
+    s_dev_tools_on = 1;
+    psx_mod_request_dev_tools();
+}
 
 static void dev_mode_activate(void) {
     char ts[32], path[1300];
@@ -320,7 +360,16 @@ static DWORD WINAPI freeze_watchdog_thread(LPVOID arg) {
             still_ms = 0;
             if (moves < 1000u) moves++;
             if (fired) {
-                fprintf(stdout, "driver.personal: game VBlank counter moving again\n");
+                /* Q42 (23.10.): the counter also stands still while an FMV plays (Undercover's intro): a snapshot whose
+                 * game recovered is a stall, not a hang -> "-hang" becomes "-stall" (real hangs keep "-hang") */
+                char stall[1200];
+                size_t n = strlen(s_last_dump_dir);
+                if (n > 5 && strcmp(s_last_dump_dir + n - 5, "-hang") == 0 && n + 1 < sizeof(stall)) {
+                    snprintf(stall, sizeof(stall), "%.*s-stall", (int)(n - 5), s_last_dump_dir);
+                    if (MoveFileA(s_last_dump_dir, stall))
+                        snprintf(s_last_dump_dir, sizeof(s_last_dump_dir), "%s", stall);
+                }
+                fprintf(stdout, "driver.personal: game VBlank counter moving again (snapshot kept as %s)\n", s_last_dump_dir);
                 fired = 0;
             }
             continue;
@@ -510,6 +559,13 @@ void driver_personal_sel_debug(const uint32_t w[6]) {
     for (uint32_t i = 0; i < 6u; i++) psx_mod_write_word(s_stats_addr + SEL_OFFSET + 8u + 4u * i, w[i]);
 }
 
+/* C115: the overlay's emulation speed (VBlanks per wall second vs 59.94, updated once a second; 0 before the first
+ * second) and how many one-second updates there were, for the overclock governor (driver_gameplay.c). */
+uint32_t driver_personal_emu_pct(uint32_t* updates) {
+    if (updates) *updates = s_stats_updates;
+    return s_emu_pct;
+}
+
 void driver_personal_fps_tick(int caller) {
     static int owner = -1;
     if (owner < 0) owner = caller;
@@ -593,8 +649,13 @@ static void overlay_update(void) {
 static void dev_mode_vblank(void) {
     s_vblanks++;
     int down = dump_key_down();
-    if ((down && !s_dump_key_was_down) || dump_requested())
-        dev_dump("", 1);
+    if ((down && !s_dump_key_was_down) || dump_requested()) {
+        if (s_dev_tools_on) dev_dump("", 1);
+        else {
+            fprintf(stdout, "driver.personal: snapshot skipped: Developer recording tools are off (Mods)\n");
+            host_osd_push("Snapshot off: turn on Developer recording tools in Mods", 2500);
+        }
+    }
     s_dump_key_was_down = down;
 
     down = key_down(VK_F10);
@@ -617,6 +678,7 @@ static void dev_mode_vblank(void) {
 }
 
 PSX_MOD_CONSTRUCTOR(driver_personal_register) {
+    psx_mod_register_activation_plugin("driver.dev-tools", dev_tools_activate);
     psx_mod_register_activation_plugin("driver.dev-mode", dev_mode_activate);
     psx_mod_register_vblank_plugin("driver.dev-mode", dev_mode_vblank);
 }

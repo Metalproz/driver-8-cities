@@ -14,11 +14,13 @@ Stage B (roads → traffic/cops) not started. Open issues: see the end.
 
 | what | where |
 |---|---|
-| inputs (from the user's discs, not shipped) | `work/d1_*.lev`, `work/d2_CHICAGO.LEV` (+ night, .DEN, .LCF) |
-| converter | `python convert.py` → `work/chicago_d1.lev` (~2.5 min) |
+| inputs (from the user's discs, not shipped) | Option A (16.10.): read from the registered disc images (`chicago/inputs.py`, disc list `<app>/game.toml [game] discs`, cache `<app>/setup_cache`); the old hand copies `work/d1_*.lev`, `work/d2_CHICAGO.*` only with `CHI_INPUTS=work` |
+| converter | `python convert.py` → `work/chicago_d1.lev` (~5 min); one-command setup from the discs: `python setup_chicago.py --build build-test` (day + night + package, cached) |
 | package | `python build_package.py --install --chicago work/chicago_d1.lev` (writes mods/preloaded; --install required since 13.10., test copies use CHI_PKG_DIR via dt.prepare; without --chicago the chicago-la feature is dropped!; test-bigmiami removed 13.10., R18) |
 | EXE patches | `python exe_patches.py disc/SLUS_008.42.orig --apply disc/SLUS_008.42`, then psxrecomp `generate --bios D:/recomps/games/SCPH1001.BIN`, then `rebuild` |
 | test build | `build-test` (CHI_TEST_BUILD=build-test for dt/lab) when the user's dev client is running |
+| probe env | probes.json "env" reaches only the converter / package build (publish_playable); the running game never sees it. Runtime switches (plugin getenv, CHI_C88_*) cannot be probed: make the wanted behaviour the default (or package data) before a probe (C90, 24.10.). |
+| probe packages | publish_playable.py used to copy mods/packages (incl. driver.personal's manifest) from build-dev, so new features / options from build-test never reached probes. Fixed by Strategy (24.10.): the probe copy overlays the probe build's packages except driver.chicago. After adding a manifest feature, check the probe folder's manifest. |
 | user's dev client | `build-dev` (desktop shortcut "Driver (dev client)"); the user plays this, with dev mode, snapshots (F9 / L3+R3), hang dumps, debug server :4370. Never write test packages or state into it; rebuild only when it is not running. |
 | frozen release | `build-release` (Quiver launches it); updated only when the user declares a release |
 | tests | `devtools/dt.py` (snaps, live, spots, soak, addspot, dis) on copies in `<app>/devtest/`; issue spots in `devtools/spots.json`; results `devtest/_out/` |
@@ -373,6 +375,43 @@ page queue), enabled by `game.toml [recompiler] mod_function_entry_funcs =
   Steps stay steps (D1 surfaces have no walls): a diagonal only moves the step line onto D2's visible edge.
 - M8 budget: ROADSURF (lump 10, in memory) 49,900 -> 66,120 B (+16 KB, b15 vs C37); on PS1 within budget or capped by triangle count.
 
+- **C37 engine (Infrastructure 16.10.)**: exe group SLOPE_DIV (exe_patches.py, shared list 384 -> 417): MapHeight
+  (0x8001F8A8..E4) and FindSurfaceD2 (0x8001F2B4..F4) divide the plane term by divisor = 4096 + ((b - 4096) & D2_PLANES)
+  (gp+0x1110 = 0x80097880; plugin -1 in Chicago, 0 elsewhere): Driver 2's sdHeightOnPlane, exact slopes from unit
+  normals; D1 cities bit-identical (div truncates like the original rounding >> 12). Blocks rescheduled in place
+  (one load moved into the preceding beq delay slot, HI/LO hazards >= 2 instructions).
+- **Surface capacity**: surfaces are cell-local and rotatable (MapHeight: x / z within the cell, 2 rotation bits,
+  height relative to the cell word), so cells share a surface when their pieces match. City-wide CHI_POLISH_SLOPES
+  gave 3298 distinct surfaces (896 kept, 3612 cells dropped; ROADSURF would be ~650 KB). polish_slopes now quantizes
+  (CHI_POLISH_SLOPES_Q = grid, gradient step, offset step): 125/250/375 grids still 2541/2241/1722 distinct; grid
+  750 (pieces split only along cell diagonals) fits all 5417 slope cells under the cap with gradient step 64 (1.6 %)
+  and offsets of 16: ROADSURF 61.5 -> 120 KB, in-memory section 336 -> 396 KB (host fine; M8 budget note).
+  CHI_POLISH_SLOPES_EXACT now defaults to 0 (unit normals; the engine divides).
+- Level work/var_c37_slopes3_day.lev / _night.lev = b16b recipe + CHI_POLISH_SLOPES=1 + Q 750,64,16.
+- Checks 16.10. (build-test, drive 2.5 s from the spot, 10 ms samples): diag_ramp: the car drives off the bank top
+  and descends 1100 units smoothly (|dy| <= 119 per sample, tilt up to 26 deg) into the river (drowns, as in D2);
+  diag_embank / east_ramp_s / c28_bank: no fall-through, no fling, tilt and speeds like b16b. FPS fps_drop_2 0.494 /
+  0.4915 vs b16b 0.4932 / 0.4912 (unchanged). Miami and Chicago boot. Teleport tests (writing the car position)
+  break the physics in both levels: not usable for slope checks.
+- **C55 moon gate (Infrastructure 16.10., shared list 417 -> 426)**: the sky-sun test's CITY load at 0x8004702C
+  reads SUN_CITY (gp+0x1114 = 0x80097884; look_city_patches owns that word, CHI_MOON_GATE=0 keeps the LOOK_CITY
+  load); plugin writes LOOK_CITY elsewhere (D1 cities unchanged), 0x7F Chicago day, 0x7E Chicago night. The glare
+  call at 0x80047068 goes to stub 0x80011868 (MDEC string cave; seeds/ghidra_funcs.txt): SUN_CITY == 0x7E -> return,
+  else j 0x800493cc. So at night the disc (D2 SKYMOON, CHI_NIGHT_MOON=1) is drawn without the sun glare. PS1-native.
+- **C55 follow-up (Infrastructure 16.10., user review of "look": moon too bright, night looked like day)**: Chicago night
+  runs with Driver 1's night flag 0x80096850 = 0 (LA's day Take a Ride + the darkened night LEV), so the sky-sun code
+  takes its day branch: disc (FUN_000473F0: 24 x 20 FT4 + a rotating additive ray halo of brightness = visibility count),
+  full-screen additive glare tile (FUN_000493CC) and an additive lens-flare chain (0x800470C8.., drawn while s1 != 0).
+  The scene itself is dark at the same poses (checked); the brightening came from those effects. Now for Chicago
+  (SUN_CITY 0x7E night / 0x7F day): stub 0x80011868 skips the glare tile and clears s1 (no flare chain); the disc block
+  0x800474A0..0x8004751C is rewritten in place (same 32 words, load-delay nops removed): a3 = 0 (halo adds nothing) and
+  the night moon quad is 30 x 26 (CHI_MOON_HW/_HH = 15/13; day sun and Driver 1 keep 24 x 20). CHI_SUN_SPRITE=0 = old
+  disc block. Shared list 454 -> 487. Check 16.10.: night heading sweep at the user's 184636 pose shows the bigger moon
+  with no halo/glare and a dark scene; day sun sprite only; Miami boots and drives.
+- Look levels work/var_look2_day.lev (CHI_ROADS=1 + CHI_POLISH_TEX_HEIGHT=1, C7) / var_look2_night.lev (CHI_D2_LEV=night
+  + CHI_NIGHT_MOON=1). Sanity 16.10. (build-test, devtest/c55, port 4465): Chicago day SUN_CITY 0x7F, night 0x7E, moon
+  disc with craters visible while turning at the spawn, no glare; Miami SUN_CITY 0 (= CITY), drives; all alive.
+
 ## tricatch.py (C45 corr4 artefact catcher, 14.10.)
 - `python devtools/tricatch.py PORT OUT LEVEL --start=D2X,D2Z --legs="1,0,35" [--runs N] [--thresh 0.018]`: drives Chicago by day
   (dt.launch copy), after each area switch screenshots for 3 s; a dark sky band (> thresh) saves hit_N.png + GP0 captures of 6 frames
@@ -451,17 +490,451 @@ page queue), enabled by `game.toml [recompiler] mod_function_entry_funcs =
   models to area spooling (Polish's area/page work) ~-40-80 KB; ROADSURF coarser merging ~-10-20 KB (height risk);
   real stack need (LA's 123 KB slack is likely mostly unused) to be measured. Sum ~70-125 KB: borderline.
 
+## S1/S2: CLUT strip + slot 15 short page (Infrastructure 20.10., exe, all cities; default on)
+- **VRAM facts (measured)**: slot 15 (x 960..1023, y 256..511) held the level-load CLUT allocator 0x80097550 (from (960, 256),
+  4 per row) and the area slot CLUT blocks (64 x 8, table 0x800BE1BC); rows 427..502 are Driver 1's fixed HUD sprite block
+  (uploaded as 960, 459, 64 x 53, so rows 503..511 are inside it too; (1008, 511) is a night CLUT), row 426 the loading CLUT
+  (0x8003336C), (320, 511) the loading screen's CLUT (0x800508B0). The loading screen draws 320 x 480 interlaced at x 0..319,
+  y 0..479 WHILE the level loads (v1 put area CLUTs at y 240..255 x 0..319: the first area's palettes were overwritten).
+  Free in play and during the load: y 240..255 x 320..511 (region A) and y 496..511 x 0..511 (region B).
+- **CLUT_STRIP (CHI_CLUT_STRIP, default 1)**: allocator starts at (320, 240); rows 240..242 stay the sky CLUTs' own cursor
+  (0x800974E0 copy, as rows 256..258 before) + map CLUT; then region A (12 per row), then region B (32 per row); one advance
+  routine ADV (cave 0x80010778) replaces the helper 0x800516AC and its inline copies (0x80051758, 0x80051C84). Area slots: one
+  512-wide row each at (0, 496 + slot) (table writes 0x800520A0; area loader 0x8003393C: rect 512 x 1, CLUT words x += 64
+  per 4 palettes, 0x800339E0). **Capacity**: region A 192 + region B 32 x first area slot. Chicago var_d2cars16 (first 6):
+  allocator ends at (352, 501) = 374 of 384; Polish's slot-15 level ends at (208, 497); Miami (first 9) ends (384, 499).
+  Overflow would overwrite the first area slot's CLUT row: a converter-side budget is needed (S2 CLUT dedupe is the real fix).
+- **SLOT15 (CHI_S1_SLOT15, default 1)**: a permanent page with TEXTUREINFO flags bit 0x80 (converter CHI_POLISH_S1_SLOT15) goes
+  through cave SC (0x800106D0, perm loop call 0x80051DF0): slot index 15 (outside the area loops' 0..14), rect (960, 256),
+  upload 64 x 170 (rows 256..425; 0x800517B4 reads the rect height), page/slot tables 0x800BE278 / 0x800BE507 / 0x800BE744;
+  running page rect, slot counter and overflow flag 0x8009757C unchanged. Driver 1 levels have no 0x80 page.
+- **Cave**: 0x800106D0..0x8001084F = sound debug strings ('Error: Can't allocate SFX buffer' .. 'Bank: %d, Sample: ...'),
+  unreferenced (no lui/addiu pair, no pointer word); seeds SC 0x800106D0, ADV 0x80010778.
+- **MIPS load delays matter in caves**: the recompiled code honours them for some loads: v2 had `lhu s0, 6(s4)` directly
+  before `sh s0, 0x16(sp)` -> Miami's first permanent page uploaded with a wrong height (sun glare gone, blue garbage in
+  the sky). Never use a loaded register in the next instruction (also needed on real hardware).
+- **Verified 20.10.** (devtest/infra, build-test): every texture CLUT (0x80087030, 4096 entries), the car CLUT table
+  0x800BE9FC, tpages, page texels, the 12 sky CLUTs and the HUD block identical to the original layout in Miami, SF, LA, NY
+  and Chicago; screenshots at the start pose differ only in moving smoke/traffic (Miami 319 px); Polish's
+  var_polish_s1_slot15_1_day.lev: page 9 in slot 15 at (960, 256), rows 0..169 = its LEV texels, 10 CLUTs correct, area rows
+  correct, HUD intact. Same CLUT upload sizes as before (no FPS / stall change expected).
+
+## S4 design: RAM back into the 2 MB (Infrastructure 20.10., R39 follow-up; design only, nothing built yet)
+- **Budget in play** (R38 captures, var_d2cars16 / d1_MIAMI, heap ptr 0x80097098, stack below 0x801F8B00..0x80200000):
+  Miami heap end 0x1B24F0 -> ~280 KB free under the stack; Chicago heap end 0x1EA2AC -> **58 KB free**. Chicago heap
+  (no cell objects): PVS buffers 4 x 32 KB, model spool 49 x 2 KB, cell ptrs 7 KB, cell data 68 KB, INMEMORY 341 KB
+  (MODELS 202, ROADSURF 60, 24: 21, 20: 19, 9: 11).
+- **What lives outside the 2 MB (Chicago)**: cell objects 196 KB (D1 formula: 4 barrel maxima 12160 + 360 straddlers x 16 B;
+  the 512 KB mod buffer is reservation slack), C30 carry 54-86 KB used (256 KB reserved), car polygon buffer 34 KB, specials
+  ~90 KB, rows / car tables / LTAB ~10 KB, model table 1223 entries x 4 = 5 KB (> 800: D1's table at 0x800A0E20 is now
+  the c42m six-model tables), D2 surface table 2.2 MB (C37, host; M8 phase 2 = per-region blocks). **Chicago deficit
+  without the surface table: ~420 KB needed vs 58 KB free = ~360 KB.** D1 cities: the original layout fits by design.
+- **Pool for the cell buffer gains ~nothing**: per-region placement (Crash-style, regions in any 2 x 2 window must not
+  overlap) vs D1's fixed barrel partitions, offline over all regions (scratch s4/pool_bound.py): Chicago objects barrel sum
+  190 KB / 2x2 lower bound 174 KB / greedy 218 KB; cell data 68 / 56 / 78; PVS 90 / 88 / 142 (Miami 174 / 144 / 144,
+  LA 152 / 128 / 168). D1's partitions are already within 10 % of the bound; the object indices in the cell data carry the
+  barrel base (d1cells objs_add), so a pool would also need index relocation at load. Not worth it.
+- **Real levers (Chicago)**: PVS buffers sized to the real maxima (converter writes 32768 each; actual 24 / 22 / 22 / 22 KB)
+  **-38 KB**; carry as "pin the outgoing area": only possible with a second model spool area (98 KB) or a model-level pool
+  in the spool buffer (shared corridor models stay, new area's models fill free 2 KB blocks; load path per model) -
+  memory-neutral vs the carry's 86 KB peak, saves reloading shared models; in-memory models to area spooling (Polish, S1
+  area work) -40..80 KB; car polygon buffer from fitted models -10..20 KB; specials block shared with the carry pool;
+  stack reserve to be measured (58 KB zero run under it).
+- **Plan proposed**: S4a (all cities, PS1-native, behind CHI_S4): cell objects back on the heap (original D1 code, no mod
+  buffer) when heap end + objects + stack reserve fit, else the mod buffer (Chicago until the diet lands); carry in a
+  heap-tail pool for D1 cities (Miami: ~106 KB slack after the objects). S4b (Chicago diet, converter): tight PVS, area
+  spooling of in-memory models (with Polish). S4c: model-level spool pool replacing the carry. Measure each: free RAM in
+  play (Miami + Chicago), STL1 stalls, FPS, area-switch screenshots (C30 / C68 classes).
+
+## S4a (Infrastructure 20.10.): Driver 1 cities fully in the 2 MB (exe + plugin + converter; opt-in CHI_S4)
+- **Model table in main RAM (all cities, always)**: NEW_BASE 0x80115600 (2048 entries, 8 KB); the level heap starts 8 KB higher
+  (0x800228DC: 0x80115600 -> 0x80117600); cave ZT (0x80010814, called instead of 0x800505E0 at 0x800228F0) clears the table at
+  every level start (the frontend used that RAM). C68 stub and the late-use fix 0x8004B7B0 follow NEW_BASE. The plugin keeps
+  allocating an (unused) 8 KB block at 0x9F000000 so the other mod blocks keep their addresses (alloc_fixed order).
+- **Sea level / Chicago flag** are RAM words 0x80097888 / 0x8009788C (gp+0x1118 / +0x111C, no exe xrefs; were 0x9F082100/04).
+- **Cell objects (S4 flag 0x80097890 = gp+0x1120, plugin: env CHI_S4=1 or a file chi_s4.flag next to the exe)**: InitCellData
+  (0x800397CC: `move t8, ra; jal S4C; nop; move ra, t8`, it is a leaf) calls cave S4C (0x800107C8): flag set and the heap end
+  after objects + cell data below 0x801F8000 -> objects on the heap (Driver 1's own layout); else the mod buffer 0x9F002000.
+- **Converter CHI_S4=1**: SPOOLINFO PVS barrel buffers sized like Driver 1 sizes its own levels (LoadRegionData 0x800342D4
+  spools roadm to +0, roadh to +0x1000, then the PVS to +0: need = max(roadm, 0x1000 + roadh, pvs) per barrel; reproduces
+  Miami / LA / NY / SF exactly). Chicago 4 x 32 KB -> 24/22/22/22 KB (-38 KB). Level work/var_s4a_1_day.lev (cars1 recipe).
+- **Measured (build-test, start pose + 18 s drive)** - free RAM between heap end and the stack (deepest stack write in NY
+  0x801FAC04 = 21 KB, painted-stack test): S4 on: Miami heap end 0x1E5750 (objects on the heap, 77 KB free), SF 0x1E48F4 (80),
+  LA 0x1E6AA0 (72), NY 0x1F704C (objects on the heap, **14 KB gap to the deepest stack**; Driver 1's own NY had 22 KB: the
+  model table's 8 KB); S4 off: Miami 0x1B44F0 (151 KB, objects in mod memory). Chicago: off 0x1EC2AC (50 KB, the 8 KB shift),
+  S4a level 0x1E2AAC (88 KB); its cell objects (196 KB) stay in mod memory. FPS / STL1 stalls unchanged (same counts).
+- **Still host-only for Chicago**: cell objects 196 KB, C30 carry <= 86 KB, car polygon buffer 34 KB, specials ~90 KB, civ rows /
+  car tables ~10 KB, D2 surface table 2.2 MB; frontend menu block 0x9F082110 (all cities, Chicago-slot menu); dev FPS1/STL1.
+- **Lesson**: hand-encoded MIPS words are a trap (0x0300C021 is `addu t8, t8, zero`, not `move t8, ra`); always asm().
+- **Probe 'optimisation 1' hang (21.10.)**: AdEL at 0x8002CF60 on every map = a model-table use the linear site scan missed:
+  0x8002CED4 `beqz v0, 0x8002CF48` has the (patched) `lui t7, 0xA` in its delay slot and the far-object block 0x8002CF48 adds
+  0xE20 itself (C36 class). Fixed in MODEL_TABLE_LATE (0x8002CF4C). Since the 0x9F000000 table move it had read entry + 904
+  for those far objects (wrong / no far models); a branch-following scan (scratch mtscan.py) finds no further site.
+
+## S3 design: compressed area pages + pre-seek (Infrastructure 21.10.; PARKED, user Q39 = A)
+- **Parked** because: with S1's dense per-area pages Driver 1's codec gives only 0.82 of raw (-18 %, -7 % with per-area
+  padding); no cave space (Ghidra function dump: no dead code, only scattered unreferenced strings); stalls are not
+  load-bound (routes6: opt1 = opt2a, ~0.55 s per switch, 4 stalls). Pre-seek only if pauses become noticeable.
+- **Today's area page path** (0x80033B10 queue + 0x80033870 callback): per page one request of 17 blocks (0x11, sector =
+  area gfx + 17 * k, 0x80033C70 / 0x80033CAC) into the staging window spool buffer + 0xA000 (blocks 20..36); the callback
+  uploads the CLUT block (first 2 KB: npal, 63 CLUTs) and then the 32 KB of raw texels in four 8 KB chunks (64 x 64 VRAM px,
+  double-buffered halves, chunk counter 0x80097244), so the upload overlaps the CD read.
+- **Compressed pages** with Driver 1's own codec (the permanent-page format: npal, CLUTs, texels RLE-packed backwards,
+  decoder 0x80035B5C): Chicago area pages 0.68 of raw (texels), i.e. 17 -> ~12 blocks per page; a switch reads 7 pages:
+  ~-35 blocks (-70 KB, ~0.23 s at 2x) per switch; opt2a's average switch (textures ~238 KB + models ~112 KB) -> ~-20 %.
+  Models stay raw (the codec is texel-specific; a generic LZ decoder would be new code, WipEout-style LZSS 0.64 measured).
+- **Engine changes**: (a) per-page block counts and offsets (converter: a 16-byte size row per area next to AreaTPages, or the
+  page record's first word); the queue builder reads them instead of 0x11 / +0x11; (b) the callback for a compressed page
+  waits for the whole page (no chunk streaming), decodes in place (backwards RLE: compressed texels placed at the end of the
+  32 KB window, checked: the format reads forward and writes the page from its last byte backwards, so a pure in-place decode collides
+  at the end); either a window of 32 KB + compressed size (staging 49 blocks; Chicago's buffer has 49 / opt2a 88) or a strip
+  decoder (new, ~40 words) that writes 64-row strips into an 8 KB ring and uploads each finished strip bottom-up (staging
+  unchanged: header + compressed + 8 KB <= 17 blocks). CLUT path unchanged. Decode cost ~ a few
+  ms per page (to measure), once per page per switch. PS1-native: ~120-180 words of MIPS in a cave (the S1 cave is full; a
+  new cave needs an audit of unreferenced strings / dead debug code).
+- **Pre-seek** (Spyro): when the player enters a region whose area differs from the loaded one (the switch trigger 0x80033F9C
+  fires in border regions), D1 already queues the load; a pre-seek would issue CdlSeekL to the next area's first sector one
+  region earlier. Gain ~ one seek (~100-200 ms on hardware; depends on the runtime's CD timing model). Needs the area of
+  neighbouring regions (SPOOLINFO) and a free CD (no pending request).
+- **Order**: S3 needs Polish's opt2a layout (area pages per area) as input; (a)+(b) first, pre-seek after measuring STL1 stalls.
+
+## Chicago's menu picture (14.10., Design's CHICAGO preview)
+- The picture quad of the Chicago row is LA2's: GP0 packet in FRONTEND RAM (0x801D2D30..): screen (160,194)-(288,422),
+  texpage 0x0008 (VRAM x 512, y 0, 4-bit), u 0..127, v 0..227, CLUT 0x447C (VRAM 960,273). The row handler's word at
+  0x801CDFC0 (LA 0x00C80148, Miami 0x00B60147) is not the GPU texpage/CLUT itself (not decoded).
+- Plugin: preview_vblank (in the menu branch of chicago_slot_vblank) uploads rows 2..229 of the 232-row picture + its CLUT
+  over LA2 while the highlighted row is Chicago (GP0 0xA0, sampled VRAM compare via gpu_vram_peek so it uploads once),
+  and restores LA2 from a copy taken before the first upload on any other row. Verified: Chicago row shows Chicago;
+  "Driver 1 cities", Miami, SF, LA, NY show their own pictures. CHI_PREVIEW=0 keeps LA's picture.
+- VRAM in the menu (dump): framebuffers left, FRNT pages right; pages 13-14 at y 256 (x 832..959) are empty (room for
+  a real data-path page later).
+
+## Chicago sky/haze words (14.10., Design DAY_GRADE / SKY_SPRITES)
+- Night moon: the plugin writes 0x80096C24 (x, y, z halfwords; the sun/flare routine's day vector, also used at night) =
+  D2's moon_position (-32000,-11500,-18000) while Chicago night is loaded, D1's (-32000,-11000,-5000) otherwise.
+  Verified in game. Host-only (M8: per-city vector or night LEV).
+- Day haze: 0x80097138 / 0x80097150 are set by 0x800298BC per CITY (Chicago day: C3 0x7F -> default branch = Miami's
+  ef ef ef) and read by 0x800270D4 (called from the map draw 0x8002C8FC -> 0x8002D0F4) into scratchpad POLY_F4 colours.
+  Live pokes to red/blue in Chicago day changed nothing visible in a street view (test 14.10.): this word does not drive
+  the far fade seen there; the haze is likely the D2 sky band or a depth-cue colour elsewhere. Not implemented.
+
 ## Host-only parts (Milestone 8: real PS1 hardware; user 13.10.) — each with a possible PS1 path
 New engine features need a PS1-native path (guest MIPS in the exe, data within 2 MB RAM / 1 MB VRAM / CD).
 | host-only today | where | possible PS1 path |
 |---|---|---|
+| (S4 measure 20.10.) Chicago in play: 58 KB free under the stack; mod memory needs ~420 KB (cell objects 196, carry <= 86, car polygons 34, specials ~90, rest ~15) -> deficit ~360 KB without the D2 surface table | see "S4 design" | S4a: D1 cities fully in 2 MB; Chicago needs the data diet (tight PVS -38 KB, in-memory models to area spooling, model-level spool pool) |
 | mod memory 0x9F000000.. (Expansion 1: model table 2048 x 4, cell object buffer 512 KB, sea level / Chicago flag, menu block, FPS1/STL1) | exe_patches NEW_BASE, driver_chicago.c alloc_fixed | fit into main RAM: model table in a freed exe/heap area, cell buffer sized to the level (spool-limited), small blocks in a code cave; FPS1/STL1 are dev-only (drop) |
 | model slots past 800 (2048) | exe_patches model table (88 words) | converter keeps a level <= 800 models (dedupe / merge), or the table in main RAM (above) |
-| plugin logic (driver_chicago.c: Chicago slot / level table entry 3 swap, start move, menu pages + rows, Day/Night remap, CITY-opcode switch for the D1 extras, glow / day / sky / minimap code-word switches, sea level flag, ROADSURF plane selection, area-switch guard, C33 entry hook) | vblank / function-entry plugins | guest code in a code cave of the exe (or the FRONTEND overlay for menu work), driven by the same data (level table rows, per-city tables extended to a 9th city index instead of switching CITY 3 words) |
+| plugin logic (driver_chicago.c: Chicago slot / level table entry 3 swap, start move, menu pages + rows, Day/Night remap (Chicago + C63 LA day: entry swap, night flag, sky, song), CITY-opcode switch for the D1 extras, glow / day / sky / minimap code-word switches, sea level flag, ROADSURF plane selection, area-switch guard, C33 entry hook) | vblank / function-entry plugins | guest code in a code cave of the exe (or the FRONTEND overlay for menu work), driven by the same data (level table rows, per-city tables extended to a 9th city index instead of switching CITY 3 words) |
 | runtime changes (disc overlays past the image end, CD DMA into mod memory, save states with mod memory, write guard, watchdog fix) | runtime_patches/chicago-runtime.diff | DMA/overlays disappear with a real disc image; save states / guards are dev-only |
 | files relocated past the disc end (chicago.lev, chicago_night.lev, SKY.BIN with Chicago skies), directory-record patches, FRONTEND.BIN patches | build_package disc_user overlays + patches | build a new ISO / BIN: files in the file system (LEVELS/CHICAGO.LEV etc.), FRONTEND patched in place |
 | plugin-only measurement (FPS1 / STL1 blocks, dev mode, overlay) | driver_personal.c | dev-only, not needed on hardware |
+| Chicago menu picture (14.10.): plugin uploads design/previews CHICAGO (4-bit 128x232 + CLUT) over LA2's VRAM slot (512,0)/(960,273) via GP0 0xA0 while the Chicago row is highlighted, restores LA2 otherwise | driver_chicago.c preview_vblank, build_package CHI_PREVIEW | an 8th FRNT.B1 page (relocated file) + TPDATA/FECLUT entries + the Chicago row's own quad texpage/CLUT (FRONTEND overlay loader to decode) |
+| setup from the disc images (Option A: psxiso.py, inputs.py, setup_chicago.py; Python on the player's PC) | chicago/ | M8 disc builder reads the same two disc sets and writes a new image instead of overlays |
 | converter output limits checked only on the host (texture page budget, spool buffers, PVS barrels 32768) | convert.py / texrepack / polish_pvs | already PS1 limits (keep them): VRAM slots, spool buffer sizes, heap layout (C44) |
+| C88 Nightmare / C92 Uncap (25.10.): the 24-slot cop array (47 KB) in mod memory, chaser assignment at spawn (plugin hook FUN_8001B720), cheats menu pages, Uncap CPU overclock + frame-wait skip (runtime) | driver_chicago.c, driver_gameplay.c, psxrecomp runtime | slots in RAM under the stack (Miami 77 / SF 80 / LA 72 KB free fit 24); **New York: only ~8 slots fit (14 KB free)**, so the real-PS1 build caps NY Nightmare at ~8 chasers (no cap on PC); chaser assignment as guest code in the spawn; Uncap has no PS1 equivalent (off = PS1 reference) |
+| C94 Extra draw distance (25.10.): 27 x 27 PVS buffer + 4096-entry object list in mod memory, 2 x 0x50000 primitive buffers in the GPU-DMA aperture 0x00F00000, ~2x guest CPU per frame (needs Uncap) | driver_gameplay.c extra-draw, exe c94 words | none at 1.5x (RAM + CPU); the toggle off is the PS1 reference |
+| C96 / C101 (25.10.): Nightmare / Hell levels on the 2 x 0x50000 aperture primitive buffers; the _xd level pair + XTMP buffer for Extra draw distance | driver_gameplay.c dp_big_prim_buffers, driver_chicago.c | Nightmare: Driver 1 buffers + its own car budget (near cars low-poly beyond ~11 full models); xd: none (feature host-only) |
+
+- **C42 r3 (b) six resident car models** (exe c42m is guest code + fixed RAM): host-only are the car polygon buffer for car
+  set 4 (mod memory, 1400 entries = 34 KB; 6 Driver 2 models use ~900 entries = 22 KB, Driver 1's buffer 0x800AB728 holds
+  666), the civilian zone rows (3.6 KB) and the DentCar level table (1.5 KB) in mod memory, and the plugin's choices (spawn
+  list, PBUF/PCAP). The six-model tables sit in the old model-table area 0x800A0E20.. (free only because the model table
+  moved to 0x9F000000, itself host-only). PS1 path: a 22 KB main-RAM buffer (or smaller fitted models) + the rows in RAM.
+- **C37 phase 1 surface lookup** (driver_chicago.c d2sf_entry + assets/d2_surface.bin, 2.2 MB in host memory): Milestone 8 phase 2 = the same lookup as guest code in audited dead space (dead-code audit needed) + per-region surface blocks streamed with the region spool (~11-30 KB per Driver 1 region).
+## Option A: discs as inputs (Infrastructure 16.10., R25; Milestone 3)
+Every Driver 1 / Driver 2 input is read from the player's own disc images; nothing derived ships. One version each:
+D1 USA v1.1 (SLUS_008.42), D2 USA v1.1 disc 1 (SLUS_011.61) + disc 2 (SLUS_013.18).
+- **Reader** `chicago/psxiso.py` (stdlib; adopted from EXP's d2iso prototype): ISO9660 on MODE2/2352 BIN or CUE, Form 1 user
+  data at +24; `tree / get [--raw] / find`. The one reader for both games.
+- **Registry = the app's own disc list** (16.10. r2, user: the launcher must name all 3 discs, originals in
+  D:/recomps/games, no disc1.bin): `<app>/game.toml [game] discs = [D1, D2 disc 1, D2 disc 2]`, `disc_serials =
+  [SLUS-00842, SLUS-01161, SLUS-01318]`, `boot_discs = 1` (written by `python chicago/inputs.py register IMG.cue ...` into
+  the root game.toml + build-test + build-wip; never build-dev or the frozen release). An image is identified by its ISO
+  volume id (SLUS_00842 / SLUS_01161 / SLUS_01318) + boot exe md5 (D1 eee7d057..., D2 both 22ad9643...); wrong disc /
+  version / not MODE2 = clear message. Full-image md5 of the Redump dumps kept in `inputs.PROFILES` (info only).
+  D1 fallback: disc.cfg.
+- **Runtime patch (main.cpp, `runtime_patches/chicago-runtime.diff` last section)**: `[game] boot_discs = N` (read straight
+  from game.toml; 0/absent = upstream) -> only the first N roster discs boot. The launcher's Disc Selection lists all three
+  with labels "<image> - game disc" / "<image> - setup input (Driver 2 city data): OK | MISSING | WRONG DISC (needs
+  SLUS-01161, found ...) | NOT A PS1 DISC IMAGE"; the same lines + a fix hint go to the log at startup ("Disc Selection N",
+  "input disc N"). A launch / persisted selection of an input disc boots disc 1 ("disc N ... is a setup input ...; booting
+  disc 1"), clamped right after the settings read (before the mod/package target check) and after the launcher. Save
+  states keep their unscoped names (scope only when more than one disc boots). Verified 16.10. (build-test copy, port 4461):
+  labels OK, Chicago day + Miami drive, missing/wrong input discs reported, selected=2/3 boots disc 1.
+- **Automatic build at game start (r3, 16.10., user: "load content from the Driver 2 discs like from the Driver 1 disc")**:
+  `game.toml [game] prelaunch = "python driver_personal/chicago/setup_chicago.py --auto"` (root, build-test, build-wip,
+  build-dev). The runtime (main.cpp run_prelaunch, right before the mod commit, never headless or with PSX_NO_PRELAUNCH=1)
+  runs `<prelaunch> --build-dir <exe dir> --check` hidden: 0 = the build's package stamp (`setup_stamp.txt`: level keys of
+  all chicago/*.py + recipe CHI_ROADS=1 + CHI_POLISH_MUSIC=1 + slot/pages, input md5s, D1 image, patched exe, preview) is
+  current -> boot at once (~1 s); 10 = due -> `<prelaunch> --build-dir <exe dir>` in its own console window "Building
+  Chicago from your Driver 2 discs" (streams the converter, ~9 min after a code change, seconds when only the package is
+  due), installs atomically (pkg.new -> pkg), log setup_cache/logs/auto.log, then the boot continues. Driver 2 disc 1
+  missing/wrong: a package without the Chicago row (engine extensions only; D1 cities work, an enabled chicago-slot
+  feature that no package declares is ignored), console message + launcher label MISSING. Any failure: message box,
+  boot continues. dt.prepare and publish_playable (fixpaths) strip `prelaunch` (test/laptop copies keep their own or
+  the PC-built package). Verified 16.10. (build-test copy): run 1 built (511 s) then booted, run 2 booted in 4 s with
+  Chicago (song 8); no-D2 check -> package without chicago-slot. dt.py defaults to build-test (spotplay keeps build-dev).
+  Player tool form (Python on the player's PC vs a built tool) still open.
+- **R27 3-disc probes (16.10.)**: probes.json `"discs": 3` (default for every entry except the six of 16.10. in
+  publish_playable.LEGACY_ONE_DISC, which keep the 1-disc copy; `"discs": 1` forces the old form). A 3-disc probe: both
+  Driver 2 images (.bin + .cue, original names) copied once into `<probe root>/_disc` (size/time; a fresh copy is
+  md5-checked against the Redump dump), the copy's game.toml keeps the roster (3 discs, disc_serials, boot_discs = 1) +
+  `require_discs = 3`, prelaunch stripped (Chicago still built on this PC and shipped), PROBE3 fixpaths.ps1 rewrites the
+  3 disc paths to `_disc`. Runtime: `[game] require_discs = N` (opt-in, default off) -> message box "Discs required ...
+  Disc 3 (<image>): MISSING | WRONG DISC ..." and exit 1 unless the first N roster discs are present and correct.
+  Test overrides: CHI_PROBES_FILE, CHI_PROBE_ROOT (publish_playable). Verified offline 16.10. (dummy probe in devtest,
+  build-test exe): Chicago (song 8) + Miami with 3 discs; D2 disc 2 removed -> refused with that message.
+- **C45 quay round 4 (Infrastructure 16.10.), exe group NEAR_SUB (exe_patches.py, shared list 384 -> 501)**: Driver 2's
+  near-only subdivision for D2 cities (gate gp+0x1124 = 0x80097894, bits 1 world / 2 tiles, plugin 3 in Chicago;
+  CHI_NEAR_SUB_BITS tests) + piece drop (gp+0x113C = 0x800978AC, plugin 96; CHI_NEAR_PIECE). Textured-quad handler
+  table entry -> cave WQ (diagonal >= 64 px pre-filter, then GTE depth of the 4 vertices, any SZ < 600 -> 4x4 handler
+  0x80030F60, else an inline copy of the plain handler); tile near band entry depth < 2300 -> cave (near if depth <
+  radius + 100); 0x80030C20 drops pieces with avg sz / 2 < 0x20 + NEAR_PIECE. Cave in the libgpu debug strings
+  0x80011924..0x80011AD7, seeded (seeds/ghidra_funcs.txt, KSEG0 lines: the old 0x000xxxxx seeds were never loaded).
+  - Findings: Polish's loop counter counts legit big near polygons too (player car at OT 7, near walls) and the scripted
+    drive is not deterministic (runs differ by 25000 units), so "0/48" is not measurable with it. Glitch sources
+    identified: GATE 1204 quads, SHOREWALL 1215 (its object gets near level 0 at the camera, so D1's per-object near
+    level cannot gate this), water tile 683 (mid band while its edge reaches the camera). The start-pose wedge
+    (SHOREWALL) is gone; residual dark beams still show in some loop frames (source not pinned yet).
+  - FPS fps_drop_2 (b16b, 2 runs each): off 0.4900 / 0.4925, on 0.4828 / 0.4839 (-1.3 %; world -0.4, tiles -0.8).
+  - Test harness: scratchpad it.py (pt.py clone, port 4463, --exepatch for interpreted test words), hook_loop4.py,
+    hook_pick.py (polygons under screen points, triangle test as the GPU draws), hook_fps.py.
+- **C45 round 5 (Infrastructure 16.10.): the dark beams were stale screen points, a converter bug.**
+  - Deterministic camera test (scratch c45cam.py + camcount.py): plugin test hook CHI_TEST_POSE=<file> (driver_chicago.c
+    test_pose_vblank, env-gated, host-only) holds the player car at "x y z angle" every vblank, so the chase camera settles
+    on the same view; 5 anchors from the user's quay snapshots (003234/003300/140923/140902/003320) x 8 headings x
+    near/far (700 back) = 80 frames, GPU frame decoded. Glitch = textured quad whose two triangles have opposite winding
+    (twist, both >= 60 px^2) or a vertex at the GTE clamp with >= 400 px^2 on screen. Camera position RAM 0x8009D768.
+  - Cause: Driver 1's world renderer transforms only the first tri_verts (model header byte +6) vertices into the
+    screen cache when an object is near (depth - radius < 9000) and shape flag 0x8000 is clear; 0x20/0x40 polygons
+    recompute their vertices, but plain ones (flags & 0x60 == 0) read the cache, so a vertex >= tri_verts takes the
+    previous object's screen point -> twisted quads = the dark diagonal beams/wedges (SHOREWALL 1215 had 0; traced:
+    written by the plain handler with all 4 SZ 3000..9600, i.e. not near-plane at all). Chicago's models all carried 0.
+  - Fix (converter, default on, CHI_TRI_VERTS=0 = old): d1models.near_vertex_count sets byte +6 = highest vertex
+    index of a plain polygon + 1 (instances take their source's; FARWATER/SHOREWALL too; tiles/sprites untouched).
+    Camera test, original engine: 43/80 frames -> 7/80 (twists 0; the rest are thin ground strips with a clamped
+    vertex below the car). NEAR_SUB (round 4) did not touch the beams (the quads were far); it stays opt-in.
+  - Level work/var_c45_tv2_day/_night.lev (look2 recipe + the fix). Checks 16.10.: FPS fps_drop_2 0.4949 / 0.4950 vs
+    look2 0.4947 / 0.4947 (unchanged); l_down_e drive + turn sweep clean; Miami boots and drives (converter-only change).
+    Remaining "clamped vertex" polygons in the camera set: thin ground strips (tpage 28) under/beside the car with a
+    vertex behind the camera (Driver 1 has no near clipping; same road texture, not visible in the shots; most are
+    larger than the GPU's 1023 x 511 limit and dropped) and traffic cars pushed into the held car (car pages). No twisted
+    quads (the beams) in any frame.
+- **C61 (16.10.)**: Undercover opened the city list = the dev feature "Start at City Select" (driver.personal
+  quick-city-select, enabled in build-dev's and even build-release's state): its stub jumped to Take a Ride while the
+  game mode 0x800967F4 was 0, which it is again after backing out. Now one-shot per boot (flag 0x80097890) in
+  build-test / build-wip's driver.personal manifest; mods/preloaded untouched (agents must not write it).
+- **C62 (16.10.)**: LA minimap all red = minimap_vblank copied "LA's entry" from RAM on the first vblank, which during
+  boot ran before the exe was loaded (garbage saved, written back forever). LA's exe values are now constants.
+- **C64 / C65 (16.10.)**: Interview runs its own mission 0xAE (via_la_for: original setup, flag 0x80096854 = 1,
+  traffic, song 1 = New York night); the selector's "Training" row is "Desert" (CITY 6 via LA's Take a Ride) with
+  Miami's night song 4 (MUSIC_XOR for mission 0x7C only).
+- **Exe from the image**: `d1_SLUS_008.42` (inputs.py, md5 eee7d057...) replaces disc/SLUS_008.42.orig as build_package's
+  patch base (work mode still uses .orig). `python setup_chicago.py --check-exe`: exe_patches --apply on it == disc/
+  SLUS_008.42 (aad320a4..., 16.10.), so the patched recompiler input is reproducible from the player's image.
+- **Resolver** `chicago/inputs.py`: `inputs.path(name)` / `read(name)` with the old work/ names (d1_LA/MIAMI/FRISCO/NEWYORK/
+  IVIEW/FLAT.lev, d1_SKY.BIN, d1_MUSIC.BIN, d2_CHICAGO.LEV / _night.lev / .DEN / .LCF, d2_SKY0.RAW, d2_MUSIC.BIN,
+  d2_CITY.RAW): extracted once into `<app>/setup_cache/inputs/<d1_usa_v11|d2_usa_v11>/`, each checked against its md5
+  (size + md5 table in `inputs.INPUTS`). Mode `CHI_INPUTS`: auto (default: discs when registered, else chicago/work),
+  disc, work (the old hand copies; untouched). `CHI_D2_LEV` = day (default) / night / a path; the old spelling
+  `work/d2_CHICAGO_night.lev` goes through the resolver too. Converter caches (*.pkl) go to `setup_cache/convert` in disc
+  mode (`inputs.cache_dir()`; work mode keeps chicago/work as before). Day/night is decided by `inputs.is_input`, not by
+  the path string. `CHI_D2_SKY`, `CHI_MUSIC_BIN`, `CHI_COSMETICS_*` = file overrides for experiments.
+- Callers switched: convert.py (D2 LEV, LA base, car-set levels, DEN, caches), texrepack.py (Miami sea, night darkening
+  day LEV, __main__), build_package.py (DISC_BIN = registered D1 image, D1 SKY.BIN, minimap D2 overlay + LA lump,
+  car-set refs, **music built at package time** = polish_music.chicago_music(D1 MUSIC.BIN, D2 MUSIC.BIN) under
+  CHI_POLISH_MUSIC=1, cosmetics generated from the D2 LCF when car set 4 has no override), polish_sky (SKY0.RAW),
+  polish_map/polish_cosmetics/texbudget mains, polish_areas/polish_pvs caches. polish_slopes/cars/carmix take
+  convert's D2 data already. The D1 exe (`disc/SLUS_008.42.orig`) is the app's own extraction from the D1 disc.
+- **One command** `python chicago/setup_chicago.py --build NAME | --pkg DIR [--force] [--levels-only]`: discs only
+  (`--inputs work` for comparisons) -> convert day + night (RECIPE `CHI_ROADS=1`; other CHI_* from the environment)
+  -> build_package --slot (CHI_SLOT, CHI_MENU_PAGES=1) -> md5 list. Levels cached as `setup_cache/out/chicago_<tod>_<key>.lev`,
+  key = md5(chicago/*.py + CHI_* level switches + input md5s): a rerun with nothing changed takes seconds; older
+  outputs of the same time of day are pruned. Refuses build-release; build-dev only with `--dev` (user's go).
+  dt.prepare / probes.py / publish_playable.py build their packages with build_package, so they read the discs too.
+- **Check 16.10.**: (1) today's code from work/ (CHI_ROADS=1) == var_roads_b16b day/night (md5 16dcfd49.../408653b5...);
+  (2) setup_chicago from the discs only (fresh setup_cache, caches recomputed): chicago.lev, chicago_night.lev identical,
+  sky.bin 5023e0f8... == probe "city selector" (old code), music.bin a2ac6216... == the hand-made
+  var_polish_music_chicago.BIN, chicago_slot.bin and manifest identical (only the music bit / music entries differ when
+  CHI_POLISH_MUSIC=1); (3) audit hook: the converter opened 0 files under chicago/work, build_package only the level given
+  on its command line. Sanity (build-test, port 4461, l_down_e, Chicago day via the city menu): CITY 3, sky 13, song 8,
+  drove 28k units, alive, no fatal.
+- **Ship audit** (what must never be published; driver_personal/.gitignore): disc images, chicago/work, *.lev/*.bin/
+  *.orig/*.wav (before) + *.raw/*.tim/*.4bit/*.clut/*.cue, design/out/, design/previews/out/, setup_cache/ (added
+  16.10.). Packages (mods/preloaded, build-*/mods/packages/driver.chicago, probe and playable copies) are built
+  locally from the discs and stay local. Open: (a) `chicago_preview.bin` (class c) is Design's picture made from D2's
+  sky panorama + a **game screenshot** (design_src/chicago_street.png): no disc recipe possible as is; the package
+  takes it only when design/previews/out/CHICAGO.* exists locally (CHI_PREVIEW=0 = LA's picture). (b) findings/*.png
+  and design/*.png are game screenshots/renders; 9 findings PNGs are tracked in git.
+- **Disc copies (16.10. r2)**: app root game.toml/disc.cfg, build-test (game.toml, settings) and the build-dev config
+  (single disc = the original D1 .cue/.bin; its 10-12 exe lacks boot_discs, so its 3-disc roster waits for a build-dev
+  rebuild) all use the D:/recomps/games originals. publish_playable/probes copy the ORIGINAL D1 image under its own name
+  into `disc/` / `_disc/` (+ the patched SLUS_008.42 + SYSTEM.CNF); fixpaths.ps1 rewrites the copy's game.toml to one disc
+  (the D2 discs stay on the PC; the package is prebuilt). Still on <app>/disc/disc1.*: the frozen release build (disc.cfg,
+  settings, game.toml), build-ovl, catalog_identity.json + [prepare_disc] (the setup wizard's own copy names),
+  devtest/_root_np (hard link of disc1.bin). Old work/*.pkl caches deleted (414 MB); regionsweep reads road_levels from
+  inputs.cache_dir().
+
+- **C69 auto-build bound to the exe (Infrastructure 16.10.)**: the pre-launch build hashed the shared code, so a build
+  whose exe was older (build-dev, 15:27 run, unfinished, package untouched) would have got a package built for newer
+  engine patches. Now `<build>/chicago_exe.json` (written by `setup_chicago.py --mark BUILD`, build-dev only with --dev)
+  binds the build's exe md5 to code_key() (converter + package scripts + disc/SLUS_008.42); auto() skips and logs
+  ("skipped, package left as is") when the marker is missing, the exe is not the marked one or the code moved on;
+  the package stamp also carries the exe md5. Mark a build right after installing a freshly generated exe (build-test
+  after each regenerate; build-dev as part of a ship). build-dev has no marker yet: it keeps its 13:12 package.
+
+- **C68 hang in probe "look" (Infrastructure 16.10., root cause EXP research_hang_look.md)**: FUN_0005F0EC (ambient
+  objects on non-road cells listed by FUN_000143CC; runs while DAT_000976C8 != 0) ignores FUN_000217C8's result, which
+  writes the cell model index only for a non-zero road-map cell word. Chicago has zero cell words inside its own
+  960 x 1260 grid (map header DAT_0009E714/18, not an LA constant); the stale stack value indexed the model table out of
+  range -> lhu AdEL at 0x8005F350 -> BIOS exception loop. Exe group C68 (list 438 -> 454, default on, CHI_C68=0 off):
+  the call goes through stub 0x800118B4 (unused libgpu "$Id: sys.c" text, seeded) that clears local_30[0] first and
+  falls back to model 0 for a null table entry. The index is the road map's 10-bit id (converter keeps road-map ids
+  < 900), so no 11th bit is needed. Snapshots (driver_personal.c write_regs_json) now add badvaddr and the
+  interrupted guest context from the BIOS TCB (0x108 -> PCB -> TCB: +8 r0..r31, +0x88 EPC, +0x94 SR, +0x98 cause) plus
+  64 words at the guest sp; validated on the 184920 hang dump (EPC 0x8005F350, cause 0x10, sp 0x1F800330, ra 0x8005F328).
+  Sanity 16.10.: Chicago day boots, idles and drives at the hang position; the spawner was not active there (flag 0).
+
+- **C67 affine facade seams (Infrastructure 16.10.)**: exe group C67 (shared list 487 -> 554, CHI_C67=0 off): the light
+  quad handler entry (table 0x9C, set at 0x8002D564/68; 0x80030718 = fixed 2 x 2 split for every 0x40/0x60 quad and 0x20
+  quads at near level 0x10) -> cave LQ 0x80011924 (libgpu debug strings, seeded; shares NEAR_SUB's cave, the two are
+  exclusive). In a Driver 2 city (D2_PLANES != 0) LQ projects the 4 corners (RTPT + RTPS), writes their screen points
+  into the cache (v1 + 0x1F0, so the plain handler is right even for vertices >= tri_verts) and applies Driver 2's rule
+  (REDRIVER2 draw.c): diff * 4 <= minZ - 350 -> plain 0x8003056C; minZ - C67_FINE < diff * 2 -> 4 x 4 0x80030F60; else
+  the original 2 x 2. Driver 1 cities: straight to 0x80030718.
+  - FPS fps_drop_2 (2 runs each, tv2 level): base 0.4927 / 0.4948; D2's FINE 150: 0.4918 / 0.4922 (4 x 4 too often);
+    no 4 x 4 at all: 0.4967 / 0.4963; **FINE 0 (default): 0.4938 / 0.4946** = baseline. CHI_TRI_VERTS=all (count every
+    polygon's vertices) cost 0.4 % and is not needed (the cave writes the cache): default stays "plain".
+  - Camera set (80 quay poses): world twists still 0; the few flagged polygons are traffic cars pushed into the held car
+    (different frames every run). l_down_e drive + turn: no holes.
+
+- **C70 quay wall faces at/under the car (Infrastructure 16.10., user snapshot 202133)**: not near-plane strips but draw
+  order. The faces were the land-side parts of quay walls that hang from street level to the water (999/1000 at the pose,
+  traced via the packet writer's a1 -> model table; plus SHOREWALL 1215): Driver 1 sorts every polygon of a 'sorted'
+  model by its own average depth, and a wall piece 2400 units away sorted nearer than the big road-tile pieces in front
+  of it, so it was drawn over the road. (Tests that did not help: hiding via num_polys - the renderer walks the group
+  table; flipping the group plane; an NCLIP back-face cull in LQ - it also culled real railings, kept as opt-in
+  CHI_C70_CULL.) Fix, converter, default on (CHI_LOW_WALLS=0 = old): low walls (every placement: top at most 400 above
+  the street, bottom at least 850 below; 60 models) get their polygons that lie wholly 50+ below the street into groups
+  ahead of the 'sorted' group (d1models.BELOW_Y / plan_groups), so those are drawn at the object's depth, behind the
+  road; parapets and railings above the street stay sorted. SHOREWALL's single group is unsorted entirely.
+  Checks: user pose clean (faces gone, railing intact), 96-frame camera set clean (left: thin road strips with a clamped
+  vertex, traffic cars), FPS fps_drop_2 0.4912 / 0.4916 vs 0.4910 / 0.4916. Levels work/var_c70_lw2_day/_night.lev.
+
+- **C55 correction / C7 / C67 round 2 (Infrastructure 16.10., user review of "look 2")**:
+  - C55: by DAY a Driver 2 city keeps Driver 1's sun glare tile, lens flare and ray halo again (SUN_CITY 0x7F takes the
+    original path); only at NIGHT (0x7E) the stub skips glare + flare and the disc block zeroes the halo; moon quad 36 x 30
+    (CHI_MOON_HW/_HH 18/15). Stub is 8 words again (0x80011868..87).
+  - C7 adopted: polish_tex CHI_POLISH_TEX_HEIGHT default 1, CHI_POLISH_TEX_HIGH default 1536.
+  - C67 r2: the user's remaining cuts (snapshots look 2 212541..) were on 0x60 facade quads ~110 x 75 px that LQ drew
+    plain (small depth spread). LQ now splits a quad whose v1-v3 screen diagonal |dx| + |dy| >= C67_PX (96, GTE SXY0/SXY2
+    after the RTPS) even with a small spread (2 x 2, or 4 x 4 by the FINE rule). Cave 105 words, into the GPU-timeout
+    text (0x80011A98..AC8; sprintf's digit tables from 0x80011AD8 stay). FPS fps_drop_2 0.4888 / 0.4924 / 0.4884 / 0.4934
+    vs 0.4912 / 0.4916 / 0.4910 / 0.4916 (-0.1 %, within the run-to-run spread). Flags-0 quads (1368 of 5070 textured
+    quads) still take the plain handler unchanged.
+
+- **C70 round 2 (Infrastructure 16.10., user snapshots "look 3 + quay" 222454..222539)**: the tall dark slab beside the
+  balustrade was a SHOREWALL hanging from a raised level (instance at y -1594: the 2000-high wall then stands above the
+  street); 120+ such instances city-wide. Polish's CHI_POLISH_SHOREFIX (bank level of the land neighbours instead, else no
+  wall) is now the default (CHI_POLISH_SHOREFIX=0 = old). The large dark rectangle over the river is no geometry: only the
+  sky dome (OT 0, tp 8) is drawn there, its dark lower band shows where the far bank is not drawn (visibility / C56 sky
+  band, not C70). Camera set now 128 poses (+ 222505, 222526 anchors): no wall faces, railings intact; FPS fps_drop_2
+  0.4918 avg of 4 vs 0.4924 (noise). Levels work/var_combo2_day/_night.lev. devtest/_c45root deleted.
+
+- **C37 Option B design (Infrastructure 16.10., user's choice): Driver 2's own surface lookup in the engine, D2 cities.**
+  - Why: Driver 1's road map has one surface per 1500 cell; the converter approximates D2's per-1024-cell BSP of planes
+    with shared, quantised plane lists (cap ~900 ids), and stacked levels get full-cell planes swapped by a host-side
+    selector -> floating / clipping beside ramps (slope_float etc.), coarse diagonal banks. slope_ref is right only where
+    a single level fits the approximation.
+  - Data: per Driver 2 cell (1024 D2 units) the original record: cell entry (one BSP root, or a level list
+    [threshold, root] for stacked cells), BSP nodes (angle 11 / dist 12 / offset 8 bits), planes (surf, a, b, c, d).
+    The converter re-packs the D2 records that overlap each Driver 1 region (30 x 30 cells of 1500 = 45000 units,
+    about 44 x 44 D2 cells) into a new block appended to that region's spool data (after roadm/roadh), with a 44 x 44
+    cell index (2 bytes each) + node / plane arrays local to the block. Size estimate from D2's own blocks (16 KB median,
+    31 KB max per 65536-unit D2 region): about 7 KB median, 15 KB max per Driver 1 region; 4 resident regions =
+    30-60 KB RAM (the road map tables already resident are 4 x 14.4 KB). Measured exactly before building.
+  - Streaming: the block rides with Driver 1's existing region spool (same CD read, same ring slot of 4), so no new
+    loader; a per-slot pointer (scratch words) is set where the road-map table pointer is set (0x8009D8F4 ring).
+  - Lookup (guest code, PS1-native): D1 (x, z) -> D2 (fixed-point scale + offset, worldscale), region slot, cell index,
+    BSP walk with the exe's own rcossin table (PsyQ rcos/rsin), plane -> height = -d - (a x + c z) / b (D2
+    sdHeightOnPlane; the C37 SLOPE_DIV division), y_D1 = -height x SCALE; normal = (a, b, c) for the car's tilt.
+    Stacked cells: D2's sdGetCell rule (the wheel stays on a level until it is below that level's switch height), so
+    the host-side selector (driver_chicago.c surface_select_vblank) is no longer needed in D2 cities.
+  - Hooks: MapHeight (0x8001F5B0) and FindSurfaceD2 (0x8001EEB4) branch to the cave when CITY is a Driver 2 city
+    (D2_PLANES word) and the cell has D2 data; else the original code (water cells, outside, Driver 1 cities).
+  - Fallback: no D2 block / cell entry -1 (sea) -> the Driver 1 road map as today (water model, drowning, map edge).
+  - Measured 17.10.: D2's region block = 8-byte header + a 64 x 64 cell table (8 KB) + planes / level lists / nodes
+    (1.8-23 KB). A Driver 1 region (30 x 3000 = 90000 D1 units = ~67 D2 cells across) re-packed: ~9 KB cell index
+    (2 B per D2 cell) + 2-23 KB planes/nodes -> ~11-30 KB per region, 44-120 KB for 4 resident regions (vs the road map
+    tables' 4 x 14.4 KB). Compacting the index (only cells with data, or 1 B per cell into a per-region list) roughly
+    halves it.
+  - Code space is the blocker for the native lookup: ~150-250 words of guest code (cell index, BSP walk with
+    rcos/rsin, plane height, normal, level choice by switch height, two hooks). All known caves are used (C45/C67 libgpu
+    strings, MDEC strings, C68 $Id text, DROWN_EDGE). A dead-code audit is needed (Ghidra: every function without
+    call / jump / pointer references; a first call-only scan lists 171 candidates, most of them reached by j / jalr).
+  - Phased plan: phase 1 = the lookup as a host function-entry hook (mod_function_entry_funcs on MapHeight /
+    FindSurfaceD2 + a 4-word early-return patch reading a mailbox), all D2 surface data loaded into mod memory from the
+    package (2.2 MB, host) -> correct D2 slopes for the user to judge in days; phase 2 = the same lookup as guest code
+    in audited dead space + the per-region blocks streamed with the region spool (PS1-native, M8).
+  - Code space: the BSP walk + plane evaluation is ~80-120 words; caves needed (to be found; the libgpu/MDEC string caves
+    are used). Test: slope_ref unchanged, slope_float / 223147 / 223234 / 223249 no float or clip, diag_ramp /
+    diag_embank / a river bank follow the ground, FPS fps_drop_2 unchanged.
+
+- **C70 round 3 (Infrastructure 17.10., user "quay 2": walls no longer broken but disappear, visible only from one
+  part)**: round 2 sent EVERY below-street polygon of the 60 low-wall models to object depth, including the faces that
+  look at the river: from the water side / bridges those then lost the painter's order against the water tile pieces.
+  Now only the UNDERGROUND faces go there: a below-street wall polygon whose visible side (-normal) looks at land (no
+  sea_kinds water cell 400 units in front) at most placements (convert.low_wall_models -> d1models.BELOW_Y as a set of
+  polygon indices). 15 models keep such faces. Water-facing faces are depth-sorted again. Checks: 128-pose camera set +
+  user poses (202133, 222505): no faces over the road, railings intact; FPS 0.4947 / 0.4929 vs 0.4935 / 0.4929. The
+  user's exact quay-2 camera (off the chase position) could not be reproduced with the held-car camera.
+  Levels work/var_c70r3_day/_night.lev.
+- **build_package: frame-less minimap lumps (17.10.)**: levels converted before the C12 default (no stored map frame,
+  e.g. var_roads_b16b) were packaged with the new F=1 frame -> tile upload overran, garbage VRAM, void world (Design's
+  harness). Such lumps now fall back to the old F 1.5 frame (env overrides).
+
+- **C73 draw distance analysis (Infrastructure 17.10., offline + 1 capture at 222505)**:
+  - Reach: objects are drawn from cells within a per-cell view radius of 5..9 cells x 3000 = 15000..27000 D1 units
+    (= ~11400..20500 D2 units; D2: 16000-22000), chosen by the converter (pvs.radius_grid) so the polygons in range
+    fit the per-frame primitive buffer (0x1E000 B x 0.72 at ~20 B/polygon = ~5500 polygons); the exe's cell loop
+    (FUN_0002C8FC) is hard-wired to a 19 x 19 window (radius 9). Areas' model sets come from the same radii.
+  - At the bridge view (222505) only 12 polygons sit at OT 0: the sky dome (tpage 8, LA's sky models 0..3); 58 far
+    polygons are water / quay walls; no building across the river is drawn. The "dark rectangle" is the dome's lower
+    band showing through where no far geometry is, not towers drawn dark.
+    Correction (Polish 17.10.): that band showed the city-selector preview picture: the plugin re-uploaded
+    chicago_preview.bin over VRAM x 512, y 0..227 (left half of the sky page 8) every vblank in game, because the
+    menu mark stays in RAM and the Chicago row stays under the cursor. Fixed in driver_chicago.c preview_vblank
+    (uploads / restores only when the highlighted row changes); the 222505 view now shows the d2v3 skyline.
+  - No depth cue to tune: Driver 1 keeps the camera position in the GTE far-colour registers (RFC/GFC/BFC; read by
+    world_renderer 0x800307FC and cull_objects 0x8002C5F0), so a far colour / fog for Chicago day needs new code.
+  - Limits for more reach: the 19 x 19 window constant + cell pointer window (30^2 x 8 B), slot object buffers, the
+    primitive buffers (2 x 120 KB, fixed in D1 RAM) and the polygon cost. Options: (a) a far "skyline" set: a few
+    boxes per tall building (D2's own LOW_ set has only 10 small models), drawn beyond the radius in a cheap pass
+    (~2-6 polygons each, ~100-300 towers -> 0.5-2 K polygons, one extra model area ~30-60 KB); (b) radius by view
+    direction (open water / lake views get 10-12 where the cost allows; needs the window constant raised: RAM
+    +~7 KB per +2 cells, FPS cost only in those views); (c) cheapest: give the dome's lower band a Driver 2 skyline
+    texture (C46 sky) so the gap reads as distant city.
+
+- **C37 phase 1 done (Infrastructure 17.10.): Driver 2's own surface lookup as a host hook.**
+  - game.toml mod_function_entry_funcs += MapHeight 0x8001F5B0, FindSurfaceD2 0x8001EEB4 (regenerated); plugin
+    driver_chicago.c d2sf_entry: on every call in a Driver 2 city it looks the query point (a0: x, y down, z) up in
+    assets/d2_surface.bin (d2surf_asset.py; build_package CHI_D2_SURF=1, ~2.2 MB: D2's region blocks + curves) exactly
+    like sdGetCell (level list by the wheel's height, BSP with precomputed rcos/rsin, sdHeightOnPlane, y down) and writes
+    that plane (unit normal, d for the exact height at the point, in the cell's rotated (u, v) frame: bit30 swaps,
+    bit31 negates) with a full footprint into polygon 0 of the cell's ROADSURF surface; a cell without a surface borrows
+    a one-polygon scratch surface (mod memory) unless Driver 2 is flat within 40 of Driver 1's height (street). Driver 1
+    water cells (model flags2 0x4000) and Driver 2 sea keep Driver 1. Cached per surface (plane, rotation, height).
+    The vblank plane selector is off while it runs.
+  - Checks 17.10. (var_slopes2_day = slopes3 recipe + current defaults; car centre vs Driver 2's level x 1.32 + 164):
+    slope_ref mean 6 / max 47 (drive), slope_float 6 / 61, 223147 4 / 67, diag_embank 21 (flat offset), quay 3,
+    riverbridge 22 (0 / 1 max tilt 4-15 deg). FPS fps_drop_2 0.4939 / 0.4933 vs 0.4907 / 0.4911 (the first version cost
+    3-5 %: per-call guest writes; fixed by the cache, the street skip and direct RAM reads).
+  - Open for the user's judgment: at the foot of 45-55 deg banks (diag_ramp spawn, c28_bank_w) Driver 1's car physics
+    rolls the car over on the exact slope (the earlier approximated planes were gentler). shore_bank (C28 bank stored
+    under the water line, converted to water) keeps Driver 1's water by design.
+  - Switches: CHI_D2_SURF=1 (package), CHI_D2SF_MAXTILT (contact normal tilt cap, default 30), CHI_D2SF_DEBUG,
+    CHI_D2SF_STAGE (profiling), CHI_D2SF_GSIGN (test).
 
 ## Resolved (cause → fix)
 
@@ -782,6 +1255,525 @@ D. D2 car models (+ D1 EXE cosmetics). E. D2 music → D1 MUSIC.BIN. F. 5th city
     list is identical to b15 (359 entries, 672 halvings). Original vs halved: findings/c42_mix2_cartextures.png.
     var_polish_c42_mix2_day.lev (+ .dmg.bin). **mix3 = mix2 built with CHI_ROADS=1** (b-builds set it; mix1/mix2 lacked the road lumps, so no AI cars spawned): 22-23 live cars, D2 Chicago police car in traffic (findings/c42_mix3_d2_cop_traffic.png).
 
+## C42 engine step: Driver 2 cars (Infrastructure 17.10.; C57 / C58 / C59)
+- **Design (sub-steps):** S1 data (converter, CHI_POLISH_D2CARS=1), S2 damage (exe + plugin), S3 player collision box
+  (exe + plugin), S4 checks + level pair. Everything gated by car set 4 / main-RAM words that are 0 in Driver 1 cities.
+- **Driver 1 car facts (Ghidra + runtime):**
+  - Resident car models: 0 = the player's car (lump slot 5 + choice 0x8009683C), 1..3 = lump slots 0..2 (clean
+    0x800A1AB0[k], damage 0x800A1AD0[k], low 0x800A1AE0[k]; loader FUN_000527BC). AI record +0x10 = resident model,
+    +0x11 = palette 1..4 (the cop, resident 1, too); car struct +0 = car index, +2 = resident model. Cops (resident 1)
+    also cruise in traffic (Driver 1 behaviour).
+  - DentCar 0x8003E6A0 rows: AI row = resident model (1..3), player row = choice. The C42 civ blob had rows by slot
+    0..2, so every AI car dented with the wrong row and slot 2 read the polygon table ("no dents on Driver 2 cars").
+  - **Car buffers (C58 cause):** FUN_0003BDC8 builds the 4 resident models into ONE polygon buffer 0x800AB728 of 666
+    entries (cap 0x29A at DAT_000973B0; textured quad = 1 entry, flat quad = 2). Per car: damage UV offsets 150 B (AI,
+    0x800AF97A + car * 0x96; player 260 B at 0x800B08B8), 128 deformed vertices (0x800B09BC + car * 0x400). Driver 2
+    models are ~250 triangles / up to 131 vertices: with the player + cop the buffer was full at resident 2 (160 of
+    248) and resident 3 (lump slot 2) got 0 polygons = invisible traffic cars (wheels only); UV / vertex buffers
+    overflowed into the next car (texture noise).
+  - Car collision boxes are exe constants: car-car 0x80067C9C half 186 x 90 x 520 (162 x 468 when car+0x12E == 1),
+    scenery 0x8003FF0C 169 (138) x 520, broad phase 0x8001FAFC rotated 209 / 585 + 90.
+  - Main RAM 0x80097860..0x80097893 is NOT free (non-zero in 17 of 71 RAM dumps; 0x80097870 read 0x4545 in game).
+    0x800988C8..0x80098977 is NOT free either: the felony event tables (FUN_00063C60 init, FUN_000650E4 reads event k's
+    (counter, threshold) word at 0x800988C8 + 4k; zero in dumps because most thresholds are 0). C42E words therefore
+    live at 0x80093380..0x80093390 (a 3144-B zero block of the exe image 0x80093378..0x80093FC0: no xrefs, no pointer
+    formation into it, zero in all 71 dumps). Side find: the older words REGION_PENDING 0x800988E0 (C45, opt-in),
+    STABLE_END 0x800988E4 and MUSIC_XOR 0x800988EC are felony events 6, 7, 9 (low halves only, thresholds stay 0, so the
+    felony rules are unchanged; the level-init clear resets them until the plugin's next write).
+- **S1 data** (polish_cars.py, polish_cosmetics.py, convert.py, build_package.py; switch CHI_POLISH_D2CARS=1, opt-in):
+  - Slot map {0: 3, 1: 1, 2: 2, 5: 12, 6: 9, 7: 10, 8: 8} (player choice 0 = the default car = D2 12, the fire engine last). Driver 2's lump 25 has colour variants only for models 1
+    (page 65) and 2 (page 62); models 0, 3, 4 have one paint, model 3's = the police livery (REDRIVER2: cop =
+    residentCarModels[3], palette 0). So slot 0 = D2 3 (the cop) and civilians 1/2 = D2 1/2 (EXP's {1: 3, 2: 0} would
+    put the police body on civilians, C59). Cop palette entries 0..3 = the textures' own CLUTs (cop_palettes(); without
+    them Driver 1 drew the cop with stray CLUTs).
+  - C57: scale_model() x1.32 (CHI_POLISH_CARS_SCALE) on vertices + bounding sphere of clean, damage and low models.
+  - C58: fit_model() (CHI_POLISH_CARS_FIT=0 = off): triangle pairs sharing an edge with the same texture, UVs and normals
+    -> one quad in ring order (Driver 1's builder swaps v2/v3 into GPU Z order, so the quad draws exactly the two
+    original triangles; verified triangle-identical); flat pairs -> F4 split on the shared edge; > 128 vertices: the
+    shortest edges welded (D2 3: 2, D2 10: 3, D2 12: 1). Result: polys 132-152, AI <= 149, buffer 604 of 666 (taxi).
+    DEN rows remapped to the new vertex / polygon numbers (damage_tables(den, fit_maps)).
+  - Sidecars: <lev>.dmg.bin 5040 B (civ verts 900 + polys 1260 by resident 1..3, player verts 1200 + polys 1680 by
+    choice), <lev>.cos.bin 800 B (cosmetics rows 0-3 players, 5-7 residents 1-3, x1.32 with D1's own wheel x offset),
+    <lev>.box.bin (player colBox x1.32). build_package -> dmg_civ.bin, dmg_player.bin, cosmetics_*.bin, car_boxes.bin.
+  - CHI_POLISH_CARMIX_HALF=1 + COPFULL=1 work in this mode too (D2 civilian textures halved, cop full): 4 permanent
+    pages, downscaled list 661 = the baseline's (no city texture cost).
+- **S2/S3 engine** (exe_patches c42e_patches, shared list 713; C42_TABLES):
+  - C42_TABLES entry 4 one row lower (0x800A0CF4 / 0x800A1050): row 1 (cop) lands at the blob start.
+  - DentCar clamp / shift: player cap 3 ^ PDMG, shift 6 ^ (PDMG >> 1); PDMG (0x800988D0) = 2 for Driver 2 player cars
+    (AI rule: 1 stage, +128 = their damage twins), 0 = Driver 1 (+64 x 3). PDMG = 0x80093380.
+  - Player zone rows: the plugin allocates a "car tables" block (mod memory, after the FPS overlay's 0x9F082310) and
+    points entry 4 of the player tables (data words 0x8008A6CC / 0x8008A70C) at it: Driver 2 rows, or Driver 1's
+    copied from DTL for a car set 4 level with Driver 1 player cars.
+  - Player box: car-car (loop body rewritten without load-delay nops) PBX / PBZ (0x80093384 / 88) for car index 0;
+    scenery PBS low half (0x8009338C) + PBZ; broad phase margin 90 + PBS high half (the player's extra reach over
+    585 / 209; 0 for a car of Driver 1 size). Driver 2 civilians x1.32 are within 8 % of Driver 1's box: unchanged.
+    Plugin test switch CHI_C42E_BOX=0. A first version added PBZ to every car's broad margin: -9 % FPS (more narrow
+    tests in bunched traffic) -> high-half extra.
+- **Checks (devtest d2c, l_down_e, var_d2cars4 pair):** buffer 604/666, all 3 AI models drawn side by side / near /
+  4000 / 9000 (blue D2 2 civilian visible beside the player, before: wheels only); cars the size of the player's D2 car;
+  cops in D2 police livery, civilians in colour variants; crash: zones on both cars, dented; night OK. FPS standing
+  22.1 vs baseline (Miami cars) 22.4 (taxi), 21.6 with the fire engine (its broad margin).
+- **Open / limits:** the fire engine (now choice 3) fills the chase camera (camera distance is Driver 1's); specials' wheels drawn at D1's fixed radius 101 (fire engine D2 168); lights jump to their
+  +128 stage (variant B = per-polygon D2 levels not built); cPoints (D2 body contact points) not used.
+- **Host-only (M8):** the car tables block lives in mod memory and the plugin writes the rows / words; a PS1 version
+  keeps the rows in a level lump and sets the words from the car-set data at level load.
+
+## C72 river speckles at riverbridge (Infrastructure 17.10., analysis, not fixed)
+- Reproduced (var_c70r3_day, CHI_START riverbridge, heading 0): a thin sloping line of opaque, saturated multi-colour pixels
+  (165 px, x 320-503, y 139-144, 111 distinct 15-bit colours) along the far water edge where the quay meets the water;
+  present in both frame buffers (drawn every frame), only in that view (headings 1-3 clean).
+- GP0 frame (911 prims, no VRAM upload in the frame): every textured prim touching the band was rasterised with its own
+  CLUT (35 prims: water p640 c992,285, quay p832/256 c992,368 and c1008,372, balustrade p768/256 c992,363, sky p512):
+  none gives saturated colours; texels just outside their UV boxes are not saturated either. The only saturated CLUT is
+  the minimap's (c960,256, semi tiles on page 768), whose top tile row lies at y 142-145 but is clipped by the minimap
+  draw area (E3/E4 400,160-495,219), and the speckle line slopes with the perspective (the minimap rows do not).
+- Owners of the speckle pixels by draw order: long stretched quads of the bridge side (p832/256 c1008,372 uv v238-246,
+  vertices y 39..229, the C45 near-clip family) and the minimap rows.
+- 111 colours from 4-bit CLUT textures point at blending or a sampler edge case, not one wrong CLUT. Next step: the
+  same frame in DuckStation (psxrecomp/tools/gpu_parity.py) to tell emulator from game data, or stop the long
+  stretched quads (C45 round 3) and look again.
+
+## C66 garbled bottom strip = car polygons through the camera (Infrastructure 17.10.)
+- Found in the 16.10. 'holes' captures (devtest/_out/1016-164840-infra-holes s10/s11): a cop right behind the player,
+  inside the chase camera, drawn as huge garbled polygons over the bottom of the screen. Driver 1's car drawers
+  (triangles 0x8003DF94, quads 0x8003E244) have no near test: vertices behind the camera are saturated by RTPT.
+- Fix (exe_patches c66_patches, PS1-native, gated): the GTE FLAG of the RTPT is read before NCLIP (which clears it); bit 31
+  (SZ / divide / SX-SY saturation) & NEARCULL (0x80093390; plugin: 0x80000000 while Chicago is loaded, 0 elsewhere) rejects
+  the polygon like a back face. Triangles: cfc2 + NCLIP moved one slot, the mask loaded into a free load-delay slot;
+  quads: mask in fp (saved by the prologue), NCLIP / stores shifted one slot, the 4th vertex's RTPS in the branch delay.
+- Check: a traffic car moved into the camera (300-1300 behind the player): drawn clean, no strip; FPS standing 22.1 (=);
+  Miami: words 0, cars normal.
+
+## C45 corridor layout re-check + C30 model carry (Infrastructure 17.10.)
+- **corr4 with today's defaults** (CHI_ROADS=1 + CHI_POLISH_AREAS=2 + CHI_POLISH_CORRIDOR=2 = var_c45corr_day/_night vs the
+  same converter without them, var_c45base_day): 6 routes (scratchpad routes6.py: teleport by test pose, settle, 40 s
+  heading-holding drive with reverse-on-stuck; l_down_e N/S, park N, blueboxes S, c30 S, flicker2 E):
+  - area switches 12 -> 4, STL1 stalls 10 -> 6, mean FPS 24.7 = 24.7, load time per switch ~0.5 s in both;
+  - switch screenshots clean (no wrong textures / holes seen);
+  - cost now: 15 areas instead of 21, downscaled textures 661 -> 789; 89 textures lose resolution, 306 K texels, many of
+    them landmarks (Adler Planetarium, Art Institute, Chinatown, Field Museum, Merchandise Mart, Navy Pier, EL). With
+    the C7 height rule the baseline improved; corr4's bigger areas now cost more. -> not made the default: user decision.
+- **C30 buildings popping out during an area load:** the user's snapshot (probe_look 20261016-184018, area 12, LOADING):
+  708 model-table entries on the empty model and no streamed model left: the area-switch guard (C33) sends every streamed
+  model of the outgoing area to the empty model until the load completes (~0.5 s), so all area buildings vanish. Not the
+  page swap (old hypothesis). Fix (plugin, host-only): at the switch (entry hook 0x80033B10) the streamed models are
+  copied to a carry buffer (mod memory, 256 KB; absolute vertex / polygon / normal / collision pointers relocated) and the
+  entries point at the copies; when the load completes the loader's pointers replace the shared ones and the remaining
+  copies (outgoing area only) go to the empty model. Log: 115-168 models (54-86 KB) carried per switch, 37-84 replaced by
+  the loader. Primitive-buffer use during loads (A/B, same routes): without carry it fell to 30-45 % of the frame before
+  the switch (buildings gone), with carry it stays. CHI_C30_CARRY=0 = old behaviour. Carried models draw with the old
+  area's pages; with corr4 the corridor regions use pages both areas share. M8: needs a second model buffer in RAM.
+
+## R30 package (Infrastructure 17.10.): quick-city-select off, corr5 default, C37 joins, LA day sky, C30 residue
+- **quick-city-select OFF (user rule):** the driver.personal manifest already defaults it off; publish_playable.force_off()
+  now disables it in every published state (probe copies + the playable copy). build-dev's own state.toml still has it on:
+  switch it off with the next build-dev ship. dt.prepare / cellprobe states never enable it.
+- **corr5 = converter default** (user ✅): polish_areas CHI_POLISH_AREAS "2", CHI_POLISH_CORRIDOR "2", CHI_POLISH_AREAS_SHARE 0.8,
+  polish_tex CHI_POLISH_TEX_PROTECT "1" (each "0" = off).
+- **C37 round 2, joins:** traced at slope_ref (trench floor -> 7 deg ramp -> street, D2 plane 406 between 741 and the
+  street): the car's pitch overshot to -944 at the foot (ramp pitch ~-510) and nosed down to +555..+1324 after the crest.
+  Driver 2's FindSurfaceD2 / sdHeightOnPlane have no smoothing either (REDRIVER2 dr2roads.c); Driver 1's car reacts harder to
+  a crease. The hook now averages a cross of radius R around the query (central-difference gradient; samples > 120 off the
+  centre plane's extension are not used, so kerbs / walls / other levels stay sharp), only within 3000 of the player
+  (AI cars keep the exact planes). R (D2 units): 0 -> foot -944 / crest -735..555; 256 -> -873 / -692..651; 512 -> -636 /
+  -523..445; 768 -> -614 / -535..500. Default CHI_D2SF_SMOOTH=512 (a vertical curve of ~1350 D1 units). FPS 22.6 = 22.6.
+- **C37 round 3 (R31, user 'slopes 3': perfect except "a very slight bump while driving UP" slope_ref):** triangle
+  kernel (CHI_D2SF_KERNEL=tri, default; box = round 2): the cross at R plus the cross at R/2, per axis weights 1 2 3 2 1
+  (height) and the mean of the two central differences (slope), so the curvature of a crease also ramps in. Drive-up runs
+  (floor -> 7 deg ramp -> street, 2 each): crest nose dip 447..449 -> 429..435, crest vy step 36.7k..38k -> 31.3k..37.5k (box
+  noise ~ the effect: the user judges). CHI_D2_SURF is now the package default (build_package; CHI_D2_SURF=0 = off).
+- **C63 LA day far streets (Design 18.10.):** the far-street flat quads take the plane word 0x80097150 and the fog word
+  0x80097138 (0x00BBGGRR, set once per level by 0x800298BC, read by 0x800270D4); they held LA's night values in LA day. The
+  plugin writes plane (112, 111, 105) / fog (226, 212, 190) while la_day_active() (LA night, D1 untouched). Checked.
+- **Capture harness (for Design / QA):** chicago/devtools/capture_city.py OUT laday|lanight|chiday|chinight [--copy design
+  --port 4490 --prep]: prepares the copy from build-test with the current levels (d2cars9 + LA day 8), drives the pages
+  menu, saves menu / start / drive shots, prints city / night / look / sky / plane / fog words.
+- **C63 LA day sky:** build_package.chicago_skybin(la_day) appends Design's design/la_day_sky.py sky (recipe on the player's
+  D1 sky 10) as SKY.BIN 16 when CHI_LA_DAY_LEV is packaged (one SKY.BIN with Chicago's 13-15 per CHI_POLISH_SKY), sidecar
+  flag 4; the plugin's LA by day takes sky 16 then (CHI_LADAY_SKY overrides). Checked: LA day sky 16, song 2.
+- **C30 residue (probe 'loading' 20261017-1901*, not during a load):** reproduced exactly with var_polish_c45_corr5_day at the
+  snapshot pose (D1 124928,164,-2407 hdg 3062): the lower half of a far tower is overdrawn by a huge stretched ground quad
+  (p896/256 c1008,376, uv 7 x 16 texels, screen y 71..241) that the ordering table sorts in front of the building; as the car
+  moves the sort flips, so building parts pop. C45 near / big-quad family (NEAR_SUB subdivision would also fix the order),
+  not the area loader.
+
+## C42 round 3 design (Infrastructure 17.10.; user points a-f of R30; D2 = REDRIVER2 src_rebuild, EXP research_d2_cars_r3.md)
+**Driver 1 today (facts):** resident car models 0 = player (lump slot 5 + choice), 1 = cop (slot 0), 2-3 = civilians
+(slots 1-2); arrays clean 0x800A1AB0[], damage 0x800A1AD0[], low 0x800A1AE0[] (loader FUN_000527BC writes 6 clean entries but
+damage[4..5] = low[0..1]: only 4 usable); car polygon groups 4 x 0x3C at 0x800AF5B0 (FUN_0003BBF8 / BDC8) in one 666-entry
+buffer; per car: UV offsets 150 B (player 260), 128 deformed vertices. Civilians spawn as model 2 + rand % 2 with palette
+1 + rand % 4 (FUN_000154A8 / 16760 / 1638C); pursuers are model 1 unless 0x80096774 ("unmarked cops", 0 in Chicago) or
+0x80096770 == 0; plain traffic also carries model-1 patrol cars (D1 behaviour; in the 7 'd2 cars 2' snapshots every model-1
+car is a cop or a patrol car, no cop drove a civilian model). AI records 22 (0x80098950, 0x50 each) + player, car array 25.
+**Driver 2 (reference):** MAX_CARS 20; PSX 5 resident models: civ list modelRandomList[16] over slots 0-2 + 4, cop = slot 3
+(requestCopCar), slot 4 = SPECIAL_CAR_SLOT (spooled per region; specModelValid / allowSpecSpooling; model 8/9/10 with siren via
+CarHasSiren); palette 0 for model 0 / >4, else 0-4 random; car_cosmetics per resident model (FixCarCos centres the wheels:
+delta.vz = -(wheelDisp[0].vz + wheelDisp[1].vz - 14) / 2; body drawn at where + R * cog, DrawCarObject); wheel radius =
+wheelSize * 14142 / 10000 per model (cars.c); colBox / cPoints per model; sound banks per resident model
+(MapCarIndexToBank, car_banks[4][9]); DentCar level clamp 2, per-polygon kind L (gHDCarDamageLevels): offset
+((L^1) ^ ((L^1)|level)) * 64.
+**Plan (steps, each with one sanity run; engine changes gated by car set 4, PS1 path noted):**
+1. (d) wheels: per-model wheel radius (cosmetics row tail word, plugin-written) used by DrawCarWheels instead of 0x65 (two
+   `* 0x65 >> 12` sites + the tread vertices: scale the wheel draw matrix), FixCarCos centring + D2's cog body offset in the
+   converter (polish_cosmetics / polish_cars), checked against the user's reference (Screenshot_59). PS1: static exe code.
+2. (f) clean damage textures: D2's per-polygon rule (B) in DentCar with the DEN level rows (remapped by fit_maps), or as a
+   data filter (zone polygon lists only with a +128 twin); debris shards (giant black triangles, snapshot 1831) checked
+   separately (Setup_Debris uses car texture data).
+3. (a) cop look: Chicago = no unmarked cops (0x80096774 stays 0) + D2's rule "cop = police model only" (patrol model-1 cars in
+   plain traffic -> civilians, i.e. traffic never spawns model 1 in car set 4); user snapshot wanted if (a) means
+   something else.
+4. (b) more models at once like D2: residents 0 player, 1 cop, 2-4 civilians, 5 special = 6 (D2 PSX: 5 + player car):
+   relocate the three model arrays and the polygon group structs, enlarge the polygon buffer (~1000 entries; mod memory on
+   PC, PS1: shrink the low models / share the buffer), spawn list like modelRandomList, DentCar rows 1..5, cosmetics rows
+   (LoadCosmetics base table: 8 -> 10 rows for car set 4), palettes per model. Car cap stays D1's (~20 active + player = D2).
+5. (c) regional specials: EXP's per-region spawn table; slot 5 swapped at area / region change from the in-memory lump
+   (rebuild that slot's car polygons, despawn its cars first), siren for 8/9/10, colBox from the plugin's box table.
+6. (e) sounds: per-car engine / horn banks from D2 (D1 sound engine research first: car SFX bank per city).
+
+## C42 round 3, steps 1-2 built (Infrastructure 17.10.)
+- **Wheels (d):** convert writes <lev>.whl.bin (D2 wheelSize x 1.32: choices 0-3, AI 1-3; taxi 65, specials 91-119, civ
+  65-70 vs D1's 73) -> assets/car_wheels.bin. Plugin entry hook on DrawCarWheels (0x8003B208, game.toml hook list) sets the
+  shared wheel models' hub (0-7) and tread (16-23) vertices to +-size and WHEEL_RIM (0x80093394) = rim - 101; exe
+  c42w_patches: the four `x * 0x65 >> 12` rim sites multiply by 101 + WHEEL_RIM (lw t9 / mult / mflo). Driver 1 cars: 73 / 101,
+  word 0. FixCarCos (D2 handling.c) applied to the wheels (dz = -(w0.z + w1.z - 14) / 2) and D2's cog body offset
+  (DrawCarObject: body at where + R * cog) to the body vertices (clean / damage / low; CHI_POLISH_CARS_COG=0 = off).
+- **Damage textures (f), D2 rule:** <lev>.lvl.bin = D2 DEN per-polygon kinds (0 body / 1 lights; civ models 48-50 light
+  polygons, specials all 0) renumbered by fit_maps -> assets/dmg_levels.bin. exe c42d_patches: DentCar clamp AI 1 + RULEB
+  (0x80093398, 0/1), player 3 ^ PDMG (PDMG 1 -> 2); the shift loop calls DCAVE1 (unreferenced "$Id: intr.c" string,
+  0x80011BB8) / DCAVE2 ("$Id: bios.c", 0x800123E0): with LTAB (0x8009339C, the plugin's 1 KB table of L^1: row 0 = player
+  choice, rows 1-3 = AI models) offset = ((L^1) ^ ((L^1)|level)) << 6, else Driver 1's shift (AI 7, player 6). So Driver 2
+  bodies stay clean at level 1 and take their +128 twin at level 2, lights +64 / +128, as in denting.c.
+- Lesson: the exe's "zero block" 0x80093378..0x80093FC0 is BSS cleared at boot: fine for plugin words, NOT for code (a cave
+  there ran as zeros through the interpreter and crashed). DentCar keeps no ra on the stack: the cave call saves ra in t9.
+- Checks: d2cars6 crash run (light damage, bodies clean), Miami drive (words 0, rim 101).
+
+## C42 round 3 (b): six resident car models (Infrastructure 17.10.)
+- **Exe group c42m_patches** (exe_patches.py, 314 words; Driver 1 levels leave lump slots 3-4 empty, so their models 4-5
+  stay null and nothing changes for them: Miami check = 644 buffer entries, models 1-3, as before):
+  - tables moved to the old model-table area (same lui 0x800A as the cosmetics, only low halves change): COS 0x800A0E20
+    (6 x 100, 32 sites), STRUCTS 0x800A1078 (6 x 0x3C), DAMG 0x800A11E0 / LOWM 0x800A11F8 (6 words; before 4 + 4 with
+    damage[4..5] = low[0..1]), LOWUV 0x800A1210 (6 x 50 + slack, stays zero: Driver 2 low models have 72-108 polygons, the
+    draw reads past 50; d2cars6's init cleared 72 bytes from model 3's row into the hubcap data 0x800B6E84).
+  - group builder FUN_0003BBF8 rewritten as a loop of 6 (flags as Driver 1: player a2 = 1 + stack 1; palettised a3 = 1 only
+    for models 2-3), palette-halves loop of 6, the SF cop offset (city 1) on STRUCTS[1] / DAMG[1].
+  - FUN_0003BDC8: buffer base + cap from PCAVE (cave in the unreferenced "Library Programs (c) 1993-1997 Sony" text
+    0x800932C8, seeded; ra kept in t9): PBUF / PCAP (0x800933A0 / A4) or Driver 1's 0x800AB728 / 666; the cap sits in $at
+    (unused by the builder), the two `slti t2, 0x29a` sites read it. Note: Driver 1's New York with choice 0 needs ~685
+    entries and is truncated at 666 (Driver 1 behaviour, kept).
+  - low UV init FUN_0003E540: models 1..5, null-safe, <= 50 bytes per row (per-city pointer block 0x8003E588.. stays in
+    place: C51 patches 0x8003E5A8). Loader FUN_000527BC clears 6 entries (stale models 4-5 of a previous Chicago load).
+  - LoadCosmetics 0x80052684..: 6 rows (entry 0 = base + choice, entries 1..5 = base + 5..9); car set 4 has 10 rows at
+    0x800A16A0..0x800A1A88.
+  - civilian spawn (5 sites 0x80015E5C, 0x80015E84, 0x800165AC, 0x80016988, 0x800169F0; `2 + r % 2`, r >= 0): model =
+    SPAWN[r & 15] (16 bytes at 0x800932B8, same copyright text): Driver 1's {2, 3} x 8; the plugin writes Driver 2's list for
+    car set 4 (civ_ai.c modelRandomList: {2,3,2,3, 2,3,2,3, 4,4,4,4, 2,3,4,5}; models 4/5 only while loaded).
+  - car draw FUN_0003A698: model & 3 -> & 7 (0x8003A6A8, 0x8003AF14); struct compare 0x8003A574 and the LOWUV / STRUCTS
+    sites (lui 0xb -> 0xa).
+- **Plugin**: civ zone rows (3 or 5 models) in a mod-memory block, entry 4 of the civ tables (0x8008A6EC / 0x8008A72C) points
+  one row before it (the old place 0x800A0E20 holds COS now); PBUF/PCAP (car set 4: 1400-entry buffer); SPAWN; DentCar level
+  table 6 rows (dmg_levels.bin 9 x 256: AI 1..5 + choices 0..3); cosmetics 8 or 10 rows; wheels 7 or 9 values.
+- **Lesson (mod plan rejected):** the runtime applies the package's main_exe patches to RAM at the exe entry only if EVERY
+  expected byte still matches; a vblank write of the plugin into a patched text word before that (SPAWN at 0x800932B8)
+  rejected the WHOLE plan: RAM kept the original exe, every patched function failed the text-image check and ran the
+  original code in the interpreter (no log line in a killed run). The plugin now writes SPAWN only once PCAVE's first word is
+  in RAM. Rule: a plugin must not write a word that a main_exe patch expects before the plan is applied.
+- The exe's "zero block" 0x80093310..0x80094378 is intr.c's environment (memclr of 0x41A words at the interrupt
+  init; its handler stack top is 0x80094328): the plugin words 0x80093380..A4 sit at the bottom of that 4 KB stack.
+- **Converter** (CHI_POLISH_CARS_SIX=1 default with CHI_POLISH_D2CARS=1): lump slots 3 <- D2 3 and 4 <- D2 4 (after the
+  R31 cop fix below; D2 PSX: slot 4 = SPECIAL_CAR_SLOT, default model 4, specials per region = step c); damage rows
+  5 civ (.dmg.bin 6480 B), level rows 9 (.lvl.bin 2304 B), cosmetics 10 rows (.cos.bin 1000 B, rows 8-9 from row 5's tail),
+  wheels 9 (AI 4/5: 65 / 73). Fitted polygons: D2 0 148, D2 4 143 (AI UV buffer 150), entries 903 of 1400.
+- **Car CLUT table (found here, also in d2cars6):** the palette loader FUN_00056610 and the builder (palettised models) write
+  0x800BE9FC + 600 * (page - 5) + 20 * min(texture, 30): only 2 pages x 30 textures. d2cars6 had civilian + pedestrian
+  textures on pages 7/8: 32 palette words + the builder's words landed in 0x800BEEE8..0x800BF228 (skid buffer end pointer
+  0x800BEEE8, the area up to the font copy 0x800BF2EC), and those textures drew with whatever CLUT words were there. Now
+  (polish_cars.mark_palette_items / pack_twins): palettised textures (civilian models 2-3 + pedestrians) are packed first
+  into the first two car pages with the lowest texture numbers; convert.py keeps only palette entries inside the table and
+  refuses a level whose palettised polygons fall outside. d2cars7: 0 spills, pedestrians (CHEST1, JEANS1, ARM1) on page 5.
+- **Damage twins pixel-only** (CHI_POLISH_TWIN_PIXELS=1): a twin is only drawn through its clean texture (u + 128, same
+  texture number and CLUT), so it needs its pixels but no texture entry / CLUT slot (a page holds 32). Without this the
+  six-model set needed a 5th permanent page and 342 more city textures were halved.
+- **Cop texture size**: d2cars7 uses CHI_POLISH_CARMIX_HALF=1 WITHOUT COPFULL (the cop's textures halved like the other
+  cars): 4 permanent pages and 654 downscaled city textures = d2cars6's budget. With COPFULL=1 (cop sharp, as in d2cars6) the
+  six models need a 5th permanent page: 996 downscaled city textures (+342).
+- Level pair var_d2cars7_day / _night (CHI_POLISH_D2CARS=1 CHI_ROADS=1 CHI_POLISH_CARMIX_HALF=1). Checks: 6 residents,
+  traffic models 1-5, crash dents, FPS = d2cars6 (standing 20.2 / 19.9, driving 18.9 / 18.7); Miami unchanged.
+- **R31 cop bug (user: "chasing cops are a regular BLUE traffic car, the D2 police car never shows"):** the cops WERE
+  resident model 1 (all 7 'd2 cars 2' snapshots: pursuit / patrol = model 1, 0x80096774 unmarked-cops word 0), but model 1
+  was built from D2 lump model 3 = a plain light-blue sedan (page 50 has no police marks). Driver 2's own Chicago missions
+  (MISSIONS.BLK on disc 1, MS_MISSION.residentModels at +96, 34 of 37 Chicago missions) are {1, 2, 3, 0, special}: the
+  COP is lump model 0 (page 58: POLSIGN1, BLUELYN = the white "Chicago Police" livery; REDRIVER2 externalCopModel =
+  residentCarModels[3], palette 0). EXP's 'model 3 = police' was wrong. Map now {0: 0 cop, 1: 1, 2: 2, 3: 3, 4: 4, players
+  12/9/10/8}; levels var_d2cars8_day/_night (d2cars7 deleted). Checked: the cop draws as the white police car with its roof
+  bar, model 4 = the light-blue sedan, model 5 = the van; 0 CLUT spills, 4 permanent pages, 654 halved city textures.
+- **Cop lights, code comparison:** body + livery = Driver 2's (model 0, palette 0). The lights differ:
+  Driver 1 (FUN_00046000) draws a red/blue sweeping bar at fixed model-space spots x +-(64..112), y -164, z 15 (Driver 1's
+  cop roof); Driver 2 Chicago (cosmetic.c AddCopCarLight, GameLevel 0) draws RED-only pulsing lights (count 16) at
+  cog + policeLight (measured for model 3 before the fix; model 0 to be measured). Possible fix (small, Chicago-gated,
+  PS1-native): FUN_00046000's position / pattern / colour from per-model data.
+
+## R32 fixes after 'd2 cars 3' (Infrastructure 18.10.)
+- **Player car glitches (rear window, damaged bonnet / boot = map pieces, "J Coast"):** VRAM watch (scratch vramwatch.py:
+  VRAM of the chosen pair vs the level's page texels) showed the first special page wrong from the start in u 128..255,
+  v 0..127 = Driver 1's MINIMAP tile cache: FUN_00056278 uploads 4 x 4 map tiles of 32 px to DAT_000975F0 + table
+  0x8008B140 (32..56 words, 0..96 rows), and DAT_000975F0 = the VRAM slot of the chosen car's first special page (texture
+  loader). Driver 1's own minor pages leave that quadrant free; Driver 2's are full there (BONSPEC5's +128 twin, WINDSPEC,
+  SFRWIN ...). Fix (convert.py, CHI_SPECIAL_FLIP=1 default): the minor page of each pair swaps its halves when the lower
+  half is unused (TSHADOW in all four: 64, 67, 57, 55); the texture details / remap y move by 128. Audit in convert: no
+  player-car texture or its +128 twin may touch that quadrant (else the build fails).
+- **Civilians drawn white / half (model 3 = D2 2):** polish_cars.palettes read only N entries of D2's lump 25, N = the
+  first word = the number of STORED CLUTs; REDRIVER2 ProcessPalletLump reads until palette == -1. D2 2's BON31, DOOR31,
+  BWING31, BOOT31, windows and roof had no entries -> their CLUT table words stayed 0 -> palettes 2-4 drew CLUT 0. Fixed.
+- **Colour variety:** Driver 2 has 5 colour variants per civilian texture (+ base); Driver 1 spawned palette 1 + r % 4
+  (base + table slots 0-2 = 3 of D2's). exe c42p: the 4 palette sites read PALT[r & 15] (0x800932EC, Driver 1 {1..4});
+  the plugin writes 1..5 for car set 4 (base + D2 0..3; slot 3 = palette 5, as Driver 1's own city-5 case).
+- **Cop lights (c42l):** Driver 1's FUN_00046000 drew at x +-"p`P@@P`p" (0x8008A8D8), y -164, z 15 (its own cop's roof);
+  Driver 2's cop (lump 0) has its roof bar top at y -116, x +-33..66, z 30..63 (fitted model). COPW (0x800933A8,
+  plugin): y delta << 16 | z; Chicago (car set 4) y -120, z 46, x table all 50 (a fixed pair like D2's GameLevel 0 rule);
+  Driver 1: 0 / 15 / its own table. Colours stay Driver 1's red / blue (D2 Chicago: red only; no room in the block).
+- **Sky overwrote the civilian car page (half / garbled civilians, also city textures before the D2 cars):** LoadSky
+  (0x8004ED34) uploads the sky panorama to VRAM (512, 0) = slot 0x8 = the FIRST permanent page in load order; Driver 1
+  levels list their PCSKY page first (LA page 2, Miami 30; PCSKY 256 x 128 reserves the top half). Our levels listed page
+  5 (civilian textures) first. convert.py now loads the PCSKY page first (d2cars9: [7, 5, 6, 8]); no extra VRAM.
+- **Runtime VRAM check:** chicago/devtools/vramcheck.py OUT LEVEL [--prep]: drives Chicago and compares VRAM at the tpages
+  of the permanent pages 5-8 and the chosen special pair with the level's texels (texels inside textures only). d2cars9:
+  pages 5, 6, 8, 14 = 0 mismatches over 120 s of driving; page 7 only in PCSKY (= the sky, intended), page 13 only in
+  the swapped-out TSHADOW (= the minimap cache, intended).
+- **Memory safety audit:** car CLUT table (convert: entries only inside 2 pages x 30, palettised polygons checked);
+  minimap tile cache vs special pages (convert audit, above); damage twins at +128 inside their page (pixels-only twins
+  packed by pack_twins); six-model tables in the old model-table area (fixed, below 0x800A1AB0); polygon buffer bounded
+  by PCAP (+2 entries headroom); LOWUV clear bounded (50 B). The VRAM watcher (scratch vramwatch.py) is the runtime check.
+
+## C42 round 3 (c) + (e) built (Infrastructure 18.10., user R32: specials option B, sounds option A3)
+- **(c) Regional specials** (polish_specials.py, CHI_SPECIALS=1 default with the six-model set; levels var_d2cars10_*):
+  - one special per OUR area, like Driver 2's SpecialByRegion[LoadedArea]: the majority of Driver 2's SpecialByRegion
+    over the area's regions (convert keeps region_d2area); d2cars10: 8 (fire engine) areas 0, 8, 11, 12, 15; 9 areas 1,
+    4, 6, 14; 10 (school bus) areas 2, 3, 5, 7, 9, 10, 13. Model 12 (152 polygons > the 150-polygon AI UV buffer) stays a
+    player car only (polish_specials.usable).
+  - textures: texrepack.EXTRA_MODELS puts each special's textures (source "C", Driver 2's special pages) into the texture
+    sets of its areas (no permanent cost): downscaled city textures 654 -> 843 (+189: the areas now carry ~half a page).
+  - lump slot 4 loads Driver 2's default special 10; <lev>.spc.bin -> assets/specials_<day|night>.bin: the 4 specials
+    (clean / damage / low, polygons remapped to their area pages), cosmetics row (= the player row of that car), wheel
+    size, zone rows, area mask, region table.
+  - plugin specials_vblank: when the loaded area's special differs from model 5's and no car uses model 5, the special's
+    models go to mod memory (pointers relocated like 0x80052944), clean / damage / low[5], cosmetics row 5, zone rows,
+    DentCar level row 5 = 3 (no texture shift: the damage stages are not in the area sets) and the wheel size are set;
+    polygon group 5 is built by the plugin (port of FUN_0003BDC8 for a non-player non-palettised model, buffer entries
+    1402+) and REBUILT after every area texture load (tpage / CLUT words of the area pages are baked). SPAWN entry 15 =
+    model 5 only while the loaded area holds the special's textures; outside, group 5 and the low model are hidden.
+  - checked: specials 8 and 10 swap in at area changes, school bus drawn with its own textures (out_spc screenshots).
+    CHI_SPC_DEBUG=1: stderr trace. Host-only (M8: Driver 2's CD spool of the special pages / models).
+- **(e) Car engine sounds** (build_package car_sfx, assets/car_sfx.bin from the player's D2 disc 1 VOICES2.BLK, new input
+  d2_VOICES2.BLK; plugin sfx_vblank): after Chicago's bank 0 load completes (table entry 1 = bank base + 0x3710), Driver 2
+  banks 12 / 4 / 13 (engine + idle loops, 66.3 KB, 16 kHz) replace Driver 1's samples 1-2 (71.5 KB): bank 12 engine at
+  sample 1's address, its idle at sample 2's address (the player's channels 0 / 1 keep playing), banks 4 / 13 behind it
+  as samples 16-19; the table's rate field gives the 16 kHz pitch. The AI engine channels 7 / 8 restart on the sample of
+  the car they follow (model 1 / 3 -> bank 4, 4 -> bank 13, else bank 12): voice start address + key-on (spu_write).
+  Horns / sirens / other Driver 1 sounds unchanged; the SPU block sizes did not need trimming. Checked: channels switch
+  between 0x4720 (bank 12) and 0x74D0 (bank 4) with the car's model. Host-only (M8: a Chicago SFX lump + guest restart).
+
+## C42 round 3 (c) design: regional special vehicles (Infrastructure 18.10., awaiting a texture-budget decision)
+- **Driver 2 (REDRIVER2 spool.c):** the special slot (residentCarModels[4]) follows the LOADED AREA:
+  SpecialByRegion[Chicago] = {5,1,3,3,2,2,2,3,3,3,3,1,1,1,2,3,2,2,3,0} (per D2 area 0..19), model = value + 7, so Chicago
+  spawns 12 (area 0), 8 = fire engine (areas 1, 11-13), 10 (areas 2, 3, 7-10, 15, 18), 9 (areas 4-6, 14, 16, 17).
+  CheckSpecialSpool swaps it only when no car uses a special model; it streams the model (clean / damaged / low) and its
+  2 texture pages + CLUTs from the CD into a dedicated VRAM slot (specTpages), ~400 frames. Civilians take the special at
+  index 14/15 of modelRandomList (1/16 + 1/32 when valid). D2 missions also fix it (residentModels[4]: mostly 10).
+- **Driver 1 port:** these four specials are exactly our four player cars (8, 9, 10, 12). Geometry swap: rebuild group
+  5 at runtime (it is built last, so the builder can rerun for it from its buffer start), clean / damage / low pointers
+  from model bytes kept in memory (the load-time lump area becomes the primitive buffers after load), cosmetics row 9,
+  zone / level rows, wheel size: guest cave at the area switch + plugin data. Spawning: SPAWN entry 15 = 5 only while a
+  special is loaded (already in place).
+- **The cost is VRAM.** A special needs ~2 D2 pages (60-68 K px); halved once + damage stages ~ half a page. Free space
+  now: perm pages 5/6 full (twins), 7 full, 8 has ~25 % (16 K px). Options:
+  A. one extra permanent page as a "special slot", textures swapped per area (plugin upload; PS1 path = a CD load like
+     D2): +1 permanent page = ~342 more halved city textures (measured with the 5-page six-model build).
+  B. the special's textures in the AREA texture sets of the areas where it spawns (stable placement): no permanent cost,
+     the areas that carry a special lose ~0.5 page (more halving there only).
+  C. no extra VRAM: only the player's own chosen car can appear as a regional special (its special pages are loaded),
+     i.e. in the areas where D2 spawns that model.
+  D. quarter-resolution special textures in the free 16 K px of page 8 (all four would not fit; one at a time + swap).
+  Recommendation: B (D2-like per-area specials, cost local to those areas), or C as a cheap first step.
+
+## R33 fixes after 'd2 cars 5' (Infrastructure 18.10.)
+- **Colour choice (1):** Driver 2's Chicago civilians have base + 4 stored CLUT variants (palette lump: count word, read until -1;
+  pages 1/50/62/63/65 carry 5). c42m's builder flag is now a3 = (model - 2) < 3, so resident models 2-4 are palettised (model 4,
+  the van / Driver 2 model 3, had palettes chosen but no CLUT rows: the garbled blue-white car in 151005). Palette per spawn =
+  PALT 0x800932EC[r & 15] (c42p, 4 sites 0x80015ED8/0x800165C8/0x800169A4/0x80016A0C), table 1..5 nearly uniform like Driver 2's
+  random choice. Converter: palettised textures first, <= 30 per car page (CLUT table 0x800BE9FC is 2 pages x 30 x 20 B); 42 in total.
+- **Far LOD colours (2):** the low model (FUN_0002E230, world handlers) takes CLUTs from 0x80087030[page*32+tex] at draw time;
+  plugin entry hook lod_entry (game.toml mod_function_entry_funcs 0x8002E230) sets those words for a palettised low model to the
+  car's slot (palette of the car being drawn 0x80096990: 1 = base slot +0x10, 2..5 = slots 0..3). Host-only (M8: guest wrapper).
+- **Player hole (3):** the full triangle-pair fit merged non-coplanar pairs into quads (bow-tie gap at the left mirror, 150502).
+  Player models (buffers 260 polys) now merge only nearly coplanar pairs (FIT_ANGLE / FIT_COS, fitted(..., player=True));
+  AI models keep the full fit (150-poly buffers). Damage rows use the matching fit (fits_player).
+- **Damage textures (4):** the plugin writes the LTAB rows raw = the final DCAVE values (`s_dmg_lvl & 3`, default 3 = no shift):
+  player rows L ^ 1 (Driver 2 special pages kept whole), AI rows 1 (clean, +128 twin at level 2) or 3 where the texture has no
+  packed +128 twin (TWINNED registry from attach_twins) - before, such polygons shifted onto unrelated textures. vramcheck on
+  var_d2cars11 (150 s, area changes): car pages 5/6/8/14 0 bad texels; page 7 = sky slot 0x8 and page 13 u128+ = minimap cache
+  (both expected).
+- **Specials (5):** car-car box = Driver 2's colBox x 1.32 per special (asset entry header now 8 ints: model, area mask, sizes x3,
+  wheel, box x, box z; 8 = 263 x 891, 9 = 232 x 562, 10 = 228 x 870); plugin writes SPBX/SPBZ 0x800933AC/B0; exe BOXCAVE
+  0x80052704 (in c42m's LoadCosmetics dead space, seeded; c42e's box tail jumps there): player -> PBX/PBZ, model 5 -> SPBX/SPBZ,
+  0 = Driver 1's box. **Missing bus tiles + pale far-LOD box:** the plugin's polygon size table (spc_build_group, lod_entry) was
+  wrong; Driver 1's is at 0x80089F1C: {8,12,16,24,20,20,28,32,8,12,16,16,0,0,0,0,12,12,12,16,20,20,24,24,0...}. Fixed: bus near
+  and far textured (spc run on var_d2cars11).
+- **Map items (6) -> Polish (data):** sand patch drawn differently (150740) and missing water tiles at the monument (150819).
+
+- **C74 sand patch (Infrastructure 18.10.):** ground tiles in the mid band (0x80027098 -> routine 0x80026C38, writer 0x80026BE8)
+  take their UVs from SUBDIVISION via a list of one word PER POLYGON at model +0x2C (s5 += 4; high half = 20-byte record of
+  nine (u, v)); remap_subdivision only remapped the first word, so the other records of multi-polygon tiles (66 of 157 tile
+  models) kept Driver 2's page coordinates (sand drawn from v 224-255 = an empty region). Now every record is remapped with
+  the polygon texture whose original rectangle contains its points (CHI_SUBDIV_ALL=0 = old behaviour); 1658 SUBDIVISION bytes
+  change, models unchanged. Captured at 150740: patch polys v 224-255 -> v 0-19, patch gone (findings/c74_sand_before_after.png).
+
+## R34 fixes after 'd2 cars 6' (Infrastructure 18.10.)
+- **Special texture slot (item 4, user 25 = A):** option B (special textures in the area sets) lost them at every area
+  change while Driver 1 kept reusing the car (2 buses followed the player 300k units into area 14: hidden / garbled
+  specials). Now like Driver 2's special-car slot: polish_specials.reserve_slot takes the empty bottom half (256 x 128) of
+  a permanent page (page 8 = tpage 0xB in var_d2cars13) + 16 reserved texture entries (CLUT rows allocated by the page
+  loader, zero data); slot_layout packs each special's textures there (skyline, halving the largest until they fit: about
+  half resolution; page 1 entry 0 stays on its permanent page). Asset "2CPS" (+ slot header page, first entry, x, y, w, h,
+  entries, block bytes; per special the block = texels w*h/2 + 16 x 32-byte CLUTs). Plugin spc_slot_upload: on the swap
+  (only while no car uses model 5, so the old textures stay until then) texels -> tpage 0x80086F30[page] + slot rect,
+  CLUTs -> 0x80087030[page * 32 + entry]; group 5 built once per swap; every 64 vblanks a sampled VRAM check re-uploads if
+  lost. Area sets no longer carry special textures (city halved textures back to 654). Host-only (M8: a guest spool of the
+  slot block). CHI_SPECIAL_SLOT=0 = R33 area sets.
+- **Far special drawn as a pale box (item 2):** the civilian spawn (c42p PALT) gives every car a palette; FUN_0002E230
+  switches to the car-palette handler table 0x8008A1BC whenever the drawn car's palette 0x80096990 != 0, which takes CLUTs
+  from the car CLUT table (car pages 5-6 only) -> CLUT 0 for the special's polygons (GPU: op 0x34, clut 0). Driver 2 gives
+  specials palette 0 (civ_ai.c: residentCarModels > 4); the plugin zeroes the palette byte (car record +0x11) of model-5
+  cars every vblank (host-only; M8: the 4 c42p sites skip PALT for model 5).
+- **Special box offset (item 1):** Driver 2 centres colBox on the drawn body (initOBox where - R * cog; the body is drawn at
+  where + drawCarMat * cog, drawCarMat negates x / z, i.e. the same point). Our body sits at the cog shift (bus +154 along
+  z), the box at the car origin -> box 154 too far back. Exe c42m BOXCAVE: box centre (+0x30 / +0x38 of the collision
+  record) += column 2 of the car matrix (+0x10 / +0x18) x SPBO (0x800933B4, gp-0x33BC, plugin from the high half of the
+  asset's box z word). Offsets: fire engine 7, special 9 22, bus 154, 12 0.
+- **Ride height (item 5):** Driver 2 clearance (D2 units) = 14 - wheelDisp.y - cog.y - lowest body vertex (cars.c
+  DrawCarWheels): civilians 41-51, van 56, special 9 74, bus 92, fire engine 98. Specials (CHI_RIDE_MODELS 8,9,10,11,12) ride
+  CLEARANCE + 1.32 x (their clearance - the civilians' mean) higher: bus +59, fire engine +67, special 9 +35, 12 -14.
+- **Damaged-hood hole (item 3):** the player fit merged triangle pairs coplanar in the CLEAN model only; dented, the quad
+  bent and Driver 1 culled it by its first triangle. fit_model now also requires coplanarity in the damage model.
+- **Palettes (item 6):** Driver 2's lump stores 5 variants (palette 0..4) per palettised texture; retail Driver 2 picks
+  Random2 % 5 = base + lump palettes 0..3 (REDRIVER2 [A] enables the 5th). We use base + 4 = retail D2 (all 53 palettised
+  textures carry 5 distinct CLUTs in RAM). A 6th needs a wider car CLUT table (exe); not done.
+
+## R35 fixes after 'd2 cars 7' (Infrastructure 18.10.)
+- **Fire-truck region ruined VRAM (item 1, HIGH):** the slot upload used GP0 0xA0 (vram_upload) from the vblank hook; when
+  the game was itself mid-way through a CPU -> VRAM transfer / command (area texture streaming), the injected words became
+  its data (the user's area 8: every world texture green). Now spc_slot_upload writes the runtime VRAM directly
+  (gpu_get_vram_ptr + gpu_vram_dirty_mark_rows + gr_vram_transfer_in, like a completed GP0 transfer) without touching the
+  GP0 state, bounds-checked (slot inside its tpage, block inside the asset entry, CLUT spots inside VRAM). Test:
+  CHI_SPC_CYCLE=N (devtest aid: swap specials every N s even while in use) -> ~290 swaps incl. area loads, no corruption;
+  vramcheck: car pages 5/6/14 0 bad texels, page 8 only the slot rows.
+- **Buses spawned high / bounced (item 2):** Driver 1's civilian spawn uses the civilians' ride height; the special rested
+  ~180 lower in y (its cosmetics wheel y). (a) The D2 clearance extra is now a BODY shift up (polish_cars.cog_shift dy,
+  polish_cosmetics.ride_extras), the wheel y keeps the body-depth rule; (b) the plugin adds the wheel-y difference (row 5
+  vs model 2's row) to a newly placed model-5 car's y (+ the x16 copy). Measured: model-5 y swing in the first 3 s 1-7
+  (civilians 0-20), before 400.
+- **Player speed (item 3):** Driver 1's pad handler FUN_0001FF24 sets thrust 7200 (accelerate) / ~-7000 (brake) for the
+  player (car + 0xF0); Driver 2 FIXEDH(powerRatio * 4915). Exe C35T: the handler's last block (Miami choice-3 x 19/16) is
+  now thrust = (thrust * THRS + 0x800) >> 12 with THRS 0x800933B8 (plugin, car set 4) = D2 powerRatio * 4915 * 1.32 / 7200
+  from the player choice's cosmetics tail (+96, unused by Driver 1); Miami's rule kept bit-exact (4864/4096). Chicago
+  choices: 0 (D2 12, powerRatio 4500) 4055 = -1 %, 1 (9) 3154, 2 (10, bus) 2402, 3 (8, fire engine) 2703. Assumes
+  Driver 1's and Driver 2's drag scale alike (not measured: the walk-teleport harness ends in water / frozen cars).
+- **Special touch threw cars away (item 4):** the broad phase (0x8001FAFC) admits a pair only within Driver 1's 209 / 585
+  + 90 + PBS high half; the bus box (870 + 154 offset) was only tested once deeply overlapping -> big push-out. The
+  plugin adds the loaded special's extra reach (bus 614) to the PBS margin.
+- **Sky:** CHI_POLISH_SKY default = d2raw (polish_sky.sky_mode; "old" = the previous default).
+
+## R36 (Infrastructure 20.10.): approved defaults, special box, car sounds + horns, sky seams (C76)
+- **Defaults (user approved 'la day 6' / 'map fixes 2'):** convert.py CHI_POLISH_QUAYFILL=4, CHI_POLISH_QUAYCLEAN=1,
+  CHI_POLISH_INSIDEWATER=basin (KEEPSHORETILES, BASIN_Y 24 and sky d2raw were defaults already; "0" switches them off).
+  setup_chicago builds LA by Day from the disc with polish_laday.py (mode v15 = the frozen design/la_day_v11_cluts.json +
+  v14 vegetation / props) into <setup cache>/out/la_day_<key>.lev (key: polish_laday's modules + design/la_day_* +
+  CHI_POLISH_LA_DAY* + the D1 input md5s) and passes it as CHI_LA_DAY_LEV (main + --auto, code_key includes it);
+  CHI_LA_DAY=0 = none. Check: the setup build is byte-identical to var_polish_la_day_15.lev.
+- **Special box (item 1):** the R34 offset had the wrong sign. Driver 1's car models face -z (headlight z -525 in every
+  D1 cosmetics row; Driver 2's bus -618), the collision matrix's column 2 is the driving direction, so the body moved by
+  +cog z sits BEHIND the origin: the box centre moves by -cog z (polish_specials: bus -154, fire engine -7, 9 -22).
+- **C82 bus front collision (23.10., exe c82 + plugin SPTW):** Driver 1's car-car response (GlobalTimeStep 0x8001C9xx..CF0C)
+  gives BOTH cars the same impulse and the same yaw kick (impulse x lever x 0x37, t1 set at 0x8001CA10; no mass / inertia per car).
+  Driver 2 (handling.c) scales the kick by twistRateY / 2 per model (CHICAGO.LCF: cars 224, models 8 / 10 = 50, 9 = 120, all
+  masses 4096) -> in Driver 1 the bus (lever up to 716 front / 1024 rear) spun ~4.5x too hard and its nose swept the player.
+  Fix: S1-cave TW 0x80010850 (jal from 0x8001CC44 (car s7) / 0x8001CE9C (car s3), does their 'lw v1, 0x98(sp)'): t1 = SPTW
+  (0x800933BC, plugin: 0x37 x twistRateY / 224 -> bus / fire engine 12, special 9 29) for model 5, else 0x37. Also the pair
+  pre-check |dx|,|dy|,|dz| < 1201 on car ORIGINS (0x8001C4B4..EC) -> 2000: the bus box reaches 1024 behind its origin, so rear
+  hits were tested only after ~330 overlap (Driver 1 boxes never touch beyond 1104 -> no change in D1 cities). Measured
+  (bus_hit3, opt2d day, ramming at speed from 4000): before front yaw 9-111 deg with the bus spun round; after 2-5 deg, contact
+  at 1232-1304 (= box 716 + player box), bus stays aligned. Switches: CHI_C82=0 (exe), CHI_C82_TW=0 (plugin). PS1: pure exe.
+- **Car sounds v2 (items 3 + 4):** Driver 2's MapCarIndexToBank for Chicago (car_banks[0] = {12,4,13,5,16,9,2,15,10},
+  model - 1, 0 -> 1, > 6 -> -3): cop 0 -> 4, D2 1 -> 12, D2 2 -> 4 (the Delta 88 shares the cop's), D2 3 -> 13, player car
+  D2 12 -> 10, specials 8 -> 16, 9 -> 9, 10 -> 2. car_sfx.bin "CSX2" (build_package.car_sfx_v2, vag.py: ADPCM decode /
+  linear resample / encode, 68 dB round trip): engine / idle loops at 11025 Hz (CHI_CAR_SFX_RATE), horns 8 kHz.
+  SPU: samples 1-2's 73184 B = the civilian engines / idles (45.7 KB) + their horns (13.5 KB) + reserved player and
+  special horns; the music block's tail (0x19000 - song bank, 22.2 KB by day) = the player choice's engine / idle; the
+  mission block's tail (0x21800 - Take a Ride's 117 KB = 20.2 KB) = the special's engine / idle, reloaded on a special
+  swap. Table slots 1 / 2 player (channels 0 / 1 restarted), 16-23 engines, 24-28 horns; AI channels 7 / 8 follow
+  their car's model. Horns: Driver 1 HAS one: R1 -> FUN_0004D740(4, 0, 8): bank 0 sample 8 on channel 4 every 11 frames
+  (and in cop mode R1 toggles the siren); the plugin retargets channel 4 to the player car's Driver 2 horn. Civilians
+  honk at the player (new, like Driver 2's civ_ai: closing on the player ahead, max one at a time, cooldown) on voice 4
+  while the player is not honking. Fix: the bank-0 trigger no longer depends on a remembered address (v1 replaced the
+  sounds only on the first level load of a session). Host-only (M8: a Chicago SFX lump + guest placement).
+- **C83 engine sound (23.10., vag.py V2, package asset):** measured Chicago vs Miami (spu_voices / spu_events / SPU dump):
+  same channel use (0 engine, 1 idle, 2 crash = bank 0 sample 0 from FUN_0003FF0C, 3 skid loop 0x16500 unchanged), the same
+  pitch RATIOS (D1's engine pitch = revs/4 - x/128 + 1000 over 4096 x the table rate: 0.23x after gear changes .. 1.97x on
+  burnout; Driver 2's = revs/4 + revsvol/64 + 1500: ~0.37x .. 1.6x on the ground), no stray key-ons, all bank 0 samples intact.
+  Cause: the R36 11 kHz conversion. Driver 2 encodes a loop's block 0 with the history of the loop's END; vag decoded the
+  source from silence (block 0 off by up to 8000), and the resampled loop's last block was padded with up to 27 zeros INSIDE
+  the loop -> the player's engine (D2 bank 10) clicked + dropped out (26 samples) once per loop, i.e. more often the higher
+  the revs (burnout, braking into reverse at full revs). V2 (CHI_VAG_V2=0 = R36): loops decoded as on their 2nd pass, resampled
+  to whole 28-sample blocks, encoded with the loop end's history (fixed point), 63-tap windowed-sinc low-pass before the
+  16 -> 11 kHz step (linear interpolation aliased). In game (SPU dump): player engine seam step 7168 (> p99.9 6103) -> 5182
+  (< p99.9 6216); every engine / idle loop now below its p99.9; sizes -16 B or equal (SPU budget unchanged). Pitch remap (plugin
+  sfx_v2_vblank step 7, CHI_C83_PITCH=0 off; Chicago + D2 cars only, channel 0 while it plays the D2 player engine): arg' =
+  (arg - 1000) x 0.71 + 1414 (D2: revs/4 + revsvol/64 + 1500, burnout revs 20160 vs D1 ~28300) applied via the channel's
+  rate (+0x44, one frame behind). Measured ratios: idle 0.22 -> 0.33, accel max 1.54 -> 1.31, burnout 1.96 -> 1.56. AI
+  engines (0.43-0.58x) already sit in D2's range (revs/4 + 1500). Host-only (M8: the same map in guest code at 0x8004DACC).
+- **Sky seams (C76, user: 'cut' lines in the sky that move with the view):** Driver 1's dome draws piece k with u
+  64k..64k+63, v 42r..42r+41 (0x800BDE40): texel 63 / row 41 is never sampled, so one panorama column / row was skipped
+  at every seam, and each piece was quantised to its own 16 colours (_bmp4) -> colour steps along the seams. polish_sky:
+  the panorama is resampled to 253 x 124 and cut with a one-texel overlap (CHI_POLISH_SKY_SEAM=0 = old), each piece's
+  palette is chosen from the piece plus a 3-texel ring of its neighbours. Measured on the dome view: vertical seam
+  contrast 14.0 -> 7.8 (median 10-12), horizontal 15.6 -> 11.1 (night); day 31.9 -> 22.0 / 47.2 -> 30.4 (source 20). Not
+  fixable in data: affine texture warping of the big dome / far wall quads (diagonal kinks; the PC renderer's
+  [video] perspective_texturing would remove them). Halved walls: see open question (texture edge / halving).
+
+- **C76 dome split (Infrastructure 20.10., parked):** convert.sky_subdivide (CHI_SKY_SUBDIV=1; rows CHI_SKY_SUBDIV_ROWS, default
+  1,2 = 36 quads per quadrant) + exe C76D (sky_dome_patches): FUN_0004F34C wrote the four screen points twice; the redundant
+  second block (0x8004F604..F6EC) is now the branch "byte 1 bit 7 -> UVs from polygon bytes 8..15, CLUT of byte1 & 0x7F",
+  else the table (Driver 1 domes draw as before; SF checked). Lessons: the copyright-text tail after 0x8009330C is live
+  runtime data (a cave there halted), and a cave must be a jal/jr subroutine (no recompiled entry mid-function to jump
+  back to). FPS at fps_drop_2 (3 reps): standing 24.6 -> 24.3, driving 26.4 -> 25.4 (noisy). The user approved the
+  unsplit sky (probe 33), so the converter default is off; the exe branch stays (inert without marked polygons).
+
+## C42 round 3 (e) research: per-car engine / horn sounds (Infrastructure 18.10.)
+- **Driver 1:** level SFX load FUN_0004C29C: SOUND\VOICES.BLK (header 11 offsets = 10 lumps) lump 0 -> SPU bank 0
+  (164 KB, 16 samples), lump 1 -> bank 3 (65 KB), lump 2 + k -> bank 4 (k from the mission table 0x8008A96C; 63-131 KB).
+  Bank = count, then {offset, size, loop, rate} x n, then VAG data (LoadSoundBank 0x8004E214). The car channels are
+  started once per level (FUN_0004C438, FUN_0004D7E4(channel, bank, sample, x, y, z, vol, pitch)): ch 0 sample 1, ch 1
+  sample 2, ch 3 sample 3, ch 5-6 sample 4, ch 7-8 sample 1 (+ ch 4 in 2-player); FUN_0004CA5C then only moves them
+  (FUN_0004DDA8: position / volume / pitch from revs) to the nearest cars; model 1 = siren. So EVERY car, every city,
+  uses the same engine samples: bank 0 sample 1 (engine loop 57.7 KB @22 kHz) and 2 (15.4 KB loop) - no per-car sound.
+- **Driver 2:** SOUND\VOICES2.BLK (73 offsets), the same bank format (16 kHz). LoadLevelSFX loads one CAR bank per
+  resident model (MapCarIndexToBank: car_banks[city][model - 1, 0 -> 1, > 6 -> -3]); a car bank = 3 samples: engine
+  loop, idle loop, horn (8 kHz), 19-31 KB. Engine pitch = revs / 4 + revsvol / 64 + 1500 (gamesnd.c), 3 channels per
+  car. Chicago: model 1 -> bank 12, 2 -> 4, 3 -> 13, 4 -> 5, cop 0 -> 4, specials 8 -> 16, 9 -> 9, 10 -> 2, 12 -> 10.
+- **Import path:** (1) package: a Chicago-only SFX lump = D2 car banks of the 6 resident models (player choice, cop,
+  civ 1/2/3, model 4) appended to bank 0's samples (~150 KB; the converter reads VOICES2.BLK from the player's disc 1,
+  Option A), relocated like MUSIC.BIN; (2) exe: FUN_0004C438 / FUN_0004CA5C start the engine / idle channel of a car with
+  sample = per-model table (+ restart when a channel moves to a car of another model), horn = sample 3 of the model;
+  pitch: D2's rates are 16 kHz vs 22 kHz (scale the pitch word). **SPU RAM is the limit** (512 KB): D1 already holds bank 0
+  164 KB + bank 3 65 KB + bank 4 up to 131 KB + the music bank up to 87 KB + reverb: ~150 KB more does not fit; Chicago
+  would have to drop D1's engine samples 1-2 (73 KB) and fit the rest elsewhere (e.g. a smaller mission bank 4, or only
+  3 D2 banks shared by model like D2's own mapping: cop and model 2 already share bank 4). Needs a budget decision.
+- **SPU map (static, InitSound 0x8004D3DC: SpuMalloc of the table 0x8008AA24 at boot; same in every city):** SFX bank 0
+  0x28000 (160 KB; D1 lump 0 uses 159.9), bank 1 0x400, music 0x19000 (100 KB; largest song bank 84.7 KB), mission bank 4
+  0x21800 (134 KB; largest lump 127.9 KB), bank 3 0x10000 (64 KB; 63.3 used); reverb mode 5 (hall) 43.5 KB, system 4 KB,
+  free 5.5 KB. Needs: A = 3 D2 banks 78 KB / 4 banks 96.6 KB vs 71.5 KB freed by D1's engine samples 1-2 + 5.5 free + 21 KB
+  from trimming the music / mission blocks to their maxima -> 3 banks fit, 4 need 11 kHz resampling (-31 %); B = 5 banks
+  ~127 KB (55 KB more: mission block or resampling); C = one bank 19-30 KB (fits).
+
 ## Chicago music (milestone 2, Polish 14.10.; polish_music.py)
 - **How D1 picks the song:**
   - Music init 0x8004D208(song) reads 12 bytes of SOUND\MUSIC.BIN at song*8 ({xm, bank, next}), loads the XM
@@ -842,4 +1834,1560 @@ D. D2 car models (+ D1 EXE cosmetics). E. D2 music → D1 MUSIC.BIN. F. 5th city
     (0x8003B208, the two `* 0x65 >> 0xc` sites) plus the wheel models' tread vertices.
   - Side find: today Chicago by day draws Miami's player cars with LA's rows (city 3 base 0x18); the day file fixes
     that too.
-  - StepOneCar reads the same rows, so the D2 rows also change the ride height: check in game.
+  - Ride height (fixed 14.10. evening): D1's StepOneCar sets it from wheelDisp.y (D1 cars: -165 -> y 164, bodies ~130
+    deep = ~34 clearance). The first rows (vy + wheelSize - 64 = -41) sank the D2 bodies (y ~77). Now wheelDisp.y =
+    -(body depth + 34) (CHI_POLISH_COSMETICS_RIDE=body, CHI_POLISH_COSMETICS_CLEAR=34): -118/-122/-114 -> traffic
+    y ~121, bodies visible on the road (pt hook near-car shots, mix4). D2 bodies are only 80-88 deep, so y 164 would
+    float them ~75 high.
+- **C7 street-level first (Polish 14./15.10.; CHI_POLISH_TEX_HEIGHT=1, polish_tex.pick_height):** when the page
+  budget forces halving, textures used high up go first.
+  - Height = mean model-space -y of the polygons using the texture; high = from 1200 units (CHI_POLISH_TEX_HIGH).
+  - Order: high first, then far-only, then the largest.
+  - var_polish_c7_height1_day.lev vs b15 (same page budget):
+    - street-level losses 283 textures / 1.25 M px -> 173 / 0.76 M px (-39 %);
+    - high losses 76 / 0.26 M -> 167 / 0.64 M px;
+    - total lost pixels 1.51 M -> 1.40 M (halving steps 672 -> 778, more but smaller).
+  - 293 textures change (157 street-level sharper, 6 street-level softer, 130 high softer):
+    findings/c7_height_texture_changes.csv.
+- **Night moon (CHI_NIGHT_MOON=1, polish_moon.py, night conversion):** the SKYSUN item (24x24, LA's slot that wins the
+  by-name lookup) gets Design's SKYMOON_24.png. It is quantised to 15 colours with the semi-transparency bit,
+  background index 15 = 0x0000 (as D1's SKYSUN).
+  - var_polish_moon1_night.lev; slot preview findings/night_moon_skysun_slot.png (left LA's sun, right the moon).
+  - In game the chase camera never showed the high sky at beach_n / lakeview, so the moon itself is not yet seen on
+    screen (Infrastructure's moon vector is in build-test).
+- **quay_wall (Polish 16.10.; user snapshots 20261015-234734..234751, smooth loading probe):** "huge stretched grey
+  planes" at the river quay D1 (-82000,-220500), area 11, region 135.
+  - Not corr4-specific: the same objects are in b16b.
+  - Candidate 1: D2 model 1115, a concrete quay wall of two 256 x 7152 quads (9440 D1 units long), placed twice at
+    y 1014 along the quay. Driver 1 has no near clipping, so a polygon whose corners pass behind the camera is drawn
+    stretched across the screen (C2 family). City-wide, 35 polygons in 11 models are longer than 3000 D2 units.
+    - Fix: **CHI_POLISH_TESS=1500** (polish_tess.py, hooked at the start of d1models.convert_models). It cuts such
+      FT4/GT4 quads into strips of at most 1500 units, interpolating vertices, UVs and normals (1115: 2 -> 14 polys).
+  - Candidate 2: SHOREWALL hanging from a raised level. Land cell (425,775) next to the river reads only -1634 (a
+    structure top), so the 2000-high quay wall hung from 1594 above the street. City-wide 109 walls had raised tops.
+    - Fix: **CHI_POLISH_SHOREFIX=1**: a raised bank (> 300 above the street) takes the median street-near level of
+      its land neighbours, else gets no wall. 4671 -> 4616 walls, 0 raised tops.
+  - Level: work/var_polish_quay2_day.lev (corr4 recipe + both switches). Spot quay_wall added.
+  - Pose replication from the snapshots is unstable (the car flies after poking its state), so the in-game check is
+    partial: findings/quay_wall_before_after.png. User probe recommended.
+- **C60 chase music (Polish 16.10.):**
+  - Driver 1's chase switch is 0x8004CF50 (= D2 FunkUpDaBGMTunez). When copmusic (0x80096C70) == 0 and the felony
+    (0x80097708) >= 0x293, it sets copmusic = 1 and calls XM set-position 0x80073020(Song_ID *0x80096C88,
+    xm_coptrackpos[*0x80097298]). The table sits at 0x8008AA04 (8 ints: 11,12,11,11,8,11,15,12, read with lhu;
+    lui/addiu of the base at 0x8004CF84/88).
+  - Chicago's songs 8/9 read past it: entries 8/9 are InitSound's SPU words 0x28000/0x400, so there is no chase
+    section.
+  - D2 positions: Chicago day (D2 song 2) 7, night (song 6) 8.
+  - Test (in-place D2 song 2 in slot 7, data poke table[7] = 7, felony 0x400): copmusic = 1 and the music switches;
+    louder and brighter spectrum (findings/music_chase_test_normal/chase.wav).
+  - Engine spec: point the base at a 10-entry copy (polish_music.coptrackpos_table(): D1's 8 + 7, 8). It needs no
+    gate, since the first 8 entries are identical.
+  - **Engine (Infrastructure 16.10., exe group CHASE_TABLE, shared list 426 -> 438)**: lui/addiu at 0x8004CF84/88 ->
+    0x8001188C, a 10-int table in the unused MDEC debug strings after the C55 moon stub (no references; ranges
+    manifest unchanged, so not decoded as code). CHI_CHASE_TABLE=0 = off. The XM set-position writes the order
+    position to song struct (*(0x800C7888 + 4 x Song_ID 0x80096C88)) + 0x1C. Check (build-test, felony poked to
+    0x400): Chicago day song 8 -> position 7, night song 9 -> 8, Miami song 3 -> 11 (D1 unchanged); music plays on.
+  - **CHI_POLISH_MUSIC default on** in build_package (16.10., user R23; CHI_POLISH_MUSIC=0 = off). Only in the Chicago
+    slot package (needs D2 disc 1).
+- **C37 D2 surface planes (Polish 16.10., `polish_slopes.py`, CHI_POLISH_SLOPES=1):**
+  - D2 stores the surface per 1024 cell as a BSP of cuts at any angle, with one plane (a,b,c,d, unit normal x 16384) per
+    leaf; height = -d - (a x + c z) / b (sdHeightOnPlane).
+  - D1 already takes any plane on a triangle or box: MapHeight 0x8001F5B0 / FindSurfaceD2 0x8001EEB4 (the only readers
+    of surface_ptrs besides the loader 0x80021CA8) compute height = ((px a + pz c) >> 12) - d - cell h. That has NO
+    division by b, so a unit normal makes a slope g only g/sqrt(1+g^2) steep (45 deg -> 0.71). D1's own cities are
+    unaffected: unit normals, slopes <= 0.2 (FRISCO).
+  - StepOneCar uses the returned normal in D2's impulse formula (expects unit length) and the vertical depth for lift.
+  - polish_slopes clips each D1 cell against the BSP leaves of the D2 cells it overlaps. It keeps single-level, no-sea
+    cells with a sloped piece or a >= 40 step, merges equal planes, and writes triangles plus the largest plane as a
+    full box last (first match wins). CHI_POLISH_SLOPES_AT="x,z,r;..." limits the cells.
+    CHI_POLISH_SLOPES_EXACT=1 writes a, c = gradient x 4096, b = sqrt(4096^2 - a^2 - c^2) (min 1024).
+  - City-wide: 5715 cells qualify (2940 steeper than 0.4, mostly banks; 1489 gentler slopes; 1276 non-axis splits;
+    only 10 gentle slopes with both x and z gradients), 0-20 triangles per cell. Every cell needs its own surface id
+    (ids < 900, ~438 free), so data-only covers at most a few hundred cells.
+  - diag_ramp is the top edge of a 45 deg (E) / 55 deg diagonal (A) bank down into the river (D2 planes
+    E: a -11585 b 11585; A: a = c = -9459, b 9459). The old level wrote that cell flat at h 284, so the car stood level
+    inside the bank.
+    - var_polish_c37_slopes1 (EXACT): the car was flung 1800 units and flipped within 0.5 s. The normal is wrong
+      (b clamped), so the impulses go mostly sideways.
+    - var_polish_c37_slopes2 (unit normals, 3 cells at diag_ramp): the car rolls backwards down the bank to the water's
+      edge, tilting with it (no fall-through), then flips (Game Over). That matches the physics for a 45-55 deg bank;
+      the slope is 0.71x steep.
+  - **Engine spec:** in MapHeight and FindSurfaceD2, divide by b (D2's formula) instead of >> 12, gated to Chicago
+    (CITY 3) or for all cities (D1 changes <= 2 %). Then the data writes D2's unit normals for exact heights and
+    normals. Plus more surface ids (or a D2-style per-cell plane lookup) for the 5715 cells.
+- **Quay artefact round 2 (Polish 16.10., user snapshots quay fix 0032*):**
+  - Cause: my C40 default CHI_POLISH_SUBDIV=light turns every flagged polygon into 0x60. The renderer 0x80030B08 gives
+    0x60 polygons the fixed light handler (+0x10) even next to the camera. Only 0x20 polygons get the full near
+    subdivision (< 6000 units, +0x20), which LA uses on its big polygons (9984 polys flagged 0x20).
+  - So the river quay-wall models 1113/1114 (9462 long, faces from -213 to 1014) and 1115, still 1400-unit strips
+    after TESS, were drawn stretched where they run beside or behind the camera. At the user's pose 003300, 7+7+4 of
+    their polygons cross the camera plane (scratch nearclip analysis).
+  - Fix: CHI_POLISH_SUBDIV_LONG=6000 (d1models.polish_subdiv). Models longer than 6000 keep Driver 2's flags:
+    11 models, 230 polygons at 0x20, negligible cost.
+  - Level var_polish_quay3_day (quay2 + the switch). Same drive east along the quay from the user's start
+    (findings/quay3_subdiv_long_before_after.png): quay2 shows the dark wedge / slanted slab in 4 frames; quay3 shows
+    none, one small spike left.
+  - Not fixed: water tile 683 (quick-path tile, flags 0, 3060 square at y 1084) also crosses the camera plane there.
+    It is a candidate for the translucent slab; quick-path tiles never get the near subdivision.
+  - Surface 754's second plane (d -1640, sw 1334) is D2's stacked lower level with its switch height: collision
+    only, not drawn.
+  - Pose poking from a snapshot (0x8009B000..0x8009B300) ends the game at once (Game Over). The car heading is
+    0x8009B19C (4096 = full turn).
+- **C46 + C56 sky variant (Polish 16.10., `polish_sky.py` CHI_POLISH_SKY=d2, package-time; work/var_polish_c46_sky3.BIN):**
+  - Rows: D2 rows 0..167 uncropped (no TOP=42) squeezed to v 0..105.
+  - Haze: the skyline's dark base v 84..104 blends towards HAZE_TOP (216,224,234), 0.15 -> 0.9, by day.
+  - Below the horizon: D2's reflection (rows 167 -> 140 flipped, half brightness) in v 105..125. By day it sits under
+    the haze gradient (CHI_POLISH_SKY_REFLHAZE = 0.8 gradient share); at night it is plain.
+  - Finding: v 105..125 IS visible from street level (bridge: screen rows ~75..115). A plain dark reflection made the
+    C56 slab darker (24,32,32) in variant sky2. sky3: (144,152,160) at bridge.
+  - Sheet: findings/c46_c56_sky3_sheet.png (bridge before / after, lakeview).
+  - The old switches (CHI_POLISH_SKY=mirror, _TOP, _GROUND=grad) are superseded.
+- **C12 dot calibration (Polish 16.10.):**
+  - CHI_POLISH_MAP_MARKS="x,z;..." (test only, polish_map.marks) paints a 7x7 dark frame at the predicted car pixel.
+    Level work/var_polish_c12_marks_day.lev has frames at bridge, lakeview, l_down_e, deckfall_w (south) and
+    kernelnorth (north).
+  - In game, the dot sat the same offset from the frame at all 5 spots: no scale drift; +1 px in screen y (= map
+    column / z), within 1/3 px in screen x.
+  - The window shows the map transposed: screen x = map row (x, 1.5 screen px per map px), screen y = map column (z).
+  - Fix: CHI_POLISH_MAP_NUDGE="dc,dr" (map px added to the exe offsets, package time via build_package
+    minimap_params). "1,0" centres the dot (checked at l_down_e: dot on the frame centre,
+    findings/c12_dot_calibrated_l_down_e.png); "-1,0" doubled the error and "0,-1" moved it sideways.
+  - Zoom to D2's scale (F=1) still needs the CLUT read moved: exe immediate at 0x80054194 (map + 0x148) -> 0x200
+    (polish_map CLUT_AT for 252 tiles). Data-only maximum: F=4/3 (var_polish_c12_map43_day). Native test level:
+    var_polish_c12_map1test_day (CLUT copy at 0x148, tiles 164..179 garbage).
+- **C12 round 2 (Polish 16.10. 14:0x), probe 'minimap' broken:**
+  - Cause: the snapshot's exe entry was (178, 78, 448, 256, 2416, 4247), i.e. F=1.5. The level had the F=4/3 lump
+    (512 x 288, 16 tiles across), but build_package recomputed the frame from the environment at package time, where
+    CHI_POLISH_MAP_F was unset. The tiles were laid out 14 across (sheared) at the old scale (no zoom).
+  - Fix: polish_map appends "PMAP" + the 6 frame words after the tile data; build_package.minimap_params uses the
+    stored frame (stored_params). The package always matches the level; NUDGE/F are now level-build switches.
+  - D2's zoom = F=1 (672 x 384, 252 tiles). Data-only, at most 164 tiles fit before the CLUT at map + 0x148: a road
+    crop still needs 20 x 10 = 200 tiles, so the exe immediate at 0x80054194 (0x148 -> 0x200) is required.
+  - Test level var_polish_c12_map1v2_day (F=1 + NUDGE 1,0 + the test CLUT copy at 0x148: tiles 164..179 garbage)
+    shows D2's density at l_down_e / purpleshops (findings/c12_r2_zoom_sheet.png). Without TESTCLUT it is the ship
+    level once the immediate is patched. D1's minimap rotates with the car like D2's.
+- **C12 D2 zoom (Infrastructure 16.10.)**: exe group MAP_CLUT (exe_patches.py, 6 words 0x80054178..8C, shared list
+  378 -> 384): the overlay-map loader FUN_80054140 uploads the CLUT from map + 0x148 + MAP_CLUT_EXTRA (gp+0x1134 =
+  0x800978A4, no exe xrefs); the heap-pointer update is rewritten gp-relative to make room. D1 lumps all have the CLUT
+  at 0x148 (160 tile slots), so the word is 0 for them; the plugin sets it to CLUT_AT - 0x148 from the level's frame
+  (tiles = frame word 4 & 0xFF; > 160 -> CLUT_AT = (2 x tiles + 8) word aligned; F=1 Chicago: 252 tiles -> 0x200, extra
+  0xB8). Levels work/var_c12_map1_day.lev / var_c12_map1_night.lev (b16b recipe CHI_ROADS=1 + CHI_POLISH_MAP_F=1 +
+  CHI_POLISH_MAP_NUDGE=1,0; frame 290, 141, 672, 384, 252 | 9 << 8, 2831 stored in the lump). Verified (build-test, l_down_e):
+  EXTRA 0xB8, D2 palette, no garbage tiles, dot on the road; Miami EXTRA 0, its map unchanged.
+  Sheet findings/c12_map1_zoom_vs_d2_ref.png (with the user's D2 crops). setup_chicago's level cache key now hashes only
+  the modules convert.py imports (modulefinder), so exe/package-only edits no longer reconvert at the next game start.
+- **C45 quay round 3 (Polish 16.10. 14:4x): zero glitches needs the engine.**
+  - Counter: a scripted loop at the user's pose (D2 -179758,-101534; 48 steps, all 8 heading octants, near and far)
+    decodes each frame's GP0 (psxrecomp/tools/psx_gpu_frame.decode_entries) and counts textured non-sky polygons with
+    area > 20000 or bbox > 600 x 300. Source matching: captured uv/tpage -> level polygons (scratch uvfind.py).
+  - quay3 (SUBDIV_LONG=6000): 30/48 frames. Sources:
+    - water tile 683 sub-quads (tile renderer pc 0x8007AFAC / 0x8005152C / 0x80079B2C, polygon flags ignored);
+    - SHOREWALL 1215 (1500 x 2000, flags 0, built by convert.shore_wall_model) and FARWATER 1214 (flags 0);
+    - small semi-transparent 0x60 polygons.
+  - How D2 avoids it (REDRIVER2 draw.c PlotBuildingModelSubdivNxN + tile.c drawMesh): every textured quad near the
+    camera is subdivided (2x2 / 4x4 when diff*4 > minZ-350, whatever its flags), and sub-quads with avg OTZ <= 5 or
+    nclip <= 0 are dropped. There is no real near clipping. D1 subdivides only polygons flagged 0x20 / 0x40 and its
+    tile path never.
+  - Data imitation CHI_POLISH_NEARALL=E (d1models: 0x20 on every polygon with an edge >= E, tiles included):
+    E=600 -> 13/48 frames, but frames/vblank at fps_drop_2 dropped 0.491 -> 0.447 (-9 %, breaks the C40 rule).
+    The water tiles stay (the tile renderer ignores flags). Not for shipping; level deleted.
+  - **Engine spec (Infrastructure, gated CITY 3 = Chicago, PS1-native):** in D1's polygon emitters reject a polygon
+    when a projected vertex has SZ < NEAR (e.g. 48; or GTE FLAG bit 17 divide overflow) after RTPT/RTPS, as D2 drops
+    near sub-quads.
+    - Emitters seen in the captures: world handlers 0x8002CD94, 0x8002D2DC (function 0x8002D0F4), 0x80082D04,
+      0x80084C58; tile/water 0x8007AFAC, 0x8007AEE0, 0x80079B2C, 0x8005152C.
+    - With that, no NEARALL is needed (no FPS cost; a few mfc2 + compares per polygon).
+    - Check with the same loop counter (target 0/48).
+  - Sheet: findings/c45_quay_r3_loop_sheet.png.
+- **C63 LA by Day, feasibility (Polish 16.10.):**
+  - D1 has ONE LEV per city for day and night: MIAMI/FRISCO/LA/NEWYORK.LEV have the same lump set, and there is no
+    night LEV. So day/night is engine state:
+    - night flag 0x80096850;
+    - sky number by CITY (jump table 0x800108A8: LA 2 / rain 3; +1 night only for CITY 0/1/5);
+    - LOOK_CITY 0x8009789C (Chicago day sets 0x7F);
+    - lamp/light sprites and car lights follow the night flag.
+  - LA's textures are night-baked. Mean texel luminance: LA 74.6 vs Miami 118.4, SF 111.9, NY 95.8. Dark texels:
+    48 % vs 20-32 %. 257 of 551 textures (58 % of the texel area) are > 45 % dark: lit shop windows on black,
+    window grids on black facades. Sheet: findings/c63_d1_city_textures.png.
+  - A palette recipe cannot make day of them: findings/c63_la_day_palette_preview.png (gamma/saturation lift: still
+    night) and _v2.png (black -> concrete, glow -> glass: washed-out grey, detail lost, since the shading lives in
+    the darks).
+  - Day textures need either a Design repaint of the 257, or a curated swap table onto D1's own day textures
+    (NY/SF/Miami facades, same disc = Option A friendly; LA would partly look like NY/SF), or a mix: swap the window
+    grids/backgrounds, repaint the landmark shopfronts.
+- **C7 round 2 + C67 (Polish 16.10. 19:xx):**
+  - D2 storey = 512 units: the mode of the vertex-level spacing of Chicago's 448 tall models is 510-519.
+  - polish_tex now has CHI_POLISH_TEX_HIGH_MODE = mean (default) / min (lowest vertex) / share (share of polygons
+    wholly above HIGH, CHI_POLISH_TEX_HIGH_SHARE). The choice is per texture: only 16 of 589 textures lie wholly
+    above floor 3, and almost every halved texture (324 of 340) is also used at floors 1-3. min/share move the cut
+    to ground-floor textures (share 0.75: ground-floor texel loss 0.94 M -> 1.16 M) = worse.
+  - Best at the same budget: mean mode with CHI_POLISH_TEX_HIGH=1536 (3 storeys). Texels lost on textures first used
+    at floors 2-3: 390 K -> 306 K (-22 %); textures from the ground floor: 941 K -> 996 K (+6 %; mostly tower facades
+    tiled from the ground); textures wholly above floor 3: unchanged. Level work/var_polish_c7_high1536_day.lev
+    (CHI_ROADS=1, TEX_HEIGHT=1, TEX_HIGH=1536).
+  - Truly "ground + 2-3 floors sharp, upper soft" for one tiled facade texture would need a second (halved) copy
+    for the upper polygons = more pages, not fewer.
+  - C67 diagonal cuts: PS1 affine texture seams between the two triangles of large facade quads (the probe's
+    settings.toml has perspective_texturing = false). Not caused by TEX_HEIGHT: the geometry and UVs are the same,
+    and halving scales the UVs exactly; blockier texels only make the seam more visible.
+  - D2 reduces such seams by subdividing every near quad. Our C40 default puts flagged polygons on D1's light fixed
+    level (0x60).
+  - CHI_POLISH_SUBDIV_TALL=H (d1models): quads >= H tall get the full near flag 0x20. H=512 cost 4.3 % frames at
+    fps_drop_2 (0.495 -> 0.473): breaks the C40 rule, not adopted. Sheet: findings/c67_facade_subdiv_tall_sheet.png,
+    user crop findings/c67_user_affine_seam_crop.png.
+  - Options: (a) the user turns on perspective_texturing (host-only; removes all affine seams); (b) a PS1-native
+    engine change: subdivide only quads whose screen-space depth ratio is large (D2's diff*4 > minZ-350 test) in
+    D1's light handler.
+- **C70 quay wall "wrong position" (Polish 16.10. 20:4x):**
+  - The placement matches D2. DriverLevelTool world OBJ of D2 and of var_c45_tv2_day, top-down at the user's point:
+    the same bridge, the balustrade (1114) on the bridge edge, water on both sides. OBJ mapping: D2 X = -ox*4096,
+    Z = oz*4096; D1 the same.
+  - The converter puts 1114/1115 at exactly 1.32 x D2's offsets (D2 dz -527 -> D1 -696; 1115 at y 1014 = D2 768).
+  - There is no object within 1600 units of the car at 202133, yet the user's shot shows concrete wall faces at the
+    car. Those are stretched near-camera polygons of the long quay-wall strips (1114/1115, 9462 long, running 696
+    south of the car): the C45 near-clip family, not a position error.
+  - The fix is the C45 round 3 engine spec (near-Z rejection in the polygon emitters, Chicago-gated). No data change.
+  - Sheet: findings/c70_quay_position_sheet.png.
+- **C63 LA by Day step 1 (Polish 16.10. 23:4x), route C:**
+  - `polish_laday.py` (CHI_POLISH_LA_DAY=1; `python polish_laday.py OUT.lev`, all inputs read from the disc via
+    inputs.py) builds the swap table work/polish_la_day_table.json and writes it into LA.LEV:
+    - Night textures: LA world textures (not special/car pages, used by models, not ground/sprite/HUD names) with
+      > 30 % dark opaque texels, or lit window grids (> 8 warm blobs).
+    - Donors: NY/SF/Miami world textures that read as day (mean lum >= 90, < 30 % dark), not ads (saturation
+      <= 0.45, name filter). The match uses a 16x16 edge signature, aspect within 2:1, a same-size bonus, max 3 reuses.
+      Roads swap only with donor roads.
+    - Design list: lit shopfronts / landmarks (few warm blobs, or landmark names), top 24 by use x area:
+      findings/c63_la_day_design_list.json.
+  - Writing: raw spooled pages are patched in every area copy; resident compressed pages are re-encoded and the
+    TEXTUREINFO perm/special sizes updated (Lev.build(keep_layout=False)).
+  - Result var_polish_la_day_3.lev: 168 night textures -> 144 swaps + 24 Design. In game in the Chicago slot (day
+    look, Chicago day sky as a stopgap) LA reads as day (findings/c63_la_day_sheet.png).
+  - A few unsuitable donors remain (a "Computers" sign, a helicopter ad, a poster): add them to AD_WORDS / a
+    Design exclusion list.
+- **C46/C56 sky d2v2 (Polish 16.10. 23:5x, Design QUEUE 6c):** polish_sky CHI_POLISH_SKY=d2v2 (package time):
+  - cap v0..26 = D2 row-0 mean colour; D2 clouds y0..83 -> v26..61; skyline y84..167 -> v61..108 (horizon v108);
+    horizontal box 2:1;
+  - by day v102..108 blend 25 % toward the skyline base colour (no haze ramp);
+  - reflection v108..126 = flipped D2 y167->126 at 0.5, then 35 % toward (176,186,198) day / (38,38,35) night.
+  - Versioned work/var_polish_c46_sky4.BIN. Captures day + night at bridge and riverbridge with var_combo2:
+    findings/c46_d2v2_sky_sheet.png (with Design's D2 reference).
+  - Seen: at street level the skyline band still reads as a big dark block behind the near buildings. The pale
+    translucent rectangles above it are Chicago geometry, not the sky. Coloured speckles on the river at
+    riverbridge (day and night) are a separate water-texture issue to check.
+- **C63 LA day v4 (Polish 16.10. 23:5x):**
+  - polish_laday.reviewed_table() adopts Design's review (design/la_day_swap_review.json: 106 keep, 15 replace with
+    named donors, 23 LA signs/posters excluded = unchanged) and Design's CLUT-only repaint recipe for the 24
+    landmarks/shopfronts (design/la_day_repaint.py recipe(); same pixels, day CLUT).
+  - Used automatically when the review file exists (CHI_POLISH_LA_DAY_REVIEW=0 = matcher only).
+  - Level work/var_polish_la_day_4.lev: 121 swaps + 24 repaints. Sheet: findings/c63_la_day_4_sheet.png.
+  - Some kept LA textures still show lit windows (e.g. DT53, a window grid on Design's sign_keep list, and a few
+    facades under the 30 % dark rule): Design's call.
+- **Sky d2v3 (Polish 17.10., Design QUEUE 8):**
+  - CHI_POLISH_SKY=d2v3 (polish_sky._d2_v2(v3=True)): Lanczos + UnsharpMask(1, 60, 2) for the reductions; cap
+    v0..12; clouds v12..61; skyline v61..108; by day v84..108 blend 40 % toward (176,186,198) with floor (110,118,128);
+    6c reflection.
+  - work/var_polish_c46_sky5.BIN (sky4 deleted). Sheet: findings/c46_d2v3_sky_sheet.png.
+  - The dark block at bridge still renders (80,88,88) although the dome's v84..108 is now >= (110,118,128): that block
+    is NOT (only) the dome. Next: a GP0 capture there to see which primitive draws it (far geometry / C73?).
+- **LA day v5:** Design's recipe now repaints 45 textures (DT53 + 20 more lit ones); var_polish_la_day_5.lev =
+  121 swaps + 45 CLUT repaints (findings/c63_la_day_5_sheet.png); _4 deleted.
+- **C63 LA by Day, engine part (Infrastructure 17.10.):**
+  - Package: `CHI_LA_DAY_LEV=path` (build_package, opt-in) copies the LA day level to assets/la_day.lev at the next
+    1000-sector boundary after the last relocated file (LBA 348000 with day+night+sky+music) + an `[[overlay]]`;
+    the sidecar grows to 37 words (29-36 = LA day's 8 level-table entry words).
+  - Plugin (driver_chicago.c, `s_have_laday` / `s_la_day` / `la_day_active()` = slot on, LA row, CITY 3, mission 0x7C):
+    - menu: the LA row's confirm becomes Miami's 0x001C444C (Day/Night screen) on both menus;
+    - the Day/Night remap: with the LA row (s_virtual V_LA) 0x78 = day, 0x79/0x7D = night, mission back to 0x7C;
+    - level table entry 3 = LA day entry while active (LA's own otherwise; story LA missions != 0x7C stay night);
+    - LOOK_CITY / C3 = 0x7F (chday), SUN_CITY follows (D1's day sun + glare);
+    - night flag 0x80096850 cleared each vblank (LA's Take a Ride script does not set it: LA's night look is
+      LOOK_CITY == 3, e.g. FUN_0002360c `night_flag || LOOK_CITY == 3`; brightness 0x80097128 is 0x80 in both);
+    - sky immediates 0x8004EDE0/EC/EE00 = Miami day 4 / rain 6 (CHI_LADAY_SKY=n: 7 NY, 10 SF; rain n+2), present in
+      the original SKY.BIN too;
+    - music: the mission-parse hook writes MUSIC_XOR = 2 ^ ((mission+3)&7) -> song 2 ("The Briefcase"); the C60 chase
+      table gives song 2 its own chase position. The parse also runs from the in-game script (0x80068C6C, s0 is not
+      the mission there), so LA day keys on the mission word, not s0.
+  - Sanity (devtest c63, var_c70r3 pair + var_polish_la_day_5): LA day = entry3 0x2A7B0800 (LBA 348000), night 0,
+    look/sun 0x7F, sky 4, song 2, drives; LA night = LA's own entry 0xCB5800, look 3, sky 2, song 7 (unchanged);
+    Chicago day = sky 13, song 8 (unchanged).
+  - Open: the Day/Night screen's background is the same picture for every city (as for Chicago); setup_chicago (the
+    user's own build) does not build the LA day level yet (needs polish_laday from the disc + CHI_LA_DAY_LEV);
+    host-only list: the LA day switch is part of the plugin-logic row.
+- **The bridge "dark block" is geometry, not the sky (Polish 17.10.):**
+  - With the colour-coded test sky (CHI_POLISH_SKY_TEST=1) the sky shows its test colours around and above, while
+    the block stays near black (8,8,8) as tower silhouettes. With the d2v3 sky it reads (80,88,88).
+    Sheet: findings/c46_dark_block_is_geometry.png.
+  - The GP0 ring at that spot holds ~985 packets per game frame, and the dome / far towers did not show up in the
+    decoded composite, so the drawing function could not be attributed this way.
+  - So: distant towers drawn dark (far LOD models and/or the distance colour fade), where D2 shows them blue-grey
+    and textured.
+  - Route: Infrastructure (C73 draw distance / far LOD, plus the depth-cue far colour for Chicago day). Not
+    fixable in the sky data.
+- **Sky dome lower band / "pale ghost towers" = VRAM conflict (Polish 17.10., river view 222505, d2v3):**
+  - The 12 dome polygons (OT 0, tpage 8) read u 0..255 / v 0..125 of page 8 (VRAM x 512..575) with per-piece CLUTs.
+  - The VRAM dump shows our D2 sky correctly only in u 128..255 (x 544..575). At x 512..543, y ~15..226 sits the
+    city-selector preview picture (a car in a city, rounded frame), uploaded AFTER the sky (it also covers the sky
+    rows). So dome pieces 0/1 of every band draw the preview: the pale translucent "towers" up top and the dark
+    lower band.
+  - My earlier test sky only changed the right half, which is why the block looked like geometry. Infrastructure's
+    "LA's dome texture" is this overwritten area.
+  - Fix route (Infrastructure, plugin/frontend): upload the selector preview only while the frontend runs, put it
+    in a VRAM area the level does not use, or re-upload the sky pieces after it. No data fix: SKY.BIN is already
+    right. Sheet: findings/c73_sky_vram_overwritten.png.
+- **C45 corr5 (Polish 17.10.): smoother loading without the texture cost.**
+  - CHI_POLISH_AREAS_SHARE (area merge limit, x CHI_AREA_TEX, default 1.1) = 0.8 gives 16 areas instead of 15, and
+    624 downscaled textures, fewer than the base layout's 661.
+  - New CHI_POLISH_TEX_PROTECT=1 (polish_tex.protected / LANDMARK_PREFIX: NAVPIR, ARTINST, MRCHMRT, WRG*, FMNH,
+    ADDLER, CHINA*, SDRFLD/MEGFLD, JOHNH, STOLHA, 333NW, CHISTR, SDTL, CABGRN, WICKL, STNICH, EL*, SEARS, ...) keeps
+    landmarks last in the halving order.
+  - corr5 = CHI_ROADS=1 + AREAS=2 + CORRIDOR=2 + AREAS_SHARE=0.8 + TEX_PROTECT=1: 654 downscaled, 0 landmark
+    textures halved (base 88, corr4 117). Generic textures take the difference (+371 K texels beyond base).
+  - Routes (scratchpad routes6p.py = Infrastructure's routes6 on copy polish / 4470): corr5 2 switches, 4 stalls,
+    25.4 FPS vs corr4 4 / 7 / 24.1 in the same harness. Every route ends in a wreck after 9-22 s in both levels.
+  - Levels work/var_polish_c45_corr5_day/_night.lev. Table: findings/c45_corr5_tradeoff.png.
+- **C70 quay clean-up (Polish 17.10., user R30):**
+  - CHI_POLISH_QUAYCLEAN=1 (convert.shore_walls): our generated SHOREWALL fillers (model 1215, 1500 x 2000, top
+    40 below the bank) are dropped within QUAY_R=1600 of Driver 2's own quay-wall lines (1113/1114/1115; 184
+    segments from D2's cell objects: origin + model z axis rotated by yang, 7168 D2 units). 257 of 4616 fillers
+    dropped city-wide; beach walls elsewhere stay.
+  - The water tiles (y 1084) already fill the river below D2's quay walls (which reach 1014).
+  - Level work/var_polish_c70_qc1_day.lev (CHI_ROADS=1 + the switch). Sheet next to the user's quay 3 shots:
+    findings/c70_quayclean_sheet.png.
+- **Sky d2v4 (user R30):** the d2v3 haze blend started at v84 and left a bright step across the towers. d2v4 blends
+  the whole skyline section v61..108 (40 % toward (176,186,198), floor (110,118,128)); the reflection below as before.
+  work/var_polish_c46_sky6.BIN (sky5 deleted). Sheet: findings/c46_d2v4_sky_sheet.png.
+- **C63 LA day v6 (Polish 17.10., user R30 + Design QUEUE 10):**
+  - Repaint v2: Design's role-based la_day_repaint.recipe() (45 textures).
+  - Coverage pass in reviewed_table(): every other LA world texture still night-painted (opaque texels > 30 % dark or
+    mean lum < 70; not swapped / repainted / sign_keep; not cars, wheels, HUD, peds, sky, sea) gets a CLUT-only day
+    version: vegetation (VEG_WORDS by name, or a mostly green palette) via Design's veg_clut, the rest via day_clut.
+    31 textures: veg GRASS02, TREE, BARRIER; other: far / LOD ground tiles DT2-35A/B and DT3-11B, sand, the airport
+    apron, rocks, props (bench, bin, phones, meter, cones, barrel, barriers, billboards, signs). List:
+    findings/c63_la_day_6_cover.json.
+  - LA day sky: polish_laday.la_day_skybin() = D1's 13 + Chicago 13/14/15 + Design's LA day sky as **index 16**
+    (free) -> work/var_polish_la_day_sky1.BIN. Infrastructure: CHI_LADAY_SKY / the plugin should set sky 16 for
+    LA day.
+  - Level work/var_polish_la_day_6.lev = 121 swaps + 76 repaints. The capture used a test SKY.BIN with the LA sky
+    in slot 13 (deleted afterwards). Sheet: findings/c63_la_day_6_sheet.png (trees green, warm LA haze sky, props
+    lit by day).
+  - Open: some palm fronds still read dark green-blue (Design's veg colours); ROD24 / DT53 were not in the
+    captured views.
+- **C63 LA day v7 (Polish 17.10.):**
+  - Conflict resolved by pixels and users: DT2-35A (96x96) is the PALM sprite (also referenced by the
+    DETAIL_ROAD/JUNC tile models), DT2-35B its trunk strip. The far-street texture is **DT3-11B** (asphalt with a
+    dashed centre line, on 32 tile models).
+  - v7: Design's VEG_RECIPE per name (palm/tree/wall -> veg_clut v2, GRASS02 -> dry grass, SAND/ROCKS01/BARRIER ->
+    flat_clut); DT3-11B -> match_clut to the near road's day donor (ROAD2A -> FRISCO ROAD1: luminance quantiles +
+    tint, lane markings kept); Design's ROD24/DT53 tweaks via recipe().
+  - work/var_polish_la_day_7.lev (_6 deleted). Sheet: findings/c63_la_day_7_sheet.png (palms sunny green, far road
+    matches the near road, sand/grass/rocks by day).
+  - Seen: black triangle shards around a crash (debris / crash particles still night-dark, likely on a special/car
+    page): next coverage item.
+- **C63 LA day v8 (Polish 17.10.):**
+  - Night-only leftovers that the engine draws by name (not on models, LA page 2/7): DEBRIS (crash shards, dark
+    0.55) -> day_clut (ENGINE_DAY in polish_laday).
+  - SMOKE stays: it is drawn additive, and a light smoke CLUT became a white blob in the capture. SKID is already
+    mid-grey; FLARE1/LIGHT/SUN2 lamp halos follow the engine's night flag.
+  - work/var_polish_la_day_8.lev (_7 deleted). Sheet with a crash: findings/c63_la_day_8_sheet.png (the cop crash
+    shows no black shards).
+- **C70 r2 quay fill (Polish 18.10., user R31):**
+  - At the user's pose (D2 -181797,-100505) the circled pieces are D2's lower river walk: model 1000 (a 1204-tall
+    face at y 991, left), 1115 (lower wall), boxes 117/119/122 at y 991; plus our SHOREWALL filler.
+  - CHI_POLISH_QUAYFILL=1 (convert, boxes around the 3 user poses, or "x,z,r;..."): drops QUAY_DROP = 1000, 1115,
+    117, 119, 122 and fillers inside the boxes, and adds water tiles at the river's level (y 1084) on every 1500
+    sub-cell not under a water tile whose road-map levels are water or only low (the lower walk): 13 objects
+    dropped, 8 water tiles added.
+  - Level work/var_polish_c70_qc2_day.lev (+ QUAYCLEAN; qc1 deleted). Sheet: findings/c70_quayfill_sheet.png
+    (the left slab is gone).
+  - Remaining: the dark band right under the balustrade is the balustrade model 1114's own wall face (one model with
+    the railing). Removing it needs a balustrade-only variant of 1114 inside the box (possible, ask the user).
+- **C70 r3 quay clean-up qc3 (Polish 18.10.):**
+  - CHI_POLISH_QUAYFILL=1 now works on the whole lower river-walk stretch around quay_wall. Sites = D2's lower-walk
+    pieces (1000/1115/117/119/122 below the street) within 12000 of quay_wall: 23 sites; everything within 2500 of a
+    site is cleaned.
+    - lower-walk pieces and our fillers dropped;
+    - the balustrade models 1113/1114 swapped for rail-only copies QRAIL1113/QRAIL1114 (convert.rail_only: polygons
+      reaching > 60 below the origin collapsed; models 1216 -> 1218);
+    - water tiles at y 1084 on uncovered water / low-only sub-cells: 38 objects dropped, 14 water tiles added.
+  - Levels work/var_polish_c70_qc3_day/_night.lev (+ QUAYCLEAN; night CHI_D2_LEV=night + CHI_NIGHT_MOON=1); package
+    env CHI_POLISH_SKY=d2v5. Sky d2v5 = Design's levels pass (design/sky_d2v5_levels.py) after d2v4, day only:
+    work/var_polish_c46_sky7.BIN. Sheet: findings/c70_qc3_sheet.png.
+  - Side effect: where the lower walk's wall (1000) closed the gap, the car can now drive off the quay into the river
+    (drowns), as in the day capture.
+- **C70 qc4 (Polish 18.10.):** removed lower-walk pieces keep their collision. Instead of being dropped, QUAY_DROP
+  objects inside the stretch use invisible copies QGHOST1000/1115/117/119/122 (rail_only with every polygon
+  collapsed; collision block kept; models 1218 -> 1223). Only our SHOREWALL fillers (no collision) are dropped.
+  Levels work/var_polish_c70_qc4_day/_night.lev (qc3 deleted). Check run at the user's pose: the car stays on the
+  street (end y 176, not wrecked): findings/c70_qc4_day_check.png.
+- **C63 LA day v9 (Polish 18.10., Design R31):**
+  - No donors for roads / paths: names in Design's VEG_RECIPE skip the swap. ROAD2A, ROAD01A, NEWROAD3/4, PATHC,
+    BCKLANE/2 use asphalt_clut on LA's own pixels, and the far road DT3-11B uses the same asphalt.
+  - Every donor CLUT goes through Design's la_grade_clut. VEG_RECIPE v3 (trees, trunk_clut, cone_clut).
+  - work/var_polish_la_day_9.lev = 114 swaps + 76 repaints (_8 deleted). Capture along the user's la day 2 spots:
+    findings/c63_la_day_9_sheet.png (uniform asphalt, no white intersections).
+  - Open: some facades still show lit yellow window grids (textures under the night thresholds or on Design's keep
+    list).
+- **C63 LA day v10 (Polish 18.10.):** Design's 46 repaints + the stronger la_grade_clut; work/var_polish_la_day_10.lev
+  (114 swaps + 77 repaints; _9 deleted). Sheet: findings/c63_la_day_10_sheet.png.
+  - Bug check "olive palm trunk": GPU capture at the spawn. The olive pole is RODPOST (page 1, 208,160 16x64, olive
+    night CLUT; on Design's sign_keep list), not the palm. The palm model 304 is fronds DT2-35A + trunk DT2-35B
+    (poly tex 12 = detail 12, CLUT 12), and its CLUT in the level equals trunk_clut (brown).
+  - "Black cones": CONE2 is the only cone texture (model 348 CONE_TASTIC); its level CLUT equals cone_clut (orange),
+    and cones render orange in the captures. The dark shapes beside the player car are its wheels.
+  - Remaining: one lit window grid on a brick facade (third frame).
+- **C70 qc5 + sky d2v6 (Polish 18.10., user R33):**
+  - The sloped quay walls are the real ones: 1113/1114 faces and 1115 stay as D2 has them.
+  - CHI_POLISH_QUAYFILL=2 makes only the vertical fronts standing before them invisible (1000 and the lower-walk boxes
+    117/119/122 -> QGHOST copies, collision kept), with no rail-only swap. The water fill stays.
+  - Sky CHI_POLISH_SKY=d2v6 (day only): Design's d2v5 sky rows, skyline band 0.85*(0.8c) + 0.15*(100,104,108): tower
+    darks ~ (99,105,111) instead of (137,144,154). Reference towers (user's D2 shots): (124,119,117) / (70,74,67).
+    work/var_polish_c46_sky8.BIN (sky7 deleted).
+  - Levels work/var_polish_c70_qc5_day/_night.lev (qc4 deleted). Sheet: findings/c70_qc5_sheet.png. In the capture
+    drive the car jumped near the gate house; not wrecked.
+- **C63 LA day v12 (Polish 18.10., Design QUEUE 15-17):**
+  - No donor swaps any more. polish_laday.v12_entries() + write_entries() (default mode CHI_POLISH_LA_DAY_MODE=v12;
+    "reviewed" = the old donor pipeline) take Design's night_targets().
+    - Textures with > 1 % lit pixels -> la_day_pixels.day_v3 (new 4-bit indices + CLUT written into every page copy);
+      the rest -> day_v2_clut (CLUT only).
+    - VEG_RECIPE names keep their recipes (veg v4); DEBRIS keeps its day CLUT.
+    - 178 entries: 128 pixel, 32 CLUT, 17 recipe, 1 engine.
+  - work/var_polish_la_day_12.lev (_11 and design/out/design_laday_test.lev deleted). Capture from the user's la day 3
+    start: findings/c63_la_day_12_sheet.png. The LA sky still needs Infrastructure's index-16 hookup for the probe.
+- **Map items from "d2 cars 5" (Polish 18.10., partial):**
+  - Sand patch (snapshot 150740, D2 45600,-228437): all sand models there (75/107/109-111, texture SAND) and their
+    SUBDIVISION records are remapped correctly (no D2 UVs in models or the lump). The GP0 capture shows the darker
+    strip as sub-quads drawn with the SAND CLUT but D2's original SAND UV rect (192..255, 224..255), e.g. pc
+    0x8002D2DC/0x8002CD94/0x8002CD20, OT 3036/3543, next to correct sub-quads of the same object. The source of
+    those UVs is still open: an engine-side tile UV path (Infrastructure trace of 0x8002D2DC's UV source at that
+    pose).
+  - Monument water (150819, D2 46494,-226366): the hole beside the monument is a no-surface area that sea_kinds
+    classifies as "inside" (enclosed -> plain ground). D2 shows its global water level through such holes.
+    CHI_POLISH_INSIDEWATER=R (water tiles on inside cells within R 3000-cells of lake/river water) does not reach the
+    monument even at R=3 (853 cells city-wide, too many). Needed: a per-hole rule (basin vs building interior, e.g.
+    no building object over it).
+- **C75 basin water (Polish 18.10.):** CHI_POLISH_INSIDEWATER=basin (convert.exposed_inside_cells).
+  - Each enclosed no-surface hole ("inside", 633 holes) is judged from Driver 2's own objects in it and its 1-cell
+    ring. It is a basin (gets water tiles) if some object carries a water-edge texture (WATER_TEX: RIVER, BUKFON,
+    FOUNT, POOL, WATER) and <= 35 % of the objects are 1000+ high; building blocks are facade-dominated.
+  - D2's overhead map has no water colour at Buckingham Fountain (13/9 grey) and the radius rule could not reach it.
+  - Result: 11 basins, 134 road cells, including the fountain (16 of its 58 objects are tall centre pieces). Two
+    random holes (523,893) and (399,783) stay dry.
+  - Level work/var_polish_c75_basin1_day.lev (+ CHI_ROADS, QUAYCLEAN, QUAYFILL=2). Sheet:
+    findings/c75_basin_sheet.png (water in the basin from the south).
+- **C75 basin check (Polish 18.10.):** D2 top-down renders of the 11 basins (findings/c75_basins_d2_views.png):
+  - real (no D2 geometry, so D2's water level shows): Buckingham Fountain (87 cells); the 18-cell channel at D2
+    (-14311,13143); 4 x 5-cell channels at x -155852;
+  - false: 5 holes of 1-3 cells on the north lakefront (x -183124) lie under building roofs.
+  - Rule tightened: BASIN_MIN = 5 road cells, giving 6 basins. Level work/var_polish_c75_basin2_day.lev (basin1
+    deleted).
+- **R34 (Polish 18.10.): quay / sky / fountain, pair work/var_polish_r34_1_day/_night.lev (package env CHI_POLISH_SKY=d2raw)**
+  - Quay: reproduced the user's 3 quay + sky 6 views with the CHI_TEST_POSE hook (pose file "x y z angle", angle =
+    RAM 0x8009B19C & 4095). The "see-through" far quay was our QUAYFILL=2: the lower-walk boxes 117/119/122 are the
+    quay seen from across the river. CHI_POLISH_QUAYFILL=3 hides only the vertical front 1000 (collision kept); the
+    boxes and the sloped walls stay, and the water fill stays.
+  - Sky CHI_POLISH_SKY=d2raw (day; night = d2v4): D2's art only placed (cap v0..12 flat D2 top colour, clouds
+    y0..83 -> v12..61, skyline y84..167 -> v61..108, reflection flipped at half brightness), Lanczos, no grading.
+    work/var_polish_c46_sky9.BIN.
+  - Fountain: basin water tiles at BASIN_Y = 24 (CHI_POLISH_BASIN_Y; just under street / sand level -22) instead of
+    the river's 1084, for all 6 basins.
+  - Sheet: findings/r34_quay_sky_fountain_sheet.png.
+- **C63 LA day v13 (Polish 18.10., Design R34 QUEUE 18-20):** v12_entries now uses la_day_pixels.day_v3 (region recipe,
+  detail transfer LA_DAY_DETAIL=0.5) on every night target (160), the VEG_RECIPE names their own recipes (17), DEBRIS
+  as before. work/var_polish_la_day_13.lev (_12 and design/out/design_laday_test.lev deleted). Sheet:
+  findings/c63_la_day_13_sheet.png. Some facades look blotchy/blue-grey (busy window regions): Design's call.
+- **R35 (Polish 18.10.):**
+  - LA day v15 = v11 buildings + v14 vegetation/props (polish_laday.v15_entries, default mode CHI_POLISH_LA_DAY_MODE=v15):
+    the reviewed donor swaps + Design's v11 day CLUTs, frozen in design/la_day_v11_cluts.json (35 CLUTs; the repaint
+    code changed since the user approved v11), then v14's entries for VEG_RECIPE / props / debris on top. All 520
+    building textures are identical to the user's approved D:/temp/la day 3 la_day.lev. work/var_polish_la_day_15.lev
+    (_14 deleted). Sheet: findings/c63_la_day_15_sheet.png.
+  - Bridge hole at quay_wall: the converter dropped D2 street-level tiles (PATH1 149) whose road cell the overhead map
+    paints as river. CHI_POLISH_KEEPSHORETILES (default 1) keeps tiles that stand on a real D2 surface.
+  - Quay city-wide: CHI_POLISH_QUAYFILL=4 = mode 3 for every D2 lower-walk site (4853 sites: front 1000 invisible,
+    collision kept; fillers dropped; water tiles on water / low-only cells at the nearest water level).
+  - Basins: water continues one cell under the surrounding sand (at BASIN_Y 24, hidden below it), so no gap at the rims.
+  - Pair work/var_polish_r35_1_day/_night.lev (r34_1 deleted). Sheet: findings/r35_map_sheet.png (bridge hole
+    filled, fountain water continuous, far quay visible).
+- **S1 per-area texture packing (Polish 20.10.), result: not the lever we hoped for.**
+  - Diagnostic CHI_POLISH_PACKSTAT=1 (texrepack): budget 13 pages per area - 4 permanent = 9 per area. Chicago areas
+    need 6.3-15.8 pages of area textures at full resolution (101-175 % of capacity; only area 9 fits).
+  - Ideal simulation (every area packs its own set at 92 % fill, halving largest first): 352 textures halved somewhere
+    (1297 area-halvings, 64.6 page-area units lost). With +1 page per area: 298; +2: 246; +3: 199. Today: 654 halving
+    operations on ~330-345 distinct textures, ~18.4 page-equivalents (~80 page-area units).
+  - Of 589 Chicago textures, 274 are used by in-memory models (fixed UVs in every area) and 3 by tiles; only 312 are
+    area-only. CHI_POLISH_S1=1 (polish_s1.py + texrepack S1_LOCAL/S1_RESERVE/remap_area + convert per-area model
+    remap): the 311 local textures packed per area (73 halved somewhere), but the global pass, squeezed by the page
+    reserve, halved its textures harder (574 operations, roads to a quarter). Net: no real improvement.
+  - Conclusion: the binding limit is VRAM pages per area, not packing. Gains need more pages per area: S2 (CLUTs to
+    rows 496..511 = +1 page), the 2 special (car) pages, D2-style layout (C77), or streaming the in-memory models'
+    textures per area. Kept behind the switch (default off); levels deleted.
+- **S1 options for the user (Polish 20.10., estimates):** builds with CHI_POLISH_EXTRA_PAGES=k (texrepack budget + k pages per
+  area, estimate only) on today's Chicago day: halved textures 654 today -> +1 page 557, +2 472, +6 66 (current packer;
+  the ideal per-area packer would reach 280 / 247 / 51). Slot-15 short page (~0.67 page) -> ~590. In-memory models
+  visible per area: 45-106 KB (D2 sizes; the in-memory lump is 168 KB): streaming them per area makes all their
+  274 textures per-area packable (~350-400 halved, ideal sim 352). Miami: already full (7 permanent + 5-6 area
+  pages + 2 special = 15); a repack frees 2.7 pages of exact duplicates but nothing visible changes (no halving in D1).
+- **S1 slot-15 short page (Polish 20.10., data side of Infrastructure's CHI_CLUT_STRIP + CHI_S1_SLOT15):** CHI_POLISH_S1_SLOT15=1
+  (texrepack): the most-shared Chicago textures (permanent first, then by number of areas) fill a 5th permanent page,
+  256 x 170 (rows 170.. stay 0), flags 1|0x80, ≤ 31 CLUTs, not counted in the area slot budget. Today: 10 textures,
+  42 K of 43.5 K texels; halved 654 -> 585. Test level work/var_polish_s1_slot15_1_day.lev (page index 9).
+- **Q36 B: in-memory models streamed per area + per-area texture packing (Polish 21.10.):**
+  - CHI_POLISH_STREAM_INMEM=1 (convert.stream_keep): 319 of 497 in-memory models move into the area spools. Kept
+    resident: tiles, LOD targets, sky slots, lights, the water model, unplaced, quay sources, instance sources of kept.
+  - Together with CHI_POLISH_S1=1, 540 textures are packed per area (each area's model copies get their own UVs).
+  - Halved placements 56 % -> 47.5 %; lost texels 82 -> 64 page-area units (= the ideal-packing simulation).
+  - RAM: in-memory lump 202 -> 67 KB, model spool buffer 98 -> 176 KB (net ~-57 KB). Area switch reads +62 KB on
+    average (S3 compression).
+  - Levels work/var_polish_opt2a_day/_night.lev (+ opt1 recipe). First look OK (findings/opt2a_first_look.png).
+  - Engine checks requested from Infrastructure: staging at buffer+0xA000, C30 carry / C33 guard, trailer size.
+  - texrepack prints "texture placements (Chicago, per area)" as the comparable metric (the old "downscaled
+    textures" count = halving ops of the global pass only).
+  - CARPAL_MERGE touches only car-model textures on the car pages (5/6). The bus is a special with its own
+    textures/slot: not affected.
+
+## Q42: scripted test runner on the debug server (Infrastructure 23.10.; core built, MCP wrapper next)
+- **Built (step 1):** `devtools/runner/` (session.py, report.py, __main__.py, tests/). `cd devtools; python -m runner list |
+  run NAME... [--port 4468] [--copy runner] [--build build-test]` -> devtest/_out/runner/<time>-<test>/ (steps.jsonl,
+  result.json, report.html, PNG, WAV, game.log). Session: menu(path), pose, drive, hold/press, wait_for, poke32, car(i),
+  find_model, screenshot(+baseline diff), audio(secs) -> WAV + metrics (rms, peak, clicks, silences). Verdict fails on a
+  failed check, crash or a real '-hang' dump; recovered watchdog snapshots ('-stall', FMV) are only noted. Tests (all PASS
+  23.10.): bus_head_on (C82: yaw 4-7 deg, contact 1235-1248), out_of_tape (C81: Out of Tape at +17 s, 2 min on, no hang),
+  undercover_interview (C84/C80: timer runs, overlay unpatched, 5 s WAV rms 6.6k, 0 clicks).
+- **Watchdog change (driver_personal.c):** a '-hang' snapshot whose game moves again is renamed '-stall' (Undercover's
+  intro FMV stops the VSync counter for > 3 s and made a false '-hang' dump every time).
+- **MCP wrapper (step 2, 23.10.):** `devtools/runner/mcp_server.py` (stdio JSON-RPC, no extra packages): tools launch,
+  stop, status, menu, pose, press, hold, drive, read_ram (<= 256 B), write_word, wait_word, screenshot (+baseline), audio_capture,
+  list_tests, run_test; one session at a time (devtest/runner, port 4468), compact JSON, tool prints go to stderr. Checked
+  with a stdio client (launch -> Miami -> drive -> screenshot -> 3 s WAV -> stop). Not registered in any MCP config (a
+  user / Strategy decision): command `python D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/devtools/runner/mcp_server.py`.
+- Design (as drafted):
+Goal: Playwright-style, repeatable game tests instead of one-off scratch scripts; one API for humans, agents (MCP) and
+batches. Built on what exists: dt.prepare / dt.launch (copies, ports, BELOW_NORMAL), the TCP debug server (set_input, ram,
+shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
+- **Package** `devtools/runner/`: `session.py` (one instance: build, level(s), state features, env, port, copy; start / stop
+  by PID; collects run.log + dev/dumps), `steps.py` (actions), `expect.py` (assertions), `report.py` (JSON + one HTML page
+  per run: steps, timings, screenshots, diffs, WAV links, verdict), `cli.py` (`python -m runner run tests/x.py`).
+- **Actions:** `menu(path)` (named navigation: "take_a_ride/chicago/night", "undercover/new_game", "selector/interview";
+  the menu sequences copied between scripts today live here once), `spot(name)` (spots.json pose), `press(btn, hold)`,
+  `hold(buttons, secs)`, `drive(policy, secs)` (straight / random / route, reverse when stuck), `turbo(on)`.
+- **Waits:** `wait_for(pred, timeout)` on RAM words (`ram(addr) == v`, `changes(addr)`), position, city, loading flag, a
+  run.log regex, frame / VBlank progress; a failed wait records the last state.
+- **Checks:** `screenshot(name)` + `expect_image(name, baseline, mask=, tol=)` (per-pixel / SSIM-like score, masks for HUD and
+  traffic), `audio(secs) -> WAV` + metrics (RMS, click detector = max step vs p99.9, silence gaps), `expect_no_hang()` (VBlank
+  counter + watchdog dump dir), `expect_ram`, `vram_check` (vramcheck.py as a step).
+- **Baselines:** `devtools/runner/baselines/<test>/<name>.png|.json`, replaced only with `--update-baselines` (reviewed).
+- **MCP wrapper** (`runner/mcp_server.py`, stdio): launch / stop / menu / spot / press / drive / wait_for / screenshot / compare /
+  audio_capture / read_ram / run_test; compact JSON results (paths, scores), never raw dumps (token rule).
+- **Rules kept:** one instance per agent port range, kill by PID only, no build-dev / user saves, no unapproved soaks, capped
+  output like run.py.
+- **First tests (today's scratch scripts):** chicago_night_drive (no hang, FPS), bus_front_ram (C82), engine_loop_click (C83),
+  newtown_no_cops (C79), interview_selector (C80 / C85), undercover_new_game (C84), D1 cities + extras load smoke. Effort ~1 day
+  for the core + MCP, then tests one by one. Host-only tooling (no PS1 relevance).
+
+## R43 analysis: Newtown cops, Interview timer, special damage room (Polish 23.10., offline)
+- **D1 mission script (MISSION.BLK):** index = 124 u32 offsets (entry e = [off(e), off(e+1))); loader segment table 0x8008C1E8
+  (key, value) pairs: entry = mission - key + value for the first key >= mission. Opcode sizes: byte table 0x8008BCE4
+  (mission_script_step 0x800687D4; specials 0x02 / 0x14 / 0x16 / 0x46 / 0x56 / 0x5E / 0x68). In-game interpreter
+  FUN_80068C6C: 0x31 = cops off (0x800976F8 = 0), 0x32 = cops on, 0x26 n = cop cap 0x80097760 (n < 5), 0x18 n = wait n s,
+  0x16 = message, 0x01 = end. Cop director FUN_80064A64 does nothing while 0x800976F8 = 0.
+  - LA Take a Ride 0x7C (entry 92): `a 2(45,1) 22(3) 37 2(10,22000) 13(x,z) 34(5) 2(52,0) b 32 26(2) 2(45,0)`.
+  - Newtown credits 0x7F (entry 95): `... 22(7) ... 2(66,0) 2(57,4097) 26(0) 31 2(52,0) b 2(45,0)` (no cops).
+  - Interview 0xAE (entry 118): `... 22(2) 2(39,1) 26(0) 31 13(-10500,-22144) 34(0) 2(66,0) 18(10000) 16("Well done!") 18(2) 1`.
+- **C79:** the selector's extras run LA's script → cops on, cap 2 (Newtown, Desert). Fix = plugin rewrite of 0x32/0x26 in
+  the MISSION_SAFE copy for V_NEWTOWN (Infrastructure).
+- **C80:** IVIEW.BIN overlay (LBA 127, 17120 B, 0x801E0000): timer 0x801E4278 (+2/update, 0x801E0738), red flash from 0xC00,
+  time-up branch 0x801E0714, clock draw 0x801E1248 (call 0x801E0424), init 0x801E1008. Fix = overlay patch only for the
+  selector's Interview (Infrastructure).
+- **C87 (48, 23.10.): Driver 2's damage zones for the special.** D1 DamageCar3D (0x8003FC98) = D2 bcollide.c, but lbody is a
+  fixed 0x104 and the nose is measured from the car origin; D2 uses colBox.vz / 2 per model from the body. Cave NOSE in the
+  unreferenced 'ready_cb_*' strings (0x800104E0..0x8001052B; ghq xrefs, lui/addiu immediates and pointer words checked),
+  jal from 0x8003FD70 ('addu v0, t1, a0' in the delay slot, NOSE does the moved 'mflo t0'): model 5 -> nose' =
+  (nose - SPBO) x SPLB >> 12 with SPLB = 260 x 4096 / (SPBZ / 2) (plugin 0x800933C0; CHI_C87=0 exe, CHI_C87_ZONES=0 plugin).
+  Runner special_zones: a side hit 500 behind the bus origin -> middle zone 2 = 4095 (Driver 1's rule: rear corner 3).
+  Scenery hits (0x8003FF0C, same 0x104 compares at 0x80040800..): NOSES in the S1 cave (jal from 0x800407E8, its 'mflo t2'
+  in the delay slot; NOSES does the moved 'sra v1, v0, 12', puts the car (s2) in t9 and jumps to the shared CORE at
+  0x800104E8; NOSE (car-car) = 'mflo t0; move t9, t2' + CORE). Runner special_zones (homing approach, contact position
+  logged): contact 351 behind the origin -> middle zone (D1 rule: rear); special_damage2 on specdmg2: coherent u+128
+  damage textures, player wall hits through NOSES fine.
+- **C82 SPTW from data (24.10.):** Polish's <lev>.spt.bin ("SPT1", n, civilian reference twistRateY, n x {model, twist})
+  -> build_package asset spctwist_day / night.bin -> plugin SPTW = 0x37 x twist / ref (the old table stays as fallback).
+  Chicago = the table (bus SPTW 12 checked in game); Havana 8 / 9: 100, 10: 50, 11: 180, 12: 420 (ref 224).
+- **Q45 B +64 withdrawn (23.10.):** Polish found D2's damage offset goes to U (cars.c adds DENTUVS to u0/u1/u2), the copies
+  now sit 128 texels right of the clean ones (D2's rule) -> CHI_Q45B_EXE default 0 (old DCAVE2: +128 at level 2 for level
+  byte 1); .spd.bin rows unchanged (DMG_OFF reads 128). Levels var_polish_specdmg2_*.
+- **C86 (23.10., build-dev regressions 47):** three load-delay hazards in our patches (R3000: the instruction after a load
+  sees the OLD register; the recompiler models it): c42w wheel rim `lw t9; addiu t9, t9, 0x65` (stale t9 -> rim 202, tyres
+  2x, every city), C37 MapHeight `lw v0, -8(s0); addiu v0, v0, -4096` (divisor from a instead of b in D2 cities -> wrong
+  ground heights, the camera jumped), C42B box offset (`lw v0; beq v0` and `lw t2; mult t2`). Rescheduled / nop;
+  exe_patches.load_delay_hazards() runs on every CLI use and refuses a patch set with a hazard. Runner: rim 101, Chicago
+  camera dy -1001..+301 -> -714..-555, bus_head_on PASS; slopes test identical old vs new exe at diag_ramp / slope_ref
+  (car physics uses FindSurfaceD2, hazard-free). **The probe 'special damage' (exe 784915f1) still has the tyre bug:
+  don't judge wheels there.** build-dev re-shipped (ff86c7e3) with setup_stamp.txt so prelaunch keeps the opt2d package.
+- **Q45 B engine side (23.10.):** exe c42d DCAVE2 (14 words, the cave's limit): after the row offset, a2 = (row == 5 * 256),
+  shift = 6 - a2 -> offset = ((L^1) ^ ((L^1)|level)) << 5 for the special: level byte 1 -> +64 at damage level 2, 3 -> none.
+  CHI_Q45B_EXE=0 = old cave. Plugin: specdmg_day/night.bin (build_package copies <lev>.spd.bin) -> spd_write_row5 at every
+  special swap / rebuild / choice change (CHI_Q45B=0: all 3). Checked: LTAB row 5 == the bus's spd row, wrecked bus textures
+  coherent. Lesson: never change an exe_patches default before the shared apply (the package guard breaks every dt.prepare).
+- **C85 (23.10., plugin, with C80's selector flag):** IVIEW hit counter 0x801E35B8 is stored at 0x801E0D7C (AC8235B8)
+  after the comment + speech; the X marks (0x801E1BCC, call 0x801E1674) and the stop at 4 (0x801E0828) read it -> the
+  store becomes 0 (CHI_C85=0 off; Polish's addresses, verified in IVIEW.BIN). Run: 18 comments, counter 0, no X, no end.
+- **C84 (23.10., regression from S4a):** Undercover > New Game -> black screen: FAIL-FAST unknown dispatch 0x9F079F08 (ra
+  0x80101B94 = FMV player). The model-table vblank treated main RAM 0x80115600.. as the model table outside a level too
+  (frontend heap / FMV player memory since S4a) and wrote s_empty_model there. Gate: s_lvl_beat (LVL_BEAT in the in-level
+  hooks d2sf / wheels / lod / area queue / mission parse), table work only within 30 vblanks of it. Verified: model-table
+  off = OK, build-dev = OK, fix = interview starts (timer runs); Chicago area switch carry still runs. Lesson: anything that
+  reads/writes the main-RAM model table must check that a level is running.
+- **C79 / C80 done (Infrastructure 23.10., plugin):** C79: mission_parse_entry (after the MISSION_SAFE copy) turns
+  '32 26(n<5)' into '31 26(0)' for V_NEWTOWN (CHI_C79=0 off); test: 0x800976F8 / 0x80097760 = 0 / 0 for 32 s. C80:
+  chicago_slot_vblank sets s_iv_sel at the selector's 0x7C -> 0xAE switch, clears it on a new frontend session (MENU_MARK
+  0 -> 0x0172001A); while set and CITY 2 with the overlay present (0x801E0714 = 0x28621000): 0x801E0738 and 0x801E0424 ->
+  0 (CHI_C80=0 off). Runs: timer 0 constant, no stopwatch; CHI_C80=0: timer +0x200 / 3 s, stopwatch, 'You ran out of
+  time! Loser...'. Overlay code patched in RAM: the runtime revokes native code compiled from changed RAM (README).
+  Host-only (M8: guest code patches the two words after the overlay load).
+- **Q32 re-measure:** see the C42 row. Specials' D2 damage twins sit +128 rows below the clean texture (DEN kind 0 → level 2
+  offset 128), 35-47 K px per special at full res; the 128-row slot can't hold a +128 twin. Free: page 8 top 8 K px, page 6
+  ~3 K px. -1 area page costs halved 56.0 → 71.2 %, lost 82 → 110 units (CHI_POLISH_EXTRA_PAGES=-1 run, opt2d recipe).
+- **C85 (selector Interview hits):** hit counter 0x801E35B8, ++ at 0x801E0D7C (after the comment + speech at 0x801E0C50..0x801E0D54);
+  X marks 0x801E1BCC (call 0x801E1674); end at 4 = 0x801E0828 bne → state 3; end text 0x801E061C. Patch: 0x801E0D7C → nop.
+- **Q45 B (CHI_POLISH_SPECDMG=1, default off; polish_specials._slot_layout_dmg):** [specdmg1 had the copies at v+64 = WRONG axis,
+  user saw noise] since specdmg2: D2's damage offset goes to U (cars.c adds DENTUVS to the u bytes of the clut_uv0/tpage_uv1/uv3_uv2
+  words); slot clean columns 0-127, D2 twin (u+128 on the D2 page, texels present) at u+DMG_OFF 128 = D2's own body rule; untwinned textures fill the rest. Uniform scale (binary search)
+  then per-texture per-axis growth (4 % steps), 3 packing orders; area-filtered downscale with palette re-quantise
+  (downscale()). <lev>.spd.bin = "SPD1", n, DMG_OFF, n x {model, 256 B level row: 1 shift / 3 none} (fitted clean polygon order).
+  Area kept vs D2 (specdmg2): 8 25.6 %, 9 30.2 %, 10 27.8 %, 12 28.8 % (without damage: 44 / 47 / 39 / 55 %). City + CLUTs unchanged.
+  Zone rows (48 a): exactly D2 DEN rows via fit_maps (0 zones differ; fewer entries only from quad merges / merged verts).
+
+## C40 day 1 (Infrastructure 24.10.): dense-spot measurement + cost breakdown + lever plan (no code yet)
+- **Method (runner, build-test 769db982 = build-dev + test-pose any city):** tests fps_spots (4 headings x 5 s standing,
+  10 s driving; FPS = PHASE 0x800970D8 / VBlanks x 59.94; GP0 packets per game frame from gpu_ring_stats; phase_hot static
+  diff = guest hot functions) + miami_dense_scan (Miami's dense views picked by GP0 packets per frame while driving 120 s).
+  Chicago spots = level starts (fps_drop_1 / 2, l_down_e / w); Miami = its 3 densest views (pose + wait_world).
+- **Numbers (standing avg / driving):** Chicago fps_drop_1 20.9 / 20.5, fps_drop_2 23.2 / 19.8, l_down_e 19.6 / (4.5 crash),
+  l_down_w 22.4 / 20.2 -> **21.5 / 20.2**; Miami (8695,419942) 26.6 / 26.7, (40329,422641) 24.3 / 26.7, (40504,417683)
+  24.8 / 29.1 -> **25.2 / 27.5**. Gap ~15 % standing, ~27 % driving. Packets per frame are SIMILAR (Chicago 670-2200,
+  Miami 1000-2000): at the same packet count Chicago runs slower -> the gap is mostly NOT the map's primitive count.
+- **Hot functions, share of guest samples (Chicago / Miami):** GlobalTimeStep 0x8001C214 3.3 / 0.0; FUN_8003E244 (from
+  FUN_8003A45C, car draw) 2.9 / 0.3; FUN_8001B380 (per-car matrix in GlobalTimeStep) 2.7 / 0.4; FUN_80067A44 (car-car box
+  SAT, from 0x80067838) 2.3 / 0.0; FUN_800305D0 1.7 / 0.3; 0x80011924 (C68 stub, per object) 1.4 / 0.0; FUN_800277D4
+  (near tiles, from 0x800287A4) 1.2 / 0.0; FUN_8007B1E8 (20 callers 0x80035C34.. = region / spool unpack, while standing)
+  1.2 / 0.0. Same in both: FindSurface 0x8001EEB4 9 / 9, object renderer 0x80030474 2.4 / 3.1, 0x8003DF94 2.4 / 2.4;
+  subdivision loop 0x80030C20 1.5 / 5.6 (Miami subdivides MORE). The Chicago-only extras add up to ~16 % = the gap.
+- **Ranked levers (expected gain, all Chicago / D2-gated, no visual change unless noted):**
+  1. Car-car pre-check per pair (C82 widened it to 2000 for ALL pairs: every traffic pair within 2000 now runs the full
+     SAT): window 1201 unless a pair has a big box (special / player PBZ) -> ~3-5 %.
+  2. Traffic cost: per-car matrix + physics with 6 resident models / more cars (FUN_8001B380, GlobalTimeStep): measure
+     cars-in-play Chicago vs Miami first; D2 traffic density as the reference -> 1-3 %.
+  3. D2 car draw: far cars to the low model at D2's distance (D2 models 118-131 polys vs D1's) -> 1-3 %.
+  4. Spool work while standing (FUN_8007B1E8 callers): find what re-spools each frame (C30 carry / S4 / area) -> ~1 %.
+  5. C68 stub (0x80011924, per object): a cheaper check -> ~1 %.
+  6. Near tiles (FUN_800277D4): Chicago's near-tile range -> ~1 %.
+  Prep for 1 (offline, 24.10.): two places widen pairs for ALL cars: the broad phase margin (FUN_8001FAFC: 90 + PBS high
+  half = player reach + the special's s_spc_reach, added to every car's AABB, R35) and the pre-check window (C82: 2000).
+  Per-pair / per-car versions need a model check (car+2 == 5, car == player) = ~11 cave words each; free cave words today:
+  ready_cb 3, S1 3, DCAVE1 5, DCAVE2 3 (no contiguous 11). Options: (a) the margin / window computed once per frame by
+  the plugin into gp words is NOT enough (per car); (b) free a cave by compacting a patched block (e.g. the C68 stub = lever 5,
+  or FUN_8001FAFC's own loop, rescheduled in place like C37); (c) a new dead-string cave (cave_audit + ghq xrefs + immediates).
+  7. Only then D2-style map rendering (per-object draw distance by size, D2 tile path): visual risk, gated; the ruled-out
+     list stays (lightpvs adopted, subdivision none rejected, tile merge dropped, PVS encoding exhausted, tighter margins = pop-in).
+
+## C88 / C89 cheats (Infrastructure 24.10., build-test 49c8578d / 07c68845; design: design_c88_cheats.md)
+- Words (zero block): INFM 0x800933C4, NGHT 0x800933C8, SPD2 0x800933CC, 0x800933D0 = C89's dummy; LOW GRAVITY = Driver 1's
+  hidden 0x8009D8E8. All off = Driver 1 unchanged.
+- **Low gravity (exe):** 0x8001D7D4 -0xAAA -> -0x1555 (1/2 g when 0x8009D8E8 != 0). Runner cannot hold a car in the air
+  (a pose lands within a frame): the feel is the user's check.
+- **Super speed (plugin):** SPD2 -> THRS = 2 x (Chicago's D2 value, or Driver 1's 4096 / Miami choice-3 4864): best speed
+  12.1 k -> 20.5 k units / s in 8 s. Reverse thrust doubles too. PS1: the menu code writes THRS.
+- **Infinite mass (exe):** GlobalTimeStep's mission-rule block 0x8001C9FC..0x8001CA4C rewritten without nops into flag
+  arithmetic (a2 / t2 &= mission rule, and with INFM &= car id != 0): the player is never moved by a car-car impulse.
+  Needs C82's TW (it sets t1 = 0x37 itself; the old 'addiu t1, zero, 0x37' is gone). Bus rams: player yaw 0 / 0 (/ 105
+  one miss) vs 12 / 59 / 7 without. No impulse doubling for the other car (no space; D2-like enough).
+- **C89 (exe):** the 3 game-start resets (0x80024838 / 3C / 48) store into the dummy word: Survival (type 0x13 confirmed)
+  keeps Invincibility / Immunity (runner survival_cheats PASS). Unconditional: cheats are opt-in anyway.
+- **Nightmare: blocked on a design question.** Driver 1 has only 4 cop data slots (0x800C4E38 + n x 0x7A8, FUN_80063B74
+  allocates, loops over 4): pursuit needs a slot, so "every car chases" = more slots (~2 KB RAM each + every 4-loop) or
+  "4 civilian-model pursuers at all times" (force cop spawns, keep the civilian model, felony on). The host test that only
+  set AI state 4 does not chase (17-21 'pursuers', none closing in).
+- **Nightmare 58 B estimate (every car chases; no build yet):** cop slots 0x800C4E38 + n x 0x7A8 (1960 B), 4 of them
+  (0x800C6CD8 end); AI records 0x80098950 x 0x50 (25), byte +5 = slot + 1. Sized for 4 (ghq + lui/addiu scan, 13 base
+  sites): alloc FUN_80063B14 / 80063B74, init 80063C60, clears 80016CE4 / 80064A64 / 8005474C / 800635C0 (to 0x800C6CD8),
+  4-loops in 8005474C (3), 800635C0, 800641C0, CheckScenaryCollisions (end constant +0x1960), index use 8001638C. Slot use
+  in Miami pursuit (2-3 cops): +0x4..0x3A0 header + route words, +0x758..0x7A8 state; 0x3A0..0x758 stayed zero. Guest
+  share of the slot functions < 1 % with 2-3 cops (only 0x80061C68 0.45 % in the cop range). RAM: 20 slots = +31 KB,
+  25 = +41 KB; free under the stack (S4): Miami 77, SF 80, LA 72, NY 14 KB, Chicago / Havana already host-only.
+- **"cheats 2" build (build-test 56bcef4a, user 62 / 63 B):**
+  - Menu layout 2 (plugin cheats_vblank): page 1 = CREDITS .. STILTS, ANTIPODEAN (row 6 as a proxy of 0x8009D8EC), PAGE 2
+    (row 7); page 2 = LOW GRAVITY, INFINITE MASS, SUPER SPEED, NIGHTMARE, PAGE 1 (rows 1-5, row 0 + rest hidden, room for
+    2 more). True values in the plugin while the screen is up, written back on leaving. Hidden rows = unlock word -3
+    (driver_gameplay.c unlock-all now leaves -3 alone). Page rows have no On/Off: runtime patch of the FRONTEND draw
+    0x801C765C..88 (psx_mod_write_code_word, checked word by word): skip On/Off when the unlock entry +4 is negative
+    (page rows -1; cheat rows forced >= 0, Driver 1's NULL row 6 has -1 there). Row 6 / page rows jump to the no-op.
+  - Cop slots (exe c88_slot_patches, CHI_C88_SLOTS=0 off): 24-slot array in plugin memory, address from zero-block words
+    SLOT0 / SLOT1 / SLOTM / SLOTE 0x800933D4..E0 (SLOTM = base - 0x4E38: it replaces 'lui 0xc' where the addiu is kept;
+    a first build had base - 0xC4E38 there and Driver 1's patrol cops never started a chase: runner cops_d1 vs a build-dev
+    copy found it). 14 adjacent 'lui 0xc / addiu' pairs -> 'lw / nop', 2 kept addiu, level clear / minimap / lost-pursuit
+    loop ends from SLOTE, seen / init / spot loops 4 -> 24; allocators, FUN_80063AA8 and the drop loop stay on slots 1-4.
+    Write trace on the old area: no writes. cops_d1 PASS (Driver 1's cops chase in slots 1-2 as on build-dev).
+  - Nightmare (plugin, host; CHI_C88_NIGHTMARE=0 hides it): moving traffic (states 2 / 3) gets slots 5.. set up like
+    FUN_80063B74 + FUN_8001548C, state 4; cops on, felony >= 0x293, 'seen' kept; NY at most 8 slots; released when off.
+    Newtown needs no police model: the chasers keep their own models and its cop cap 0 keeps the director's cops away.
+    Runner nightmare (standing FPS off -> on, pursuers): Miami 28.0 -> 17.7 (21), Chicago 24.9 -> 15.8 (21), NY 24.0 ->
+    19.1 (8, cap), Newtown 29.9 -> 20.3 (17); they close in, 20 s drive alive, release PASS. Cost = the pile-up (car-car
+    SAT 0x80067A44 4 %, scenery 0x8004AC88 4 %, more cars drawn), not the slot code.
+- **"cheats 3" (build-test 8fbaca31, user review of cheats 2):**
+  - Chasers did not chase like cops: the pursuit handler 0x80065424 re-plans the route (jal 0x8006466C) only when
+    'frame % 4 == slot - 1' (0x80066044..50): never for slots 5... Exe: '(frame & 3) == (slot - 1) & 3' (0x8006602C..4C,
+    same for slots 1-4 with frame >= 0). Plugin: chasers get record +8 = 0 (lane-traffic flag; Driver 1's cops 0 at
+    spawn, back to 1 on release). Runner nightmare_vs_cop (Miami, one Driver 1 cop vs the chasers in the same chase):
+    route active 0.51 vs 0.39 of samples, top speed median cop 625 k vs chasers 1156 k: PASS. Model / palette stay
+    civilian (user OK); no other cop-only branch found in the handler (it reads only the car's state words).
+  - Cost: the chasers now reach and ram the player: Nightmare standing FPS Miami 28.0 -> 9.4, Chicago 24.9 -> 7.8
+    (driving 8.5); guest: car-car SAT 0x80067A44 13 %, pair loop 0x8001C3D4 6 %, route grid 0x80061C68 5 %.
+  - Invincibility vs flip wreck (exe 0x80023440..60, CHI_C88_FLIP=0 off): FUN_800230B0 counts frames with the player's
+    up vector y (0x8009B0B0) < 100 in 0x80096920 and sets damage = max + 100 after 180; with 0x8009681C != 0 the counter
+    is reset instead. Runner flip_wreck: on the roof 10 s with Invincibility, damage 0; without it wrecked (241 frames).
+- **Roadmap 65 prep (switches, defaults off; build-test c976365a):** CHI_C88_NM_CAP=n = at most n slots in use, the
+  nearest traffic cars first; CHI_C88_NM_REPLAN=n = re-plan every n frames while Nightmare is on (exe mask word RMASK
+  0x800933E4 | 3 in the handler, 0 = Driver 1's 4). Chicago standing / driving FPS (off 25): no cap 7.8 / 8.6, replan 16
+  7.1 / 7.2 (no gain: the route search is not the cost), cap 12 11.3 / 11.8, cap 12 + replan 16 11.9 / 12.1, cap 8 14.2 /
+  16.5. The cost is the pile-up of cars that really reach the player (car-car collisions), so only the cap helps.
+- **C92 "Uncap GPU usage" (Infrastructure 24.10., build-test 5286ceda; design chicago/design_c92_uncap.md):**
+  - Runtime (psxrecomp, not upstream: own port, the upstream cpu_overclock source is not on this machine): Q16 scale
+    g_psx_oc_q16 (+ exact remainder g_psx_oc_rem) on CPU cycle charges before they reach psx_cycle_count:
+    psx_advance_cycles (after the batch merge; new psx_advance_cycles_scaled = the old body), the interpreter's
+    per-instruction fast path (dirty_ram_interp.c interp_cyc_step) and the load charge (memory.c psx_load_charge_cycles).
+    Device catch-up in psx_devices_service_to_now is not scaled, so vblank / timers / CD / SPU / DMA events keep their
+    real schedule. 65536 = off: one extra compare per charge. API psx_set_cpu_overclock_percent / psx_mod_set_cpu_overclock
+    (mod_plugins.h), clamped 100..400. Backup of the six touched files: scratch c92_backup.
+  - driver.personal feature "uncap-gpu" (Mods: "Uncap GPU usage", group Performance, default off), integer option
+    cpu_percent 100..400 step 25, default 200; activation plugin driver.uncap-gpu (driver_gameplay.c), next launch.
+    Runner: RUNNER_UNCAP=<percent> enables it in a test copy; plugin test aid CHI_TEST_OC=<file> sets the percent live.
+  - Measured (off -> 200 %): Chicago fps_drop_2 standing avg 26.2 -> 29.9 (all 4 headings 29.9-30.1), driving 29.0 ->
+    29.9; Miami start 27.9 -> 29.9; Nightmare (12 chasers) Miami 10.4 -> 23.7, Chicago 11.6 -> 24.4.
+  - Checks: out_of_tape PASS with 200 % (no hang, no stall dump); replay recorded at 200 % and watched as Quick Replay at
+    100 % (uncap_replay MODE=on_off): AI positions at the same game frames within 0-450 units, like the 100 / 100
+    reference; cops_d1, nightmare_start, feather PASS with it off (default path unchanged).
+  - Host-only by nature (an emulator setting); off = the PS1 reference for M8.
+- **C92 EMU % (user 67, 25.10.):** host throughput is ~96-101 M guest cycles / s on this PC at any overclock (runner,
+  unpaced; runs 16:40-16:53 overlapped the user's probe session). At 200 % the game also spins its frame wait
+  (FUN_8002360C 0x80024254: jal VSync(-1) until count - last >= 2) with 2x the cycles per vblank, so the idle part of every
+  frame costs host time: Chicago fps_drop_2 EMU 285 % (100) / 201 % (150) / 149 % (200), Miami 258 / 187 / 150; no
+  warm-up in a 12 s series from the level start (152, 150, 150 ...). PSX_IDLE_SKIP=1 does not catch this loop (VSync does
+  stores + GPUSTAT / timer MMIO): 146 %. Dev mode costs ~12 % (153 -> 172 % at 200 %). Estimate with the wait skipped:
+  Chicago ~178 % (work ~1.8 M cycles / frame), Miami ~260 %.
+- **C92 frame-wait skip (25.10.):** with Uncap on, VSync(-1) called from the main loop's frame wait (
+  VSync 0x80079B00, ra 0x8002425C, count - last < 2) advances guest time to the next IRQ the guest can observe
+  (psx_skip_to_next_vblank_if_overclocked: i_stat & i_mask clear, psx_idle_cycles_to_next_observable_event, <= 1.2 M);
+  a first version jumped straight to the vblank and skipped CD / timer IRQs in between: crash (DISPATCH FATAL
+  misaligned 0x01010101) and the replay tape stopped (out_of_tape). Hook: driver.personal plugin driver.uncap-gpu
+  (function-entry plugins need an id that is also registered as activation / vblank, else "trusted plugin is
+  unavailable"); game.toml mod_function_entry_funcs + 0x80079B00. EMU headroom at 200 % (idle machine): Chicago 173 ->
+  234 %, Miami 174 -> 237 %; uncap_replay (200 % recorded / 100 % replay), out_of_tape, cops_d1, nightmare PASS.
+- **C88 Nightmare r3 (user 25.10.):** every traffic car becomes a chaser at its spawn: entry hook on FUN_8001B720 when
+  called from the spawn tail (ra 0x80015FAC, a1 = 1); nightmare_take() = the old conversion (slot 5.., state 4,
+  record +8 = 0). No cap on PC (CHI_C88_NM_CAP=n optional; NY's PS1 limit in the host-only table). Specials chase too;
+  a chasing special is released when another special is pending (the player entered another special's region) so it
+  despawns like traffic and the swap can happen; the specials' model-5 scan now covers all 24 AI cars. Siren and
+  lights stay off for traffic models (Driver 1 ties both to the police model: AddIndicatorLight model 1 + state 4,
+  FUN_8004CA5C siren channel model 1); chasers use Driver 1's pursuit engine sound (revs pitch). Runner
+  nightmare_start: 20 chasers within 3 s, 20 of them taken at spawn; nightmare_vs_cop, cops_d1, nightmare_felony PASS.
+  Police cars: chasers no longer count in Driver 1's cop count 0x80097764 (set to the cops in slots 1-4 every running
+  frame), so the director keeps spawning real cops (nightmare_start: a police car in pursuit). The chasers' revving
+  engine is the bank-0 engine loop pitched by the car's revs (FUN_8004CA5C loop 2, cars with the pursuit flag car
+  +0x12E, which the pursuit handler also uses for its speed boost 0x80065FBC): the cars' own engine, not police audio;
+  the siren (loop 1) needs the police model. build-test f1425073.
+- **Felony (user 66):** with Nightmare on, felony is kept at 0x1000 on every running frame (was set once per level);
+  runner nightmare_felony (Miami, back to the menu, Chicago) PASS. Note: Driver 1's attract-demo reset also clears
+  NGHT (as it clears its own cheats) if the title screen sits until the demo starts.
+- **C90 (cheats 3 review, build-test adb53ffb):**
+  - Probe env (probes.json "env") is used only for the converter / package build (publish_playable); runtime getenv
+    switches never reach a probe. Runtime choices must be defaults (or package data).
+  - Nightmare wrote felony / cops-on / 'seen' every vblank, also on the loading screen and in the pause menu: now only
+    when the game frame counter 0x800970D8 moved; a new level / restart (counter smaller) sets felony 0x1000.
+  - Default cap 12 (CHI_C88_NM_CAP=0 = none), nearest cars first; wrecked cars (damage +0x17C >= 0x4651) are skipped
+    (the pursuit handler frees such a cop at once, 0x8006550C: re-assign churn); the loaded regional special (model 5)
+    is never a chaser (its body is drawn only inside its texture area: 'bus without body').
+  - Chicago chase audio: the car-car crash (bank 0 sample 0, SPU 0x1010, GlobalTimeStep 0x8001C960 -> FUN_8004D7E4)
+    keyed ~50 / s by the pile-up, peak-limited; NM-off samples otherwise present. Pause: 0 key-ons, silent (runner).
+  - Main-menu strip under the police car: also on build-dev after quitting a level (older, not the cheats work).
+- **C91 FEATHER:** INFM word 0x20 = INFINITE MASS, 0x100 = FEATHER. c88 block rewritten (gp-relative mission type,
+  mission types 3 / 6 = Driver 1's rule only): feather swaps the two ids (mask = -(word >> 8)) before the same rule,
+  so the car meeting the player keeps its motion; tail in S1 FTHR1 (3 words) + the pack-B string tail (4 words; pack
+  rewritten: bits 4 LOWG, 5 / 8 from the INFM word, 6 NGHT, 7 SPD2). Unpack 'andi 0x120'. Offline emulation of the
+  block: 0 mismatches over mission types x ids x modes. Runner feather: bus dv 0-2687 (off 380-490 k), player dv 0.6-0.9 M
+  (off 0.1-0.5 M).
+- **Cop slot size (60 B question):** route builder 0x80061F5C (called by the search 0x80063114, heap 0x800C43B4 max 502,
+  grid 0x800C039C 64 x 64 x 4 B, cell 1500 units) writes <= 64 nodes x 0x1C at slot +0x58..+0x758 (limits 0x40 / 0x41 at
+  0x80062058 / 0x80062118 / 0x80062178); fixed fields +0x0..0x58 and +0x758..0x7A8. Worst case = the full 1960 B; cap 32
+  nodes = 1064 B, cap 24 = 840 B (needs the tail offsets moved). 20 / 25 chasers: full 31 / 41 KB, cap 32 17 / 22 KB, cap
+  24 13 / 18 KB vs free Miami 77, SF 80, LA 72, NY 14 KB. Police-only chasers need the same slot each (no saving).
+- **Probe build 079891a8:** NIGHTMARE row + host test only with CHI_C88_NIGHTMARE=1 (default hidden: page 2 = INFINITE
+  MASS / SUPER SPEED). The old host test (AI state 4 without a cop slot) would run the pursuit handler on 'slot -1'
+  0x800C4690 = other data: never enable it outside a test.
+- **Nightmare slim variant (shared route pool) ruled out:** a cop slot holds its own route: FUN_80063114 (route search
+  over the shared 64 x 64 grid 0x800C039C, origin gp 0x80097748 / 4C) builds a linked node list inside the slot (+0x58
+  head, nodes in +0x60..0x758, absolute pointers, +0x14 / 18 / 1C indices); the pursuit handler 0x80065424 (state 4 in
+  the AI jump table 0x8008539C, slot = 0x800C4690 + 0x7A8 x record byte +5) follows it every frame (calls 8006466C,
+  80064C90, 80064DEC, 800660D8). Sharing slots = a new route search on every hand-over, and swaps break the pointers.
+  Patrol cops run the spot check FUN_80064360 every 4th frame by slot (FUN_80064FE0). Proposed instead (Strategy):
+  road chasers via the junction choice FUN_80016F0C (random pick 'rand % count' at ~0x800175A0 -> exit toward the
+  player; record +0x30 dir, +0x2C next road; car i struct 0x8009B230 + i x 0x18C, x +0xC8, z +0xD0) + the 4 real slots
+  handed to the nearest chasers.
+- **Menu pages (plugin cheats_vblank, build-test 07c68845; CHI_C88_MENU=0 off; runner cheats_menu PASS + sheet):**
+  on the Cheats screen (FRONTEND screen id 0x801CDE5C = 6) row 6 (Driver 1's unused "NULL" row, no-op jump 0x801C74D4,
+  draw reads 0x8009D8E8) is unlocked and labelled LOW GRAVITY; cross toggles 0x8009D8E8. Right = page 2: row count
+  0x800967D8 8 -> 4, row 0 "DRIVER 1 CHEATS" (its jump entry 0x801C0728 -> the no-op meanwhile; cross / Left = back),
+  rows 1-3 INFINITE MASS / NIGHTMARE / SUPER SPEED drawn and toggled through Driver 1's words 0x8009681C / 20 / 0x8009D8DC
+  as proxies (saved on page entry, swapped back on leave). Leaving the screen restores names, count, jump entry. Ruled
+  out: hiding rows by unlock word 0 (no effect on this screen; driver.personal's unlock-all likely keeps -2) and '>' / '<' in labels (not
+  in the menu font). Labels live in guest memory from psx_mod_alloc_guest_memory (host-only; M8: strings in FRONTEND's
+  free tail + the same table writes from the overlay).
+- **Replay header (exe, CHI_C88_REPLAY=0 off):** Driver 1 saves cheats in 0x80097644 bits 0-3 (packer in MCARD.BIN at
+  overlay +0x2074, keeps the other bits of the old word; load path 0x80024868 restores). Bits 4-7 = LOWG 0x10, INFM 0x20,
+  NGHT 0x40, SPD2 0x80. Pack: 0x80024F1C (called by every game / replay / demo start) jumps to a stub in two dead printf
+  strings (primbuf 0x80010954, its reference was overwritten by CAVE; cellsize 0x80010464, block skipped by the 3000
+  patch) that writes bits 4-7 from the words (sltu, so any nonzero = on) and returns to 0x80024F24. Unpack: the load
+  block 0x80024868..0x80024934 rewritten gp-relative (same stores, same order) + 4 stores (bit values, every reader tests
+  != 0). Demo reset 0x80024D0C..48 also zeroes the 4 words. Checks: runner replay_header PASS (bits 0x90 at game start,
+  0xB0 with INFM too), survival_cheats PASS; offline emulation of old vs new block (scratch c88_emu.py): 3000 random
+  headers, stores identical + the 4 new words, demo reset identical + 4 zeroes. Memcard save / load round trip not
+  runner-checked (the MCARD screen shows an empty dialog headless): probe item. Quick Replay does not use the header.
+- **High scores (exe, CHI_C88_SCORES=0 off; build-test 93a6fdc8):** FUN_8006C964 (game start) skips the record (flag
+  0x80096F00 = 0 at 0x8006CA80) when 0x8009D8DC / E0 / E4 / E8 is set (Driver 1: rear wheel, minis, stilts, low gravity;
+  Antipodean, Invincibility, Immunity do not block). 0x8006C9FC..CA34 (4 x lw / nop / bnez) became one OR over those 4 +
+  INFM / NGHT / SPD2 and one bne (same target and delay slot; t0..t2 dead there). Runner cheat_scores PASS: Survival
+  restart without cheats writes the flag from 0x8006CA74 (= 1), with SUPER SPEED from 0x8006CA80 (= 0).
+
+- **C95 cheats 5 crash = CD sector lost after a rewind (Infrastructure 25.10.; runtime cdrom.c):** the user's probe
+  restored a rewind / state (log "reapplied mod plan ... after savestate restore", cycle counter 100 M back at frame
+  ~61085; rewind = F8 or Select+R3 (keyboard Right Shift+Y), state menu F7 / Select+R1; settings.toml rewind = true).
+  The runtime's post-restore CD boost (cdrom_savestate_boost_vblank, 180 host frames) cut read_delay to <= 4096 at EVERY
+  frame: sector 330141 arrived 2738 cycles before a vblank, 330142 followed 4095 after it (6833 later), before the
+  guest had read 330141 (INT exposure alone is 5000) -> page 0xF's buffer one sector off -> Driver's texture-page
+  loader (FUN_800516E4) read a CLUT count 0x33FDAAAA and wrote CLUT ids over 0x80086F30..0x8008E8DC (incl. libgpu's
+  table 0x8008E8D0) -> LoadImage jalr 0x7F216 = DISPATCH FATAL. Fix: the read_delay cap only once at the restore and
+  only with no data INT outstanding (cdrom_apply_savestate_delay_caps clamp_read); runtime diff section "C92 / C94 /
+  C95". Runner cd_restore (restore + Chicago load x3) PASS. The unpaced runner did not reproduce the per-frame clamp
+  (the boost runs per presented host frame). C81 (probe optimisation 2 hang): its dump has cycles ~69 s behind the
+  frame count = many rewinds / state loads in that session, so the same cause is plausible (no log kept to prove it).
+- **cheats 5 fixes (Infrastructure 25.10., build-test; runner tests in brackets):**
+  - C96 popping polygons: world_renderer (0x80030E64) and its subdivided path (0x800315D8) take the OT slot as
+    (sum of 4 vertex depths >> 3) & 0x3FFC; past avg depth ~32760 it WRAPPED to a near slot (far buildings drawn over the
+    street; Extra draw distance reaches it, D1's corner cells too). Clamped to 0x3FFC (caves 0x80094890 / A8, the add
+    after the andi moved into the cave).
+  - C96 near cars low-poly with Nightmare: FUN_80014A8C draws cars nearest first and switches to the low model when
+    (buffer start + 0x1E000 - pointer - 3000) - remaining cars x 0x800 < 4000 (stops at < 0): it assumed Driver 1's
+    buffer size. Now minus the size from XPBN 0x80093428 (0x80014C54 / C5C / EF4). Nightmare / Hell levels are set up
+    with the two 0x50000 aperture buffers (dp_big_prim_buffers, shared with Extra draw distance), object / tile limits
+    stay Driver 1's; all limit words follow the buffers the level really uses (0x800BDFAC / 0x800BE02C), never the
+    requested ones. The 1.5x car LOD is off while Nightmare / Hell is on.
+  - C97 Quick Replay ended early / damage in the replay: a replay sets 0x80096899 and Driver 1 then skips the whole
+    player block at 0x80025A38 incl. INVINCIBILITY's damage reset -> the replayed car was wrecked (replay over). Replay-
+    only cave 0x800948C0 does the reset (same stores) and skips as before (replay_cheats: reaches the recorded end).
+  - C98 menu strip / black box: specials_vblank returns while FRONTEND is resident (no slot re-upload in the menu).
+  - C99 HELL (page 2 row, word 0x8009342C): pursuers never wreck (0x8006549C: damage reset before Driver 1's 0x4651
+    check), drive value car+0xF0 x2 (0x80065FDC) and the rubber-band target speed slot+0x24 x2 as read (0x80065EF8);
+    caves 0x80094910... Runner hell: 21 pursuers, max damage < 0x4651; top speed on the Miami causeway +41 % vs
+    Nightmare (f0 3x): something else limits AI top speed (tried: pursuit grip pair s4 / fp x 2 at 0x8001E408, no gain, reverted; scaling 0x12E in FUN_8001DFF4 x
+    0x2D / 0x37 / 0x44 >> 5). Not in the replay header (memcard replays lose it); the attract demo does not clear it.
+  - C99 v3 (Polish's static analysis of the cop driver block 0x80065BD0..0x80066000): with HELL both rubber bands are
+    skipped (A 0x80065D0C: within 4000 units target = player speed + 10; B 0x80065E94: blend toward the player's speed),
+    the drive value x 2 (x 4 where Driver 1 halves it for car+0x12E == 1), target x 2; caves 0x80094910..0x800949C4
+    (labels). Runner hell, causeway, standing player: pursuer |v| p50 777k / p90 967k vs Nightmare 144k / 500k.
+  - C102 car shadow: Polish's '3 x 3 grid' was the near ground band (FUN_800287A4). The shadow is ONE PolyFT4 (op 0x2E,
+    CARSHAD uv, a static primitive at 0x800A216C + buffer x 1000 + car x 0x28) written by FUN_8002ADEC (called from the
+    car draw FUN_8003A698, ra 0x8003AE9C) through the car's 4 corner points car +0x88 / 0x98 / 0xA8 / 0xB8 (world x, y,
+    z ints, also the physics' points; quad P0 P1 P3 P2). Exe: 0x8002AE30 -> cave 0x80094708 copies car +0x88..+0xC0 to
+    SBUF 0x80093440 and adds SHD[car] (0x80093480 + 16 car: 4 x (dx, dz) i16); the routine reads the copy. Plugin
+    shadow_vblank: for the Chicago special (model 5) the offsets stretch its quad along its own axes to the .sps.bin
+    half length / width (package spcshadow_day/night.bin); 0 = Driver 1. Runner shadow_bus: bus quad 378 x 1214 ->
+    offsets +-340 along, +-31..41 across (target 442 x 1722).
+  - C104 (cheats 7 'cars only very close after NY -> Chicago'): with the _xd level the draw decode went into the 27 x 27
+    buffer only, so Driver 1's 19 x 19 buffer 0x800A80C4 kept the previous city's PVS; FUN_800398B0 (car visibility for
+    the car draw list FUN_80014A8C) reads it -> cars culled by a stale grid. The draw cave now copies the middle 19 x 19
+    into 0x800A80C4 after the decode (shared copy loop with the cops' path). Runner city_switch: NY -> Chicago, the
+    19 x 19 equals the 27 x 27's middle.
+  - C105 Antipodean 'on by itself' (user steps: Invincibility, page 2, Hell, back, Free Ride Miami): screen id 6
+    (0x801CDE5C) is any row-list screen; on Take a Ride's city list the plugin took it for the Cheats screen, re-laid
+    rows and its proxies moved Hell's value into LOW GRAVITY's word (= page 1's ANTIPODEAN proxy: shown On, low gravity
+    in the level). Cheats screen now also needs the menu definition pointer 0x801CDC8C == 0x001C0020 (city list
+    0x1C0038, others 0x1C000C / 0x1C0028). Runner anti_check with the user's steps: LOW GRAVITY / ANTIPODEAN stay 0.
+  - C106 HELL in the replay header (bit 9): pack A -> cave 0x8009479C ORs it into t1, pack B clears bits 4-9 (mask
+    0x3F0); the load block's closing jal 0x80024F1C -> cave 0x800947B4 (HELL = header & 0x200, then the pack); the
+    attract-demo reset zeroes HELL (cave 0x80094634 via word 8). replay_header 0x390, replay_cheats with HELL PASS.
+  - C107 rewind / state loads with our add-ons (user decision B): hangs after a restore with Nightmare / Hell / Extra
+    draw distance = those levels draw into the mod GPU-DMA aperture (big primitive buffers), which save states did not
+    carry: RAM / OT came back from the state, the aperture from 'now' -> the GPU chain ran through stale primitives,
+    DrawSync never returned (runner rewind_loop: Miami round 0, Chicago round 3). Runtime: BS_SEC_GDMA 0x13 = the used
+    aperture (memory.c psx_mod_gpu_dma_snapshot / restore, boot_state.c; runtime diff section C107). Plugin: a restore
+    (VBlank counter 0x80095250 going back) re-derives the host caches (area switch tracker, the special's tpage / CLUT
+    build, Nightmare's frame gate). rewind_loop (12 x save / drive / load, Invincibility): Chicago + Miami with
+    Nightmare, Chicago Extra draw + Hell, NY Extra draw + Uncap: no hang, game frames advance after every restore.
+    Seen meanwhile: in long drives Nightmare's pursuers thin out (19 -> 3 in Miami over ~50 s) also WITHOUT any save
+    state (open, Nightmare).
+  - C108 Nightmare thinning (runner nm_thin, Miami: 21 -> 2 pursuers with the player boxed in): chasers Driver 1 wrecks
+    (damage >= 0x4651, the pursuit handler frees them) stayed as traffic next to the player, the 24 AI records stayed
+    full, nothing spawned. The plugin now removes such a wreck like Driver 1's despawn FUN_80017C50 (record state and
+    lane flag 0, index back on the free stack 0x80099AF0 / count 0x80096FC4) when it is out of view (behind the
+    camera: depth through 0x800BBE84 < 0, or > 15000 away) after 2 s, or after 10 s anyway; the spawn hook makes the
+    fresh car a chaser. Wrecks stay wrecked (never-wreck = Hell). nm_thin 60 s: Miami 18-22, Chicago median 15-22.
+  - Hang seen once in runner nightmare_vs_cop (26.10., Miami, Nightmare, player standing): same signature as the
+    cheats 7 user dump (in exception, i_mask 0, the guest in libgpu's GPU-timeout loop 0x800764C4 / VSync inside the
+    interrupt handler, no vblank delivered; starvation watchdog exit). Not reproduced in 3 x 240 s (runner hang_hunt
+    with PSX_STARVATION_TIMEOUT_US=0 keeps a hung instance for GPU / DMA / IRQ state). The 'huge semi-transparent
+    quads' suspect is gone (they were a ring-decode artefact, see popping polygons below); open.
+  - Popping polygons, GP0-ring evidence re-checked (Infrastructure 26.10. 23:xx, scratch pop_src.py): two artefacts in
+    the ring analysis. (1) The ring's "pc" / "ra" are the CPU's LAST STORE / return address at DMA time (DrawOTag runs
+    while the cell walker FUN_8002C8FC already builds the next frame), not the prim's writer: use the entry's "src"
+    (prim address). (2) psx_gpu_frame's GpuState starts at draw area 0,0-1023,511 / offset 0,0; a ring frame that
+    starts mid game frame (no E3/E4/E5 before the prim) is decoded against that default, so a normal prim that runs
+    off the screen bottom counts as 50-100k "visible" px. The tpage 74 semi quads (uv 0x70-0x8F x 0xC0-0xFF) are car
+    shadows (FUN_8002ADEC, prims 0x800A216C + 1000 x buffer + 0x28 x car): mostly the player's own, every frame, its
+    rear corners off the screen bottom (y clamped 1023): ~4k px really on screen with the real draw area. Also, comparing
+    neighbouring RING frames (vblanks) instead of game frames, and keying on uvs (subdivided ground changes them every
+    frame), makes everything "blink". With src + real draw area + game-frame neighbours: Miami Extra draw 630 game frames
+    and Chicago 463 game frames show no visible big one-frame polygon; GTE-saturated (+-1024) prims exist (near poles,
+    tpage 30, 2047 px tall), and the GPU's size limit drops them as on a PS1. So the QA-POP counts (vanilla too) do not
+    show the user's pop; a user F9 snapshot at the moment of a pop is needed. Shadow code has no near-plane check (4 corners
+    projected, no SZ test): a car beside / behind the camera would give a garbage shadow quad (not seen in these runs).
+  - The user's cheats 5 "distortion" snapshots (dev/dumps/probe_cheats_5_20261025-2022*..2033*, screens only: the prims
+    were in the GPU-DMA aperture, not in ram.bin): (a) 202203 Chicago: a pavement strip drawn OVER the player's car =
+    sort order, the OT slot wrap fixed by C96 in cheats 6; (b) 202242 / 202857: red semi-transparent triangles on the
+    bottom screen edge = Driver 1's own pursuer indicator (FUN_80055820 -> FUN_800555F4: for each AI car in pursuit,
+    state 4, in a cone behind the player, a 40 x 30 PolyF3 at y 210..240, x = 256 + bearing, brighter when nearer;
+    loop over 22 records). With Nightmare every car is a pursuer, so many red triangles pop in and out at the bottom:
+    the likely "popping polygons" of cheats 7 (original feature, multiplied). Ring-confirmed (Miami Nightmare, 473
+    frames, src in the primitive buffers, words 0x22RRGGBB / y 0xF0 / 0xD2).
+  - C113 shadow near-plane guard (exe_patches c113_patches, default off): 0x8002B050 -> cave 0x8008A3C0 (zero padding
+    after the 0xFFFF-terminated u16 list at 0x8008A2A0, seeded): the shadow is skipped when a corner SZ < SNEAR
+    (zero-block word 0x80093438, gp -0x3338). driver.chicago writes it every vblank from CHI_SHADOW_NEAR (default 128 since 27.10. on Strategy's go; 0 = Driver 1).
+    H = 256, so 128 = the GTE divide-overflow bound (a corner at / behind the camera plane). Miami Nightmare with 128:
+    player shadow kept (199 of 218 frames vs 204 of 226 off); a car shadow with saturated corners in 204 frames (off run)
+    gone; shadow_bus, nightmare_start PASS. PS1-native (exe code + a RAM word).
+  - C115 (cheats 9 user: Chicago music much slower after Hell -> a Driver 1 map -> exit -> Chicago): real-time speed, not
+    the song (runner music_rate: song 8 and tempo identical; the headless copies always have headroom). Cause: the C111
+    adaptive Extra-draw CPU speed carried the previous level's value (Miami Hell chase: up to 400 %) into the next level,
+    and an overclock the host cannot hold slows the whole emulation (music = EMU < 100 %, seen before on the laptop).
+    driver_gameplay.c: (1) s_xd_pct back to 200 when the game frame counter 0x800970D8 goes back (new level / restart /
+    rewind; log "new level: Extra draw CPU N -> 200 %"); (2) host guard overclock_guard(): the overlay's EMU % (once a
+    second) < 97 while overclocked -> CPU ceiling = current - 50 (min 100), 10 s at >= 99 % -> +25 (max 400); applies to
+    Uncap and Extra draw alike (log "CPU ceiling now"). Desktop: EMU 99.7-100 % before and after (not reproducible here).
+  - C116 Mods feature "Developer recording tools" (driver.personal dev-tools, default ON): its activation calls
+    psx_mod_request_dev_tools() (TCP debug server, recorders, freeze heartbeat file, GP0 history); Developer Mode no longer
+    does. Off: "psxrecomp: developer tools off", no port, heartbeat file untouched, F9 / dump.request -> "snapshot skipped"
+    + OSD hint. Test copies keep them via --debug-port. Runtime diff section C116 (heartbeat_thread and gp0_ring_record
+    gated on g_psx_dev_tools; main.cpp's dangling else that hid the "off" line).
+  - C109 hang mechanism (both dumps, 27.10.): the interrupt handler's stack (libetc ISR stack 0x80093xxx..0x800942A8,
+    cpu sp 0x80094268) holds FUN_75FA4 (libgpu queue, run from the GPU-DMA-end callback, I_MASK 0 while it runs) ->
+    queued StoreImage FUN_75960 (Driver's day-time sun-flare check FUN_80046E44 reads a VRAM rect into 0x800B722C every
+    frame; s2 = 0x000B722C in both dumps) -> its wait for GPUSTAT bit 27 'ready to send VRAM' (ra 0x80075B18) -> libgpu's
+    timeout FUN_764C4. Inside the handler VSync does not advance, so only the iteration counter (0x8008EA58, limit
+    0xF0000 at 0x80076508) ends the wait: 362k / 450k iterations done when the 4 s starvation watchdog fired. So the
+    trigger is a C0 (VRAM -> CPU) command that did not start a read (vram_read_active 0). Not reproduced: hang_hunt
+    13 x 240-300 s (rewind every frame included; runner copies have no settings.toml = rewind off by default!). build-wip
+    probes (memory.c, C117): CPU GP0 word while a linked-list DMA feeds GP0, and C0000000 arriving while the GP0 parser
+    is inside a command (pixel words of LoadImage's CPU remainder loop 0x800758E8 excluded): 0 in 12 min.
+  - C109 fix set (build-wip 5eab5fa6, next probe after the cheats 10 review; Strategy go A + B):
+    (A) exe_patches c109_patches: 0x80076508 lui v0, 0xF -> 0x1: libgpu's wait helper gives up after 0x10000 iterations
+    instead of 0xF0000. Normal play never iterates there (runner gpuwait, Miami + Chicago, Nightmare + Extra draw, 6000
+    samples of 0x8008EA58: peak 1). In the hang dumps the loop ran ~70-150k iterations per second, so a stuck GPU now
+    costs a stall of about half a second to one second, then libgpu's own 'GPU timeout' (queue cleared, GPU command
+    buffer reset) and the game goes on. Every trigger is in the dev log as 'tty: GPU timeout:que=..,stat=..' (guest printf).
+    (B) runtime (diff section C117): the end of an OT linked-list DMA is a GP0 command boundary: a chain that ends inside
+    a command (unterminated polyline, truncated polygon, VRAM write without its data) resets the parser (log 'C117 OT DMA
+    ended inside a GP0 command'), so the next CPU command (StoreImage's C0) cannot be eaten as data. Probes (log once /
+    first 20): CPU GP0 word during an OT DMA; C0000000 into a busy parser; a CPU-written C0 that never started a read
+    (2000 GPUSTAT polls) + the last 32 GP0/GP1 words. 0 events in the checks so far.
+  - Runner copies and rewind (27.10.): dt.prepare now writes build-dev's settings.toml into every copy (its [memcard]
+    section removed: it names the user's saves; skip_launcher = true), so tests run like the user's game (rewind ON every
+    15 frames, OpenGL settings, spu_hq). Every runner / hang_hunt / probe-check PASS before 27.10. 03:00 ran with the
+    runtime defaults = rewind OFF (copies had no settings.toml; RUNNER_SETTINGS silently did nothing).
+  - C103 host profile (26.10., desktop, windowed normal game paced at 100 %, runner host_load with DT_WINDOWED=1
+    + devtools/hostprof.py = thread sampler with exe symbols from llvm-nm):
+    | item | cost (share of one desktop core) |
+    |---|---|
+    | emulation (recompiled guest code + cycle model + devices), Chicago fps_drop_2 / Miami start | ~0.20-0.28 |
+    | same with Extra draw distance (CPU 400 %) | ~0.33-0.40 |
+    | pacer busy-wait (RtlQueryPerformanceCounter spin before each present) | ~0.13 |
+    | always-on debug instrumentation inside it (debug_server_trace_write_check, fntrace_record, parity / audio trace, starvation ring) | ~0.01-0.02 (5-10 % of the emulation) |
+    | dev mode, rewind (depth 50 / 15), supersampling 2, antialiasing, spu_hq: each on vs off | within noise (<= 0.05) |
+    | GL driver thread, audio, other threads | idle (waits) |
+    Process total ~0.45-0.55 cores (0.70 with Extra draw); frame period 16.68 ms p50 / 16.69 p95 / 16.91 max over
+    1200 frames (no hitches, rewind on). Headless headroom (runner host_speed) ~3.4x. The guest is ~2 % interpreted.
+    Not seen on the desktop: the 'first ~3 minutes slow'. Likely on the laptop: the probe folder and _disc live in
+    OneDrive Desktop (Files On-Demand: a new probe / the disc image are downloaded while the game reads them).
+  - C110 host-load fixes (26.10., user pre-approved): (b) frame_pacing.c sleeps with the high-resolution waitable timer
+    until ~0.5 ms before the deadline (QPC spin 13 % -> 3 % of the emulation thread; frame period p95 16.70 ms, max
+    17.1); (c) the TCP debug server and the per-store / MMIO / block recorders (debug_server_trace_write_check,
+    trace_mmio_write, cyc_observe, parity_trace_note_write) run only as developer tools: --debug-port on the command
+    line (test copies) or psx_mod_request_dev_tools() from driver.personal dev-mode (F9 snapshots keep working);
+    play builds without dev mode print 'developer tools off'; (e) build-wip uses ThinLTO (-flto=thin): headless headroom
+    Chicago 343 -> 375 %. Runtime diff section C110.
+  - C111 Extra draw distance: adaptive CPU speed 200..400 % instead of a fixed 400 % (the frame-wait hook rates each
+    game frame: arrived at its VSync wait before 2 vblanks = slack, else late; late frames in a 30-frame window +50 %,
+    120 slack frames in a row -25 %). Note: host time per frame is the extra drawing work itself; the overclock only
+    decides whether the frame fits its 30 FPS budget.
+  - C100 overclock only while game frames advance (8 vblanks without a game frame: 100 %): menus, loading screens, FMV,
+    pause spin at exact timing (menu EMU was below 100 % on the laptop with 400 %). Chase music slowing = EMU < 100 %.
+  - C101 native 27 x 27 PVS (Polish's _xd levels): XPVS 0x80093430 = 729 -> the draw decode (0x8002D97C) runs into XB with
+    *0x800973A8 = 729, the cops' decode (0x8003A258) into XTMP 0x80093434 and copies the middle 19 x 19 (caves
+    0x80094640 / 0x80094684, zero run 0x80094634..0x800947C8 zero in every dump); the C94 cave skips its 19 x 19 copy.
+    Package: CHI_XD_LEVELS=1 puts <name>_xd_day/_night.lev after the last relocated file + specials_xd_*.bin (only .lev
+    and .spc.bin differ), sidecar words 37-52; the plugin loads them while Extra draw distance owns the C94 words.
+  - Not reproduced: Antipodean switching on (0 in all 15 snapshot RAMs, anti_check), the loading-screen sound
+    (loading_sound: no key-on between the confirm and the first frame; the user had rewound just before).
+- **C94 "Extra draw distance" (Infrastructure 25.10., D1 cities first; design chicago/design_c94_drawdist.md):**
+  - Exe (exe_patches c94_all, always applied; Driver 1 behaviour while the words hold Driver 1 values): the cell loop
+    FUN_8002C8FC reads its window (XS / XW 19), corner trim (XT 4 / XL 18), radius (XR 9), PVS buffer (XB 0x000A80C4),
+    object list (XLIST 0x000A76AC), tile bands (XTB1 / XTB2 7000 / 9000), the guards' limits (XOBJ / XTILE) and the two
+    primitive buffers (XPB0 / XPB1 0x000D8600 / 0x000F6600, read at 0x800515BC) from zero-block words 0x800933F0..24
+    (gp-relative). Cave 0x800947D0 (zero run, seeded in ghidra_funcs) runs only when XR != 9: plane start values 4
+    cells further out, the 19 x 19 PVS copied into the middle of a 27 x 27 buffer (ring = 1: drawn when in the frustum).
+  - The zero block is cleared at boot (image data reads 0 at the title): driver.chicago's vblank writes the Driver 1
+    values every vblank unless XDD (0x80093408) = 1 (driver.personal's extra-draw owns the words). Code placed in the
+    zero block ran interpreted (page diverged under plugin data writes): cave moved + runtime mod_bless after plugin writes.
+  - Plugin driver.personal "extra-draw" (driver_gameplay.c): 27 x 27 window (radius 13, trim 6), PVS + 4096-entry list in
+    guest mod memory, tile bands 10500 / 13500, limits XOBJ 0x48800 / XTILE 0x28800, two 0x50000 primitive buffers in the
+    GPU-DMA aperture (psx_mod_alloc_gpu_dma_memory), car LOD 0x80096A48 x 1.5. CHI_XD_PARTS test aid (1 window, 2 list,
+    4 bands, 8 buffers, 16 car LOD, 32 limits; default all).
+  - Pitfall (GP0 unknown command 0xFE hang): the buffers must be given in KUSEG form (0x00F00000, like 0x000D8600):
+    Driver ORs len << 24 straight into the primitive pointer, a KSEG0 0x80F00000 put bit 31 into the tag's length
+    byte (0x89 instead of 0x09) and the GPU walked into vertex data.
+  - Runner draw_distance (CITY, POSE, DRIVE; RUNNER_XDRAW=1 on): Miami / Frisco / LA / NY / Chicago alive, no garbage in
+    the sheets, far ring drawn (posed Miami causeway: horizon objects only with the feature on; NY start: far buildings
+    down the street). GP0 packets per frame: Miami 1219 -> 1637, NY 1573 -> 2444. Sampled primitive high water <= 0x19360
+    (NY) even with the feature on (the old 0x1E000 would mostly have held; the bigger buffers are the safety margin).
+  - Cost is guest CPU (2x cells through cull_objects): at Uncap 200 % FPS standing Miami 30 -> 28.3, NY start 30 -> 19.8;
+    at 400 %: NY 30 FPS with EMU headroom 111 %, Chicago fps_drop_2 30 FPS / 183 % (desktop, unpaced runner copy).
+    With the frame-wait skip a higher overclock costs host time only when the frame needs it.
+  - Decision A (Strategy 25.10., for probe cheats 5): extra-draw's activation sets the overclock to 400 % (max with
+    Uncap's own option; Uncap is implied), Mods text says so. Fallback B (1.25x step, cave parameterised) if the laptop
+    cannot hold it. Function-entry plugins are not feature-gated: the wait skip runs whenever the CPU is overclocked.
+  - Not done yet: D2 cities' own 27 x 27 PVS / area sets (converter; Chicago today = its 19 x 19 PVS + ring 1), a
+    residency guard for far D1 objects (none seen missing / garbled in the five runs).
+## C40 levers (Infrastructure 24.10., build-test 21a327c2)
+- **Lever 1 done (exe C42E site 0x8001FB70 + plugin):** the broad-phase margin comes from each car's own MATRIX pad (car +
+  0x16: 0 in 600 RAM dumps, cleared on car re-init, rewritten every vblank): player / special reach only for those cars
+  (R35 had added both to EVERY car -> every traffic pair flagged, C82 window let it through, full SAT). Guest samples:
+  GlobalTimeStep pair loop 3.3 -> 0.4 %, SAT FUN_80067A44 2.3 -> 0.5 %, FUN_8001B380 2.7 -> 0.7 %. FPS standing (4 dense
+  spots x 4 headings): 20.9 / 23.2 / 19.6 / 22.4 -> 22.6 / 25.8 / 18.4 / 25.4 (avg 21.5 -> 23.1; Miami dense 25.2).
+  bus_head_on + special_zones PASS (special reach intact). CHI_C40M=0: old shared margin. PS1-native exe; the per-car
+  value is host-written (M8: written by guest code at spawn / special swap).
+- **Lever 3 measured, default OFF (plugin CHI_C40_LOD=1):** D2's car LOD distance (5500 -> 7260 vs D1's 10000):
+  car draw share 3.6 -> 2.6 % but FPS unchanged at all 4 spots.
+- **Lever 2 = no action:** active AI cars Chicago 22 / Miami 21 (state byte +1 of the AI record) = Driver 2's own 14 civil
+  + 7 parked: traffic is already at D2's density (never thinner).
+- **Corrections to day 1:** 0x80011924 is C67's facade cave (D2's own split rule, a feature), not the C68 stub (lever 5
+  re-scoped: no cheap cut); FUN_8007B1E8 is NormalClip (called by the polygon drawers 0x80035C34..0x80039134), not spooling
+  (lever 4 = map rendering). The runtime charges guest cycles per instruction and GP0 DMA at 1 cycle / word (no GPU fill
+  model): FPS follows guest CPU work; host samples (phase_hot) are only a proxy.
+- **Remaining gap (~8 % standing)** is map rendering (tile / object drawers, NormalClip, subdivision) = lever 7 territory
+  (D2-style rendering), which needs the user's OK first. Driving FPS at these spots is dominated by crashes (debris
+  packets); fps_spots now drives a 12 s heading-hold route along the start heading (fps_drop_2: 26.4 FPS, 1023
+  packets / frame, 4.5 k units).
+
+## Audit 23.10. step 2 (Polish): white ground = teleport artefact; C72 = aliased barricades
+- **Test-pose teleports over long distances leave the world undrawn** (only sky dome, car, debris; ground white / grey,
+  "area load after pose" returns at once). Screenshots / FPS after such a pose are invalid. Start the level AT the spot
+  instead: dt.prepare(copy, start=(d2x, d2z)) (runner: patch rs.dt.prepare, scratch audit_start.py), then rotate with a
+  same-place pose. Started at riverbridge, quay_wall, flicker2 and driven through: ground fine.
+- **C72:** GP0 capture at riverbridge (start, heading 0): the saturated line y 112-114 is owned by 4 PolyFT4 1-2 px tall
+  (tpage 960,256 = short page 9, uv 0..33 x 144..162 = entry 7 "BARRCDE", CLUT 288,500); VRAM read in game: CLUT and
+  texels identical to the level. The barricade's orange / white / blue stripes minified without mipmaps = the speckle.
+- **C40 corrected:** started-at-spot FPS: fps_drop_2 19.1 / 27.8 / 25.6 / 24.4 standing (4 headings), 22.7 driving;
+  l_down_e 19.8 / 15.9 / 16.2 standing (then wrecked by traffic); Miami 28.3 / 24.8, LA 22.6 / 20.1 (menu starts).
+
+## M3 step 0 + 1a/1b: Havana dry run, per-city profile (Polish 24.10., user 54 yes / 55 B)
+- **cityprofile.py** (new): `CHI_CITY` (default CHICAGO) selects `P`; Chicago's profile = the old constants exactly:
+  inputs keys (LEV day / night, DEN, LCF, SKY0.RAW), object-extent centre (-119488, 65984) + grid 480 x 630
+  (worldscale), start (9216, 106496) (build_package, polish_areas spawn seed), car sets day miami / night la, water level
+  1084, water model slot 683, basin water textures, quay wall texture ("C", 1, 3), quay model lists (rail src, drop, ghosts,
+  quay_spot), rail inclines / cuts / floor, hidden engine models, landmark prefixes (polish_tex), D1<-D2 car slot map,
+  specials (SpecialByRegion row, models, default), car banks (build_package; Infrastructure agreed).
+  Read by inputs.d2_lev / cache_dir, worldscale, convert, texrepack (DAY_LEV, report label), polish_cars / cosmetics /
+  specials / map / tex / sky / areas, build_package. Chicago-only features switch off when the profile's list is empty
+  (SHORE_WALLS needs wall_texture, QUAY_FILL quay_rail_src, QUAY_CLEAN quay_models).
+- **Proof:** `setup_chicago.py --levels-only --force` (RECIPE = specdmg2) gives day + night .lev and all 7 sidecars
+  byte-identical to var_polish_specdmg2_day / _night.
+- **Fixes found by the dry run:** convert() imported polish_cars only on the D2-cars path (UnboundLocalError on every
+  other build); converter caches (surface_grid4, sea_kinds, road_levels, level_switches, sea_fixed) were keyed by code
+  only -> `_city_key()` ("" for Chicago, so its keys are unchanged).
+- **Havana (HAVANA profile, experimental):** inputs.INPUTS d2_HAVANA.LEV / _night / .DEN / .LCF (disc 1). Centre
+  (-11158, -90171) from the D2 object extents x -494387..472071, z -388789..208446 (with Chicago's centre the east 61k units
+  were off-grid). `CHI_CITY=HAVANA` + ROADS S4 STREAM_INMEM S1_SLOT15 converts: 22 areas, halved 60.1 % / lost 134 units
+  (Chicago 56 % / 82), CLUT 241/384 (LA car set; Chicago's D2 cars add ~124), in-memory 182 KB, model spool buffer ~99 blocks
+  (Chicago 88), roads 396 / junctions 272 (Chicago 409 / 266), heights deeper (-3000) and higher (+2500..4500) than
+  Chicago's. Open for the Havana pass: start, sky, water level / shore texture / quay lists, landmarks, cars (LCF / DEN /
+  slot map / specials, car_banks[1]), minimap params, music slots and sea level (Infrastructure, plugin).
+- **Havana pass (Polish 24.10.):** HAVANA profile filled from D2 disc 1 / REDRIVER2: start (-238668, -235595) rot 1025
+  (MISSIONS.BLK 52 / 53 = Take a Drive, glaunch.c 50 + level*2 + night), sky SKY1.RAW (sky.c), water 2750 (sea plane -2048;
+  harbour quays at -2026..-2050), shore walls with SEAWALLN (page 0 / 16), landmarks (CPTLIO, CATHDR, TEATRO, STADIU, CFUERZ ...),
+  slot map as Chicago (missions residentModels {1,2,3,0}), specials 8-12 (SpecialByRegion[1], default 11), car_banks[1],
+  minimap overlay (overmap.c [1]: 544 x 352, 187 tiles; d2overlay.CITY + polish_map tiles per city).
+  Generic fixes on the way: WALL_DEPTH / BED_DEPTH / WATER_Y relative to the profile's water level; area texture limit +
+  `area_single_over_ok` (one Havana region alone sees 225-253 textures); specials that are no player choice get their own
+  cos row / wheel (polish_cosmetics.special_row); slot entries per profile (Havana 17); reachability cache keyed by the
+  spawn; new sidecar <lev>.spt.bin (twistRateY per special, Infrastructure's C82 SPTW).
+  Result var_polish_hav2_day / _night: 27 areas, model spool 110 blocks (220 KB), in-memory 183 KB, halved 50.9 % / lost 126
+  units, CLUT 337 / 384 (no palette trim needed), 396 roads / 272 junctions, specials keep 29-41 % of D2 area with damage
+  copies. Chicago re-checked byte-identical after all of it (setup_chicago --levels-only, .lev + 7 sidecars).
+- **Havana pass (24.10.):** profile HAVANA filled from D2 disc 1 / REDRIVER2: start (-238668, -235595) rot 1025 (MISSIONS.BLK
+  Take a Drive 52/53 = 50 + level*2 + night), sky SKY1.RAW (sky.c skyNum 1), water 2750 (D2 sea plane -2048; harbour quays at
+  -2026..-2050 -> D1 +2674..2706), wall texture SEAWALLN (page 0 det 16), landmarks (CPTLIO CATHDR TEATRO STADIU CFUERZ ...),
+  specials 8-12 (SpecialByRegion[1] + 7, default 11), car_banks[1], overlay (d2overlay.CITY HAVANA = overmap.c [1]: 544 x 352,
+  187 tiles -> polish_map 11 x 17, CLUT_AT 384). New profile fields: area_tex_limit, area_single_over_ok (a one-region area
+  over the limit is kept: Havana's harbour region sees 225-253 textures; limit 260 instead merged areas into a 266 KB spool),
+  special_slot_entries (Havana 17). Water-relative depths: WALL_DEPTH / BED_DEPTH = Chicago value + (water_level - 1084).
+  Specials that are no player choice (Havana 11) get their cos row (polish_cosmetics.special_row) and wheel from the LCF.
+  Overlay() defaults to the profile city; polish_areas reachability cache key includes the spawn.
+  New sidecar <lev>.spt.bin ("SPT1", n, civ ref twistRateY, n x {model, twistRateY} from LCF +230) for the plugin's SPTW.
+  Result var_polish_hav2_day/_night: 27 areas, spool 110 blocks (220 KB), halved 50.9 % / lost 126 units, CLUT 337/384,
+  in-memory 183 KB, roads 396 / junctions 272, specials kept 29-41 % of D2 area. Chicago re-check after all edits:
+  setup_chicago --levels-only byte-identical to specdmg2 (.lev + 7 sidecars).
+
+## M3 step 3: Havana's own slot (Infrastructure 27.10., build-wip; user 54 yes, slot index = Q68 open)
+- **CITY 4 (FLAT) costs** found in the exe (FUN_80022818): CITY 4 skips InitMusic, sets the view width 0x800971B4 = 0x400
+  (400 elsewhere), skips the player-car placement FUN_800682C0 from the mission start (why FLAT crashed / hung 13.10.);
+  plus FLAT's entry 4 in ~10 per-city tables / 4 CITY switches (LoadSky, glows 0x8008AE3C / AE5C, minimap 0x8008B080..
+  B094 / B230 / B268, 0x8008ABB8, 0x800148C4, haze 0x800298BC `city < 4`). Option B (Havana in CITY 3 like Chicago, own
+  row / level / assets) needs none of it -> asked as Q68; the code below runs Havana in CITY 3 (B) until the answer.
+- **Package (build switch):** build_package `CHI_HAVANA_DAY` (+ `CHI_HAVANA_NIGHT`) -> a subprocess `CHI_CITY=HAVANA
+  build_package.py --city-assets assets/havana ...` (the converter modules bind the profile at import) writes Havana's
+  own set into assets/havana/ (car_boxes, car_sfx with car_banks[1], car_wheels, cosmetics, d2_surface 1.39 MB, dmg_*,
+  specials / spctwist / specdmg, preview if Design makes one); the Chicago run adds Havana's skies to SKY.BIN (after
+  Chicago 13-15 and LA day 16: Havana 17 day / 18 night / 19 rain), D2 songs 1 / 5 as MUSIC.BIN songs 10 / 11,
+  havana.lev / havana_night.lev after the last relocated file (overlays, LBA 367000 / 376000 with today's package) and
+  assets/havana/slot.bin (chicago_slot.bin layout, 55 words: + word 53 water y -2750, word 54 start heading 1025;
+  flags word bits 8-15 = first sky number). Without the switch the package is byte-identical to before (checked: full
+  package diff of the refactored build_package vs the old one, cheats 10 recipe). city_assets() = the per-city part of
+  main(), moved unchanged. cityprofile.start_rot (new optional field, Havana 1025; no effect on conversions).
+- **Plugin (driver_chicago.c):** one asset set loaded at a time (`city_assets_load(0 Chicago / 1 Havana)`, files via
+  apath(): assets/ or assets/havana/), reloaded when the selector's D2 row changes (select_virtual); d2_virtual() =
+  V_CHICAGO or V_HAVANA; chicago_active() = d2_city(). Per city from the sidecar: level entries, start (+ heading:
+  start_heading_vblank turns the spawned car in place over the first 12 frames: matrix, quaternion, +0xF8), night entry,
+  minimap words (CLUT_AT 2 x 187 tiles + 8 = 384), car sets 0x10404, sky base (17), song base (Havana 10 / 11), sea
+  level (-2750; Havana skips the switch-pad format check), stable pages. Page 2 row "Havana" (LA's handler, the Day/Night
+  confirm) when the package has assets/havana/slot.bin, grey otherwise. C37 surface asset and its saved D1 surface
+  records reset per city (d2sf_unload). DROWN_RANGE stays 0 in Havana (the exe band starts at Chicago's -1120: D1 rule
+  there until the band start is a word). Traffic-light glow offsets: Chicago's values (Havana's signal models unchecked).
+- **Checks (runner, build-wip exe):** havana_drive (new test; menu path take_a_ride/havana[/night]): boots, flag 1, sea
+  -2750, start heading 1025 facing along the street, drives 17-27k units, day and night (song 11 by night); Chicago:
+  cheats_menu, nightmare_start, replay_header, replay_cheats, cd_restore, rewind_loop (with Havana packaged), city_switch
+  (package without Havana). Replay header bits: Havana night 0x4000, Chicago day 0x1000; mirror word 0x56000004 / ..01.
+- **PS1 budget (M8):** Havana in CITY 3 adds no guest table (LA's CITY-3 entries + the words the plugin already writes for
+  Chicago). Level (Polish hav2): 27 areas, model spool 110 blocks = 220 KB (< 256 KB carry), in-memory 183 KB, models
+  1540 / 2048 (2048-entry table at 0x80115600), CLUT 337 / 384, texture halving 50.9 % (per-area VRAM pages as Chicago).
+  Host-only additions (M8 list): the per-city asset sets / their reload (as Chicago's assets), the spawn heading write
+  (M8: the heading in the mission script or a per-city start table), the variant restore below (the variant itself lives
+  in guest RAM: header bits + mirror word).
+- **Havana round 2 (27.10., build-wip b7cb0c58, levels Polish hav3 + _xd pair):** package recipe = cheats 10 + `CHI_HAVANA_DAY /
+  _NIGHT=work/var_polish_hav3_day / _night.lev` (+ `CHI_XD_LEVELS=1`: havana_xd_day / _night after Havana's levels,
+  Havana slot words 37-52, specials_xd in assets/havana/; runner: XPVS 729, its xd entry, drives). Menu picture: Design's
+  HAVANA.4bit / .clut (128 x 228) -> assets/havana/preview.bin, shown with its own CLUT when the row is highlighted
+  (checked on screen). spcshadow (.sps.bin) now in Havana's set.
+  - **C17 band per city (engine):** the cave at 0x8005265C jumps to 0x8008A340 (seeded), which adds BANDW 0x80093624
+    instead of the fixed 1120 (Chicago 1120 = unchanged rule, Havana 2786 = 36 under its water; CHI_DROWN_BANDW=0 = old
+    cave). DROWN_RANGE 620 in both. Runner havana_water: words BANDW 2786 / DROWN_RANGE 620 / sea -2750 in place, but no
+    harbour edge could be driven into water yet (geometry below).
+  - **Heights (converter, for Polish):** D2 Havana surfaces (d2surface.levels, y down) cluster at 0 (street, 2836 cells
+    of 3000), 2048 (982: the harbour level the profile's quays and the Take a Drive start sit on) and -2500 (55). In
+    the game the street cells are at y ~136 (D1, y up), the start (D2 2048) at +2864 and D2 -2500 cells at ~-2609: the
+    non-street levels come out with the opposite sign (Chicago's deck rule: D2 -1024 -> D1 +1352). Result: the harbour
+    quarter around the start is a plateau ~2700 above the streets instead of a basin ~2700 below, 4400-5400-unit drops
+    between quarters (runner: car fell from 1885 to -2561, wrecked), the water (-2750) 5400 under the old town's streets.
+  - **Signal glows:** Havana's models are TLIGHT1 / SLIGHT1 / SLIGHT2 / DLIGHT1 (Chicago: TLIGHT00 / 01 / 02, SLIGHT01).
+    Driver 1's light code finds LA's kinds by name, so Havana shows no signal glows (nothing wrong drawn). Glows need a
+    Havana LIGHT_RENAME / LIGHT_TURN in the converter and Havana's head offsets in the plugin (per-city glow words).
+  - **Ferries:** the model list has FERRY / FERRYT1 / NOTFERRY and static boats IABOAT1 / 4 / YY / ZZ; D2 places the two
+    ferries through events (event.c HavanaFerryData), not as cell objects, so no ferry shows; static IABOAT props do.
+- **Havana hav4 (27.10.):** Polish's reading is right (D2 heights y-up; the "2048" quarter is raised in D2; water 160 ->
+  sea constant -160). Data: a flood over D2's surface from the start (512-unit steps, <= 300 height change) reaches the
+  main level through intermediate heights; the first descent is a straight ramp along +x at D2 z -258123, x -127564 (h
+  2065) .. -113228 (h 283), 64 per 512 units. In the game (havana_ramp, D1 -153655 / -221696 heading +x) the car drops
+  2547 between two 0.1-s samples at its top: the converted level has no ramp there. The converted road / height map
+  (roadh low 16 bits) holds the raised quarter as a closed island (2801 cells at -2703, no neighbour step <= 1300 to the
+  rest; 27 road-to-road steps > 300, e.g. h -415 / -2703 at D1 (-156750, 204750)). Shore cars at y ~ -24 were lifted
+  2880 within 6 s at two shores (D1 -267750 / -209250 and -215250): plateau heights next to the harbour. Start y 2840 =
+  D2's Take a Drive start h 2048 x 1.32 + the car's ~137: consistent. Drowning band words: 196 / 196 (Havana), 1120 /
+  620 (Chicago); chicago_drown: Chicago lake edge drowns on the band build and the old-cave baseline alike.
+- **M3 fixes for LA <-> Chicago (<-> Havana) mixups (C118, Strategy go 27.10.; each separately revertible by env):**
+  (1) `CHI_VARIANT_REPLAY=0` off: replay header word 0x80097644 bits 12-15 = level variant (0 LA, 1 / 2 Chicago day /
+  night, 3 / 4 Havana day / night, 5 LA day); a replay start restores it at the mission parse (before the level loads).
+  (2) `CHI_VARIANT_STATE=0` off: mirror word 0x80093620 (zero block, magic 0x56) re-applied by restore_vblank.
+  (3) `CHI_VARIANT_LA=0` off: a mission other than Take a Ride (0x7C; the Day/Night confirms 0x78 / 79 / 7D in CITY 3
+  excepted) runs LA: the page-2 selector exists only in Take a Ride (Driving Games keep Driver 1's city list, Undercover
+  has none), so LA's records are never written from a Chicago / Havana run (Take a Ride keeps no records).
+
+## cheats 5 review (Polish 25.10., analysis): menu strip / black box, bus shadow + tyres, extra-draw holes
+- **Menu strip + black box = the specials slot re-uploaded in the frontend.** VRAM diff main menu at boot vs main menu
+  after a Chicago Take a Ride (runner, polish copy): the block x 704..767, y 128..255 (page 8 bottom half = R34 specials
+  slot) holds the .spc.bin slot block after returning (first 256 B match work/var_polish_specdmg2_day.lev.spc.bin +78016;
+  before: frontend data, 7397 non-zero bytes). The main menu's semi-transparent sprite reads VRAM x 704..727, y 0..135
+  (screen 152, 226): its rows 128..135 are slot data = the strip; other frontend screens using x 704..767, y 128..255
+  show the black box. Cause: specials_vblank (driver_chicago.c) gates on chicago_active() && psx_mod_game_started(),
+  both still true in the frontend after quitting (CITY stays 3), so the 64-vblank "slot lost -> re-upload" keeps
+  writing the slot over the frontend's VRAM. Fix (plugin): also require "in level" (e.g. FRONTEND overlay not resident:
+  MENU_MARK 0x801CE038 != 0x0172001A, or the in-level beat LVL_BEAT recent) for spc_slot_upload and its check. Also
+  left over after Chicago (harmless at the main menu, check other screens): x 832..1023, y 256..480 (Chicago pages),
+  CLUT rows 480..511 at x 0..192 / 416..512.
+- **Bus tyres "too small":** wheel size is Driver 2-faithful (LCF wheelSize 74 x 1.32 = 98, civilians 52 -> 69; same
+  tread / hub rule as cars.c DrawCarWheels). The gap above the tyre in the arch (snapshot 202242) matches R34's ride
+  height rule: specials' BODY raised by CLEARANCE + 1.32 x (their clearance - civilians' mean) = bus +59, fire engine
+  +67, 9 +35 -> the wheel sits ~0.6 radius low in its arch. Fix: place the special's wheels per D2 (wheel centre y = -
+  wheelSize - wheelDisp.vy - susCompression + 14, x1.32) and drop the body raise (polish_cosmetics wheel_vy +
+  ride_extras for model 5 + the plugin's placement offset).
+- **Bus shadow:** Driver 2 sizes it from cPoints[0..3] (handling.c SetShadowPoints; bus x +-163..168, z -645..660 ->
+  x1.32: +-221, -851..871). Correction (25.10.): FUN_80040BAC is NOT the body shadow (its quad is one-sided z 450..750,
+  behind the car = a rear effect). The shadow in a GPU frame: a 3 x 3 PolyFT4 grid under the car, tpage 0x1E, clut 0x7F83,
+  uv 180..191 / 31..59; producer still to find (wtrace on that tpage / clut word). Fix: for model 5 take the corners from per-model words (plugin from the asset; exe gate like SPBX / SPBZ).
+- **Extra draw distance holes / bad buildings (D1 + Chicago):** see the C94 row; causes in order of likelihood:
+  (1) ground tiles stop at the tile band 13500 (XTB2) while objects reach radius 13 x 3000 = 39000 and the ring is drawn
+  without PVS: along open streets the road 13.5k..39k is simply not drawn; plus the tile list cap (128 stack + 512 at
+  *0x8009715C, XTILE guard) can drop nearer tiles once more tile objects are in range; (2) far objects whose model is not
+  in the loaded area (area sets were built for radius 9) draw with whatever sits in that model slot; (3) far objects
+  beyond the OT's z range sort into the last bucket; (4) subdivision thresholds 6000 / 9000 (0x80030B08) unscaled.
+  Fill the ring: far ground band to the object radius with the cheap far-tile routine (FUN_80026FF0) + a bigger tile list,
+  a residency guard (skip non-resident models), the OT shift for XR 13, subdivision x1.5; for Chicago a converter
+  27 x 27 PVS + wider area sets (data, Polish) cuts cost.
+- **cheats 6 data side (Polish 25.10.):** CHI_POLISH_SPCRIDE=d2wheel (polish_cosmetics.ride_extras: body raise by D2's
+  clearance - wheelSize relation: 8 +15, 9 +11, 10 +28, 12 -13 instead of 67 / 35 / 59 / -15; also the player choices,
+  same models); CHI_POLISH_SPCSHADOW=1 -> <lev>.sps.bin ("SPS1", n, n x {model, 4 x (x, z)} = D2 cPoints x 1.32);
+  CHI_POLISH_XDRAW=1 (pvs.py) -> the Extra-draw level variant: native 27 x 27 PVS (radius 5..13 by 0x50000 x 0.72; 289552
+  cells at 13), area sets from that radius: halved 67.5 % / lost 113 (normal 56 % / 82), spool 98 blocks, CLUT 365/384.
+  Levels work/var_polish_cheats6_day/_night (a + b) and _xd_day/_night (a + b + XDRAW). Switches off: setup_chicago
+  --levels-only byte-identical to specdmg2 (.lev + 8 sidecars).
+- **C99 Hell, D1 pursuit speed path (Polish 25.10., static):** cop driver block 0x80065BD0..0x80066000 (record s0, car s1):
+  rubber band A 0x80065D0C..80 (0x80096E60 && rec+0x7A0: target -> player speed 0x8009B1AC + 10 within 4000 units, blend
+  above), rubber band B 0x80065E94..E0 (0x80096E68 == 0: blend toward max(player speed - 20, 20)); base target = table
+  0x8008BBD8 / 0x8008BBE4 (0x80097710) [difficulty 0x80096870] x felony factor (0x80097740 / [0x800C4C94] + felony x
+  [0x800C4C80] >> 12); max thrust ((diff + 8) << 10 [+ (diff + 4) << 10]) x (0x80097700 + felony x [0x800C4C7C] >> 12) >> 12,
+  thrust = clamp(err x max / 50); car+0x108 < 0x30 low-speed scale; car+0x12E == 1 -> thrust >> 1 (0x80065FBC). Physics:
+  linear drag -12 x v per wheel (StepOneCar), so the rubber bands are the likely cap (+41 %).
+- **D1 car shadow (Polish 25.10., offline):** not model data (no D1 car model in LA lump 28 references CARSHAD; car models
+  use pages 1/3/4/5/6, 67-72) and not cosmetics (row = 8 lights + 4 wheels + 2 shorts). Texture CARSHAD 32 x 64 in every
+  level (LA p7 d3 128,96; Miami p1 d15 112,192; Chicago p6 d28 144,160). Not looked up via GetTextureDetails 0x80052240
+  (52 calls); "CARSHAD" bytes at 0x80096958 have no xref. Exe-side; find the writer by primitives using that rect.
+- **Havana hav4 (Polish 27.10.):** heights were never sign-flipped: d2surface levels() h is y-up and equals -object y in
+  both cities (Chicago h -1024 <-> objects y +1024; Havana h 2048 <-> objects y -2048). Havana's "2048" quarter (9130 land
+  cells, roads ROAD1 / PATH1 at object y -2048, the Take a Drive start) is RAISED 2048 above the main level 0 (84002
+  cells); h -2048 (923 cells) is low ground at the sea plane. The real error was the water: 2750 (D1, down) from the
+  wrong reading; the harbour water sits just under the main level (SEAWALLN quay walls reach 111 below it, the three
+  static FERRY cell objects float at y 111) -> water_level 160, BED_DEPTH 776, wall_depth 3200 (raised-quarter cliffs
+  ~2860 to the water). Road map D1 heights: raised 7406 cells at -2703, main + water 1198575 at 0..160 (hav3: water cells
+  1084730 at 2750, so 2600-5450 drops). Lights: profile light_turn / light_rename: TLIGHT1 (turn 32) -> TLIGHT00, SLIGHT1
+  -> SLIGHT01, SLIGHT2 (turn 32) -> SLIGHT02, DLIGHT1 -> SLIGHT00. Ferries: 3 FERRY objects already in D2's cell data
+  (y 111), converted as static world objects.
+- **Havana hav5 (Polish 27.10.): the ramp and the shore lift were building blocks read as water / at 0.**
+  - Cause 1 (sea_kinds): water vs building block is decided by the D2 overhead map's palette; Chicago's (1 river, 12 lake)
+    was hard-coded. In Havana 12 (and 10 / 13) are the grey building blocks, the sea is 4 (+ 5 coast shading, 1 sea
+    labels). So most enclosed blocks were "water": the raised quarters looked like islands over 'sea' (the ramp at D2 z
+    -258123 ran between two water strips: havana_ramp's car, posed at the ramp's edge row, had wheels over D1 water ->
+    the 2547 drop), and havana_water's "shores" (D1 -267750 / -209250, -215250) are building blocks inside the Necropolis
+    raised quarter (lifted to the quarter's level). The ramp itself was always in the road map (188 per cell).
+  - Cause 2: real building blocks ("inside") were written at 0, also inside the raised quarters (2700 drop at every block
+    edge; the d2sf hook keeps Driver 1's height where Driver 2 has no surface).
+  - Cause 3 (C17 deck fix): raised-quarter / ramp cells beside a block (no surface = "wet") counted as deck-only cells at
+    the water and got the street level as an extra plane, which the road map then wrote (choice = level nearest 0).
+  - Cause 4 (region write): regions without objects share one "empty" spool block incl. ITS road map (the map edge's: all
+    water); Havana's centre regions (7,10) / (8,10) have no objects -> 7200 block cells written as water.
+  - Fixes: cityprofile `map_water` (Chicago (1, 12), Havana (1, 4, 5); sea_kinds cache key unchanged for (1, 12)),
+    `inside_follow` (Havana: block cells take the nearest street cell's level, multi-source BFS), `raised_ground` (Havana
+    (-2703, -2726): not decks for C17) and C17's water test skips "inside" cells when inside_follow; convert: an empty
+    region shares the empty block only with an identical road map (generic; Chicago byte-identical, below).
+  - Numbers (day; D1 written heights, 4-neighbour steps): road<->block steps > 300: hav4 1861 -> hav5 23; road cells
+    beside fake water: 12748 -> 0; raised cells beside water: 1304 -> 0; water tiles 21283 -> 7284, shore walls 7204 ->
+    2243. Road<->road steps > 300 (both cells with a D2 surface): 1184 -> 930; hav5's 930 checked against D2 (24 samples
+    between the centres, continuity <= 100 per 62 units): 640 cliffs > 1000 and 112 smaller steps where D2 itself has no
+    continuous surface (walls / raised platforms), 128 + 1 continuous D2 slopes steeper than 300 per cell (carried by the
+    sloped ROADSURF planes / the d2sf exact lookup), 49 stacked deck cells by the water (C17 rule: street written, deck plane kept;
+    43 on the D2 1537 diagonal deck at the east shore, 5 on ~800-900 decks in East Havana, 1 at the west tunnel).
+  - Ramp profile (row 777, D1 cols 377-392): -2700, -2636, -2444, -2260, -2068, -1884, -1700, -1508, -1324, -1132, -948,
+    -756, -572, -388, -196, 4 (max 192 per cell, D2's 64 per 512); rows 772-781 beside it follow the same profile.
+  - Real main-level shores for havana_water (road cells, 5 road cells behind, 5 water cells ahead): start D1 (-22500,
+    195000) towards +z (Malecon), (367500, -196500) towards +x (harbour), (-213000, 55500) towards -z (west bay).
+  - In game (Polish copy devtest/polish, build-wip exe, package CHI_HAVANA_DAY/_NIGHT = hav5): static poses read the converted
+    heights within 20 (ramp row 777, raised blocks, start). The ramp drive from its top (+x) follows the D2 slope (2747 -> 134
+    over x -152684 .. -132808 = 0.125): havana_ramp's "<= 300 per 0.1 s" failed only because the car does ~1300 units per
+    sample; slope-relative check passes. -x / +-z drives from cell 372 stay at 2830-2870 (no fall).
+  - TELEPORT ARTEFACT (runner): after a long pose the engine keeps the start region's road map in the target's barrel (RAM
+    dump posed at (-22500, 205000) = region (7,12): barrel 1 (0x8011E680, 21600-byte stride from 0x80119220) held region
+    (5,8), the raised start quarter) -> cars stand 2700 up on 'water', or at street level over water (x 367k..455k), and
+    the area is undrawn (white). A pose into another region and back fixed (7,12) but not (12,8); driving into a region
+    always loads it. Water / height tests far from the start need the package start there or a drive-in.
+  - Drowning on correctly loaded Havana water (region (13,8), x 461k+): the car rides at y -25 (water 160), countdown
+    0x80097004 stays 25, timer 100, also with CHI_D2_SURF=0. Engine side (Infrastructure): neither the centre rule nor the
+    C17 band fires at Havana's shallow sea. Malecon / west bay spots hit sea walls (no drive-in there).
+  - **hav6 (Polish 27.10.): drowning cause = the water tile's model slot** (Infrastructure found it in RAM: runtime model
+    683 in Havana had flags 0x0001 / 0x0000). D2 Havana has its own model 683 (unnamed AREA model, 2 objects at y -2726),
+    so the area spool replaced the water tile in the runtime table: no sea flag 0x80 -> no sea branch in FindSurfaceD2,
+    no drowning. Profile water_model 683 -> 124 (BUILDING0018: in-memory, never placed, no instance / LOD use). Side
+    effect: 25 areas (was 27), spool 218 KB (xd 210), halving 48.4 % (xd 56.5 %), CLUT 335 / 336. In game (own copy,
+    build-wip exe): havana_water PASS (harbour (367500, -196500) +x: timer -> -1, Game Over; the 2nd spot only inherited that Game Over); ramp PASS with
+    the slope-relative check (havana_ramp's fixed 300-per-sample limit fails at the car's speed: steps 415 on the real
+    0.125 ramp). Chicago unaffected (profile only; CHICAGO keeps 683).
+
+## C119: overclock host guard v2 (Infrastructure 27.10., build-wip e1665478; probe "havana 1" user report)
+- **Report:** "Uncap GPU usage makes no difference on vs off" (user laptop `Startklar`: Intel GL driver 32.0.101.7076, 144 Hz,
+  internal scale 2x, Extra draw ON, Uncap OFF + cpu_percent 300; developer tools were off in that log). The C115 guard logged
+  62 % at 300 -> 68 % at 250 -> 76 % at 200 -> 95 % at 150 -> ceiling 100, then 83-95 % each time it re-raised to 125.
+- **Causes:** (1) Extra draw implies Uncap (s_xd_pct 200..400 wins over s_uncap_pct), so Uncap on/off cannot differ while
+  Extra draw is on (by design, said in the option text). (2) The guard judged single seconds right after the level start
+  (spooling), counted menu/loading seconds (forced 100 %, always full speed) toward re-raising -> flapping 100 <-> 125.
+- **No regression in 6162815a:** desktop A/B vs cheats 10 2078d295: host_speed headless (Chicago fps_drop_2, uncap 200 +
+  Extra draw) 274/274 % vs 275 %; host_load windowed 0.50/0.54 vs 0.50/0.48 cores. Dev tools on/off 274 vs 278 %.
+  Extra draw costs ~18 % host time (324 -> 274 % headless). build-dev 6ce7fda1 does not start in a build-test copy (no
+  debug server), not compared. The laptop is simply short of host time with Chicago + Extra draw.
+- **Lab finding (runner test `oc_guard`: game pinned to one core + a duty-cycle hog, windowed, paced):** with the frame-wait
+  skip, lowering the CPU speed saves host time only when the guest drops from 30 to 20 FPS; per-vblank host costs (GL,
+  present, SPU) dominate a short host. Old rule at hog 0.65: 100 %, EMU 70 %, 20 FPS; new: 200 %, EMU 67 %, 30 FPS. Where the
+  overclock IS the cause (hog 0.3, Uncap 400): probe at 100 % reads 99 % -> cut kept (EMU 95-99 %). No hog: no guard lines.
+- **Guard v2 (driver_gameplay.c overclock_guard):** (a) in-level seconds only; (e) 8 s warm-up after a level start / pause;
+  trigger = 3-second average < 97 % while overclocked; (b) probe 3 s at 100 %: >= 97 % or a gain >= CHI_OC_GAIN (10) =
+  overclock was the cause -> ceiling 100, re-raise +25 after `need` full-speed seconds, (c) `need` doubles per kept cut
+  (10..320 s); otherwise host-limited -> ceiling back, hold 60 s; (d) "host is short of full speed" logged once at 100 %.
+  CHI_OC_GUARD=1 = the C115 rule. Host-only (PS1 path: no overclock exists there, nothing to port).
+- **Open / proposal:** if a short host should keep music speed instead of 30 FPS, the lever is host-side frame skipping
+  (present/raster fewer guest frames), a runtime feature; it only helps if GL/present is the laptop's cost (unmeasured).
+
+## Minimap streaming (D2) study (Analyst 27.10., offline; R63)
+- **D2's scheme (REDRIVER2 overmap.c):** LUMP_OVERLAYMAP (24) is loaded with the level (main.c 217
+  ProcessOverlayLump) and copied whole into RAM (D_MALLOC): u16 offsets of RNC2-packed 32x32 4-bit tiles (512 B raw
+  each) at +0, 16-colour CLUT at +512 (uploaded to 960,256 once). Streaming is VRAM-only, never CD: a 4x4 ring of
+  tile slots (128x128 4-bit = 32x128 halfwords = 8 KB) inside the "OVERHEAD" texture page; LoadMapTile(slot, x, y)
+  RNC-unpacks one tile into the 520-byte MapBuffer and LoadImages it (8x32 halfwords); out-of-range tiles = the
+  `dummy` fill byte. InitOverheadMap fills 16 tiles; DrawOverheadMap shifts the 4x4 maptile[][] ring by one
+  column/row and reloads 4 tiles when the player's map pixel (x_map/y_map = offset + pos/scale) crosses the middle
+  (x_mod/y_mod 16) of a 32-px tile. Full-screen map (DrawFullscreenMap, pause.c PauseMap toggles gShowMap): 320x256,
+  1:1, centred on the player and clamped to the map edges, d-pad pans 8 px/frame, optional rotated mode; it draws
+  every on-screen tile immediately (LoadMapTile(ntiles & 15) + DrawPrim + DrawSync per tile, off-screen tiles
+  clipped), then InitOverheadMap restores the ring when the map closes.
+- **Driver 1 is the same code family, and the port already uses it:** loader 0x80054140 memcpys the lump to the heap
+  (0x80097098), CLUT at +0x148 (+ MAP_CLUT_EXTRA for D2 frames); LoadMapTile = 0x80056278 (slot table 0x8008B140,
+  VRAM base 0x800975F0 = special page u128..255 v0..127, buffer 0x800BE790, RNC 0x80026140); init 0x800541C8;
+  ring update in 0x8005474C (4 calls); pixel 0x800563CC. Note 0x80056278 skips the x < width test for CITY 3
+  (tiles past the east edge wrap to the next row instead of the fill byte; LA quirk, harmless so far).
+- **Numbers** (scratch mapstudy.py): lump bytes / tiles / unique: D1 LA 9012/78/73, Miami 11540/96, Frisco
+  12108/156, NY 9936/84; D2 Chicago 21880/252/163, Havana 21960/187/140, Vegas 19988/189/160, Rio 25856/252/158;
+  ours chicago.lev 22144/252/163 (frame 290,141,672,384,252|9<<8,2831), havana.lev 22416/187/140 (128,224,352,544,
+  187|8<<8,2703). RAM: the whole packed lump stays resident (+13 KB vs LA per D2 city). VRAM: 8 KB ring in every
+  case; a whole-map texture would be 129 KB (Chicago/Rio), 94-95 KB (Havana/Vegas). So "adopting D2's streaming"
+  saves nothing more: it is already what runs. CD-streaming tiles would save at most ~20 KB RAM per city but costs a
+  CD seek per 32-px crossing against the area spooler (C45 family): not recommended.
+- **Pause map (why it fails for D2 cities):** the pause menu sets flag 0x800967E8 (write at 0x8006C498; handler
+  0x8006C4BC clears it on a key); 0x800543D8 then calls the full map 0x80057AE4 instead of the HUD. 0x80057AE4 draws
+  ALL w/32 x h/32 tiles 1:1 on a fixed 512x240 screen (TILE 0,0,512,240), each through slot 0 (0x80056278(0,c,r) +
+  GT4 frame + FT4 via 0x80074628 = DrawSync + send), no clipping, layout hard-coded per CITY: 0/5 straight, 1 (Frisco)
+  scrolls vertically with the player, 2/3: screen x = 32 row + (512 - h) / 2, y = w - (240 - w) / 2 - 32 col.
+  Marker 0x80058278: table offsets + 0x31 only for CITY 0/5; CITY 1 uses constants 0x83/0xCC, CITY 2/3 constants
+  0x118 / -0x1C (LA's frame), then 0x8005813C / 0x800585D8 draw it. Simulated (scratch fullmap_sim.py) for the
+  CITY 3 branch: LA 192x416 -> y 8..200 (100 % visible); Chicago 672x384 -> y 248..920 = 0 % on screen (blank map);
+  Havana 352x544 -> 41 % (bottom cut, edges cut); Vegas 672x288 -> 0 %; Rio 576x416 -> 7 %. The marker is placed
+  with LA's constants for every D2 city. Also 252 RNC decodes + 504 DrawPrim/DrawSync per frame (no clip).
+- **Proposal (guest code, PS1-native; plugin only writes data words as today):** a D2-frame branch at the top of
+  0x80057AE4 (flag word gp-relative like MAP_CLUT_EXTRA, set from the slot sidecar's frame) into a cave routine that
+  ports D2's DrawFullscreenMap non-rotated path to Driver 1's frame: player pixel from the table (as 0x800563CC: col =
+  x_off + 48 + z/scale, row = y_off + 48 + x/scale), screen x = row - ox, y = (w - col) - oy, origin ox/oy = player
+  minus screen centre (256/120) clamped to [0, size - screen] per axis (Havana pans in x and y, the others in y only),
+  draw only tiles overlapping 512x240 (<= 17 x 9 = 153, typically 16 x 8) with the existing 0x80056278 + FT4 pair,
+  marker at (row - ox, w - col - oy) via 0x8005813C. Optional D2 d-pad pan (+-8 px/frame, pad word 0x8009752C bits
+  0x8000/0x2000/0x1000/0x4000) needs 0x8006C4BC to ignore d-pad presses as "close". Slot-agnostic: works for all
+  4 D2 cities in CITY 3 or in new slots (Q68), D1 cities keep the old path. Cost: 0 extra RAM/VRAM (code only,
+  ~120-150 words); fewer tile decodes per paused frame. No memory to gain from the minimap itself (see above).
+
+## Q68 = 68 B: D2 cities stay virtual in CITY 3; D2 city id decoupled (Infrastructure 27.10., build-wip)
+- **Assessment (offline, ghq):** CITY 0x80096834 has 113 refs in 63 functions. A new index (8+) would need 12 CITY-indexed
+  tables moved / extended (glows 0x8008AE3C / AE5C, minimap 0x8008B088-B094 / B230 / B268, 0x8008ABB8, 0x800148C4, level paths
+  0x80086EC0, DTM_BIN 0x80086F00, names 0x8008B328, runtime 0x800BE0A4 x 0x20), switches 525B8 / 52620 / 52CDC / LoadSky / 508B0
+  (default for 8+) and ~60 equality / range checks (==1 SF, ==5 NY, ==2/6 interview / training, <4 haze, 6/7); "cities
+  unlocked" 0x800967E0 (max city + 1, memcard) would exceed D1's own lists. Free indices: only 4 (FLAT: InitMusic skip, view
+  width 0x400, no player placement at 0x80022818); 7 = credits. User decision 68 B (27.10.): virtual cities in CITY 3.
+- **City id (plugin driver_chicago.c):** `D2_SLOT_CITY 3`, `s_d2c[]` = {name, asset dir, slot sidecar, preview, song base,
+  variant code, glow column}: 0 Chicago (assets/, songs 8/9, variants 1/2), 1 Havana (havana/, 10/11, 3/4), 2 Las Vegas
+  (vegas/, 12/13, 6/7), 3 Rio (rio/, 14/15, 8/9). V_VEGAS 8 / V_RIO 9 virtuals; `d2_city()` = running id or -1;
+  cur_variant / apply_variant / select_virtual / glows / sea word key on the id. Replay header bits 12-15: codes 10-15 free.
+  Test switch `CHI_D2_ROW_CITY=2|3`: page 2's Havana row loads Las Vegas / Rio (rows wired when the levels land).
+- **Package (build_package EXTRA_CITIES):** `CHI_HAVANA_DAY/_NIGHT`, `CHI_VEGAS_DAY/_NIGHT`, `CHI_RIO_DAY/_NIGHT` ->
+  assets/<dir>/ (subprocess CHI_CITY=<NAME>), <dir>.lev / _night / _xd_day / _xd_night after the last file, skies appended
+  in id order (first sky number in each slot.bin flags bits 8-15), D2 songs at the fixed slots up to the last packaged city
+  (cityprofile songs). Without a city's switch nothing of it is written.
+- **PS1 path (Milestone 8; host-only today):** the city choice is a host plugin decision (asset set from the package, level
+  table entry 3 rewritten, per-city words poked). Guest-side: one guest word (the variant code, already mirrored in
+  VARIANT_WORD 0x80093620 and the replay header bits 12-15) read by a small exe routine at the level load that picks the level
+  path / CD position (entry 3's 8 words from a per-city table on the disc) and the city's data block (sidecar words: sky base,
+  song base, sea level, glows, minimap frame) into guest RAM, instead of the plugin.
+
+## C121: Havana car sounds (Infrastructure 27.10., build-wip 36cf8f4e; user 'havana 1': D2 cities sound like Driver 1)
+- **Cause (plugin sfx_v2_vblank, R36):** (1) the CSX2 parse (s_sx_n / s_sx_map / sample offsets) was cached once per session
+  and never reset when city_assets_load swapped the asset set: after the boot-time Chicago set, Havana's car_sfx.bin was
+  copied with Chicago's offsets out of a freed / reused buffer (garbage or Chicago samples); (2) the civilian banks were
+  Chicago's fixed {12, 4, 13} (Havana's car_banks[1]: cop / model 3 -> 11, model 2 -> 10, model 4 -> 7), so none were placed
+  and the player slot (copied from slot 20) stayed silent (spu_voices: channel 0 off, channel 1 on a stray address).
+- **Fix:** sx_reset() in city_assets_load; civilian banks from the set's map (model 2's bank -> slots 20/21 + horn 25, the
+  cop's -> 16/17 + 24, the next other of models 3/4 -> 18/19 + 26; Chicago's map gives the old layout byte for byte).
+  Runner `car_sounds` (spu_voices per channel, bank 0 table): Havana player engine / idle now 0x38EF0 / 0x3A760 (music
+  tail, D2 bank 4 = choice 0), civilians placed to 0x12ED0; Chicago unchanged (0x3CD60 / 0x3F020, civilians to 0x12E60).
+- **Chicago too (user, 'havana 1' desktop session 22:13):** the page-2 cursor passing the Havana row loads Havana's set and
+  back (select_virtual on highlight), so even a Chicago-only session swapped s_sfx under a parse made earlier (title demo):
+  the log shows the civilian line but no 'R36 player car sound' -> the player kept a civilian / Driver 1 engine. Runner
+  car_sounds FIRST=<city> (quit, the other city): old exe 6162815a Chicago -> Havana = channel 1 on a stray address, no player
+  sound; Havana -> Chicago on the old exe played Chicago's layout in Havana; ff9dfc50: both orders place the city's own D2
+  player (Chicago bank 10, Havana bank 4) and civilian banks (Chicago 12/4/13/2, Havana 11/10/7). Fresh single-city runs
+  (both exes): Chicago channels 0/1/7/8 all D2 samples (SPU bytes matched against car_sfx.bin).
+- **Sirens (open, SPU budget):** Driver 1's siren = bank 0 sample 11 (0x24340, 2976 B @ 22 kHz, voices 10-15 in a chase). Driver 2's
+  are per city (VOICES2 bank 69 + GameLevel: Chicago 69 6048 B, Havana 70 14848 B, Las Vegas 69, Rio 71 12336 B, all 8 kHz
+  loops). No SPU room left in the samples 1-2 space (Chicago 1.3 KB, Havana 5.9 KB free after horns): needs another unused
+  Driver 1 bank-0 sample in D2 cities or a smaller block.
+
+## setup_chicago follows the shipped package (Infrastructure 27.10., Strategy after the 'havana 1' ship)
+- **Gap:** the auto / --build recipe built only Chicago day + night with the specdmg2-era RECIPE (no d2wheel ride, no shadow
+  sidecar), no Extra-draw pairs, no Havana: a rebuild (disc change, new marker) would have silently shipped less.
+- **Now:** RECIPE = Polish's cheats6 switches (+ CHI_POLISH_SPCRIDE=d2wheel, CHI_POLISH_SPCSHADOW=1), CHI_NIGHT_MOON only for
+  night conversions (NIGHT_RECIPE), XD_RECIPE CHI_POLISH_XDRAW=1; CITIES = [chicago, havana (CHI_CITY=HAVANA, package
+  switches CHI_HAVANA_DAY/_NIGHT)] (Las Vegas / Rio join here when shipped); build_levels() converts every city's day /
+  night / XD day / XD night (cache <setup cache>/out/<tag>_<tod>_<key>.lev, staged under package names in out/stage/),
+  package_cmd_env() passes them (+ CHI_XD_LEVELS=1, CHI_POLISH_MUSIC=1, LA day). The code_key covers every city's level key.
+  feature_guard(): the new package must contain every level / city folder / manifest feature id of the installed one,
+  else the build fails loudly and the installed package stays (unit-checked: dropping Havana is refused).
+- **Check (27.10.):** forced --auto on a marked devtest copy of build-dev (3228 s, 8 conversions + LA day): all 8 levels +
+  sidecars byte-identical to var_polish_cheats6_* / var_polish_hav6_*; the package equals build-dev's ('havana 1') except
+  havana/city.json (source paths) and the manifest's line endings.
+- Note: the playable copy has no driver_personal folder, so its prelaunch line cannot rebuild there (it boots the shipped
+  package as is); build-dev's marker predates this code key -> its auto step skips until the next ship re-marks it.
+
+## C120: Havana chase music (Infrastructure 27.10., shared exe window; build-test / build-wip ff9dfc50)
+- **Cause:** the C60 chase table (0x8001188C, 10 ints: D1's 8 + Chicago 7 / 8) ended before Havana's songs 10 / 11: the
+  lhu read the next stub's code (0xFFF8) -> XM set-position 65528 -> no chase section (copmusic did go to 1).
+- **Fix (exe_patches chase_table_patches, CHI_CHASE_TABLE16=0 = old table):** 16 ints at 0x8008A2B0 (zero padding before the
+  C114 cave): D1's 8 + xm_coptrackpos_d2 by song slot from cityprofile (Chicago 7 / 8, Havana 0xB / 9, Las Vegas 0x12 / 0x10,
+  Rio 0xC / 0xA); base lui/addiu 0x8004CF84/88 -> 0x8008A2B0; the MDEC strings at 0x8001188C are no longer written.
+  Patch count 1926. PS1: pure exe data.
+- **Check (runner chase_music: felony 0x400, copmusic, table entry, song order position after 4 s):** Havana day 10 -> 11
+  (pos 12), night 11 -> 9 (pos 11), Chicago 8 -> 7 (pos 9), Miami 3 -> 11 (pos 12, D1 unchanged). Subset on ff9dfc50:
+  cheats_menu, replay_header, chicago_drown, havana_water (harbour 367500/-196500; the test's default spots updated to it),
+  ship_check PASS. build-test's own ninja dir is stale (link errors on the newer caves): build-test = build-wip's exe copy.
+
+## C122: pause-menu map in the D2 cities (Infrastructure 27./28.10., shared exe windows; build-test / build-wip 2c28c5e9)
+- **Engine (exe_patches c122_patches, CHI_C122=0 off; plugin writes MAPD2 0x80093628 = 1 while d2_city() >= 0 with its own
+  minimap frame, 0 = Driver 1 unchanged):** MAPC cave 0x8008A4D0 (zero run after the u16 list ending 0x8008A4CE, 115 words)
+  from CITY 3's layout branch 0x80057C40: player overlay pixel u = x_off + z / scale + 49, q = y_off + x / scale + 49 (table
+  entry 3; + 49 as D1's CITY 0/5 marker and D2's WorldToFullscreenMap) at screen (256, 120): fp = 256 - q - sx clamped to
+  [512 - h, 0] (centred when h <= 512), l50 = w + 32 - u - 120 + sy clamped to [32, w - 208] (D1 centring when w <= 240);
+  marker words sp+0x18 / 0x1C set so D1's own '+ l50 / + fp' lands on the player. D-pad held (0x8009752C, active-high:
+  left 0x8000, right 0x2000, up 0x1000, down 0x4000) pans 8 px per map frame (MAPSX / MAPSY 0x8009362C / 30, stored clamped,
+  reset after 60 vblanks without a map frame (MAPVB 0x80093634): a map frame spans several vblanks, 5 reset every frame).
+  MAPW 0x8001188C (the MDEC strings freed by C120): LoadMapTile's CITY 3 east-edge skip only without MAPD2. MAPK 0x8008A440
+  (jal from 0x8006C4E8): the map's close test (new presses 0x80097538 = cur & (old ^ cur), FUN_800514E0) ignores the d-pad
+  with MAPD2. Assembler: 'div'. Seeds 0x8008A4D0 / 0x8001188C / 0x8008A440. PS1: pure exe + MAPD2 from the city data block.
+- **Check (runner pause_map: Show Map = pause row 6; set_input masks are active-low raw, clear_input releases):** LA:
+  Driver 1's map and marker unchanged, any d-pad closes it; Chicago: whole width centred (x 64..448), player at the Gold
+  Coast on a road, y pans -195..+133, d-pad keeps it open, cross closes; Havana: renders (Necropolis de Colon start), x pans
+  its 32 px, y its 112 px. Subset PASS: cheats_menu, havana_drive, chase_music, replay_header, city_switch, ship_check.
+- Not done: the second (mission target) marker keeps LA's transform (Take a Ride has none); all w/32 x h/32 tiles are still
+  decoded each map frame (Chicago 252; draw-only-visible would cut that, PS1 cost).
+
+## M3 Las Vegas / Rio de Janeiro (Polish 27./28.10., levels vegas1 / rio1)
+- **Inputs** (inputs.py): d2_VEGAS.LEV / _night / .DEN / .LCF, d2_RIO.* and d2_SKY2 / SKY3.RAW from D2 disc 2 (same md5 on disc 1).
+  d2overlay CITY: VEGAS (68, 457, 288, 672, 189, 0xBB, 1911), RIO (159, 207, 416, 576, 252, 0x44, 2048) (overmap.c).
+- **Profiles** (cityprofile VEGAS (+ alias LASVEGAS) / RIO): centre = D2 object extents; start = MISSIONS.BLK 54 / 56
+  (Vegas (143285, 621193) rot 2050, Rio (24453, -497793) rot 1025); sky SKY2 / SKY3; car_banks from gamesnd.c car_banks[2] / [3]
+  (Havana's profile has 8: 6 where MapCarIndexToBank gives 17: left as shipped); specials SpecialByRegion[2] / [3], default =
+  residentModels[4] (Vegas 9, Rio 8); new data fields songs / chase_pos (Chicago (2, 6) / (7, 8), Havana (1, 5) / (11, 9),
+  Vegas (3, 0) / (0x12, 0x10), Rio (4, 7) / (0xC, 0xA): REDRIVER2 main.c retail musicType + xm_coptrackpos_d2).
+  - Map water: Vegas 7 (the Lakeside lake), Rio 4 (sea + Lagoa). Rio's coast strips are land colour 15 without D2 surface ->
+    'void' (written water, drowning, no tiles drawn; D2 places its own sea tiles 783 / 51 there as objects).
+  - Water: both draw it at street level (Vegas lake tiles 172 at surface y 0, Rio sea tiles 783 / 51 at 0, flags 0x80):
+    water_level 40 (band 76). inside_follow on, no raised_ground (Vegas interchanges stay decks; Rio hills are slopes).
+  - Lights: arms -x (Vegas TLIGHT01 2198, SLIGHT01 929, SLIGHT02 688; Rio TLIGHT01 770, SLIGHT01 580) -> turn 32;
+    TLIGHT01 -> TLIGHT00, Vegas DLIGHT01 -> SLIGHT00; Vegas TLIGHT02 (46-unit pole) and Rio MLIGHT01 left unnamed.
+  - Water slot: Vegas 426 (unnamed in-memory, never placed). Rio has no free slot < 900 (all placed / instance sources / LOD
+    targets): new profile switch water_relocate moves D2 model 723 (in-memory, one object) to the last index (day 1256,
+    night 1255: convert.relocate_water_slot on the parsed level + its objects in d2_extract_cached).
+  - Rio specials: 10 and 12 need 21 slot entries; the slot page (8) has 12 own entries, <= 31 per page -> specials (8, 9, 11).
+    Vegas / Rio special 8 / 11: 18 entries (special_slot_entries 18). Rio area_tex_limit 200 (220: 13 areas, 272 KB
+    spool > 256 KB; 170: 43 areas, crash in the packer).
+- **Converter fixes (Chicago + Havana byte-identical, re-checked: cheats6_day / hav6_day with all sidecars):**
+  - Special car pages (minimap tile cache audit): Vegas' minor pages 64 / 19 hold used textures in both halves, only the
+    UNUSED TSHADOW crosses the middle: such a page is flipped too (_flippable_used); a pair may also put its major page first.
+  - d1models.is_tile: shape flag 0x2000 alone counts as a tile only with type-21 polygons; Vegas model 385 (0x2000, types
+    10 / 11) was kept raw and the world renderer read its polygon block as a group table: 'FAIL-FAST unknown dispatch
+    0x3A002A00, ra 0x80030B5C' whenever its area was drawn (also by driving). Now converted with a group table, 0x2000 cleared.
+  - (Tried and reverted: rewriting D2 types 16 / 22 / 23. Driver 1 has them itself (Miami 16 / 17 / 22 / 23).)
+- **Budgets:** Vegas day/night 9 areas, spool 200 KB, CLUT 373, halved 46.5 %, models 997; _xd 10 areas, 240 KB, CLUT 371,
+  46.3 %. Rio day/night 27 areas, spool 196 KB, CLUT 367 / 366, halved 71.5 %, models 1267 / 1266; _xd 218 KB, 72.1 %.
+  Rio's halving is high (texture-heavy city: ~200 textures per area).
+- **In game** (devtest/polish, build-wip exe, package CHI_VEGAS_* / CHI_RIO_*, CHI_D2_ROW_CITY=2 / 3; test-only start override
+  cityprofile CHI_START_<CITY>="x,z,rot" (D2 units; rot = D1 heading) for spots far from the start, never for conversions):
+  - Vegas: drive day / night / XD (XPVS 729) PASS; police slots 1 / 2 spawn and chase (day, night); freeway ramps +1400
+    (2 of 3) smooth; the 70-s and west drives that crashed before the is_tile fix pass. Lake: walled at all 4 approach
+    spots tried (no drive-in, as D2's Lakeside).
+  - Rio: drive day / night / XD PASS; police slots 1 / 2; ramps / overpass +1240..1390 smooth. Sea drive-ins blocked by
+    shore objects at 3 spots tried (no drowning seen yet); the coastal 'void' strip shows no water tiles.
+  - Runner caveat: a waypoint / spot pose over water or void drowns the car before the test starts (region waypoint is
+    released); far poses still risk stale barrels -> use the start override.
+
+
+## M3 Las Vegas / Rio wiring (Infrastructure 28.10., build-wip; Q68 B, levels Polish vegas1 / rio1)
+- **Menu:** page 2 built from the package (page2_build at chicago_slot_activate): Chicago, Havana, Las Vegas, Rio rows are
+  live when assets/<dir>/slot.bin exists (Miami's confirm: Day/Night), else grey. Runner menu paths take_a_ride/vegas|rio
+  (page-2 rows 2 / 3). Pictures: assets/<dir>/preview.bin from design/previews/out/<NAME> (VEGAS accepted; RIO = v1
+  placeholder until v2).
+- **Per city via the set (no new code):** variants Vegas 6 / 7, Rio 8 / 9 (replay header / VARIANT_WORD), songs 12 / 13,
+  14 / 15 (chase positions 0x12 / 0x10, 0xC / 0xA), skies after Havana's, D2 car sounds from the set's map, pause map +
+  minimap frames (d2overlay VEGAS 288 x 672, RIO 416 x 576), sea word -40 -> BANDW 76 (water_level 40).
+- **Glows (columns 4 / 5 of s_glow_words, Polish's geometry):** Vegas TLIGHT00 vertical heads (3 on the arm, D1 draws one
+  set: the head at x 681), red / amber / green y -1368 / -1255 / -1142 (thirds, assumed), z 70; Rio x 947, y -1205 / -1101 /
+  -998, z 13. Lamps: Driver 1 kind 2 (SLIGHT00, ONE glow, 0x8005310C / 14) and kind 3 (SLIGHT01, two glows, 0x80053118..):
+  Vegas SLIGHT00 = D2 DLIGHT01 (double) -> one glow (1104, -3001); Vegas SLIGHT01 single (1136, -2598) -> (1092, -2568) x2;
+  Rio SLIGHT01 (640, -1950) -> (596, -1920) x2. (Swapping Vegas' lamp names in the converter would give the double lamp
+  both glows.) Words checked in game (havana_drive CITY=vegas|rio records them).
+- **Checks (build-wip):** drive day / night / XD, chase_music (Vegas 12 -> 0x12, Rio 14 -> 0xC), car_sounds (D2 banks from
+  the set), pause_map (Vegas / Rio centred, clamped, pans) PASS.
+- **Drowning:** no reachable water edge in D2's own Vegas (lake walled) or Rio (shore objects) at Polish's 7 spots; the
+  band words are set (76). Rio's 'void' coast strips (written water, no tiles) are Polish's coast pass.
+- **Havana car_banks model 8:** MapCarIndexToBank: model 8 -> index 7 > 6 -> 4 -> car_banks[1][4] = 17 (the profile had 6):
+  fixed in cityprofile (package only; the level is unchanged).
+- **Runner pose:** a long pose's waypoint no longer releases the car (it drowned over water / void); it moves on held.
+- **Rio "glitchy car" (Design capture): not a bug (Polish): box truck = D2 model 12, p2 = a pose inside a building. Was: geometry within D1s
+  limits (player fit 227 polys / 128 verts; Rio models 2 / 10 carry type-18 polys that D1's car builder skips) -> car
+  texture pages / CLUTs (Polish: flip / pair change suspected). Rio specials 10 / 12 need 21 slot entries (> 19): backlog.
+- **rio2 / vegas2 (Polish 28.10.):**
+  - Rio coast: the 'void' strips (land colour 15, no D2 surface) carry Driver 2's own sea tiles (51 / 777 / 783, tile + sea
+    flag 0x80, surface y 0): profile sea_tiles_water marks the void cells under those tiles as water (5481 cells; our tiles
+    + drowning; D2's tiles still draw on top at y 0). In game: beach -> blue sea to the horizon, a drive east from the start
+    reaches the water and sinks. Rio drive-in spot (water-kind shore, no wall): D1 (370500, 21000) heading +x (drowns).
+  - Rio halving study: areas are capped at 31 (the specials' area mask is an int32: 185 -> 32+ areas, struct.error). 220: 13
+    areas, 78.9 %, spool 272 KB; 200: 27, 71.5 % (173 page units lost); 190: 30, 68.6 % (170), spool 200 KB = rio2; _xd keeps
+    200 (190 overflows the mask). Per-area packing (CHI_POLISH_S1) would help but was dropped for the area-switch glitch (Q40 C);
+    the real lever is C77 (D2-style VRAM layout, engine). Rio is texture-heavy (~200 per area vs Chicago ~150; Chicago 56 %).
+  - Vegas lamps: D1 draws one glow for SLIGHT00, two for SLIGHT01: DLIGHT01 (double) -> SLIGHT01, D2 SLIGHT01 (single) ->
+    SLIGHT00. Vegas' CLUT stays at 373 / 384 (11 free): any later texture / car-palette addition needs a CLUT check first.
+  - C124 (Strategy / Infrastructure): player choice 0 = D2 model 1 (Take a Drive car) in Vegas and Rio, not the secret car 12;
+    the player slot and civilian slot 1 share D2 model 1 (separate AI / player fits, damage rows per slot).
+  - C124 converter side: D2 model 1 has no special pages, so Driver 1's pair-by-choice load (pair k = choice k) would have
+    shifted every later choice onto the wrong pair: polish_cars.special_order keeps a BLANK pair (negative ids; convert
+    writes empty pages, no CLUTs, no details) for a player slot without special pages. Chicago / Havana never reach it.
+  - CLUT check (convert.clut_check, report only): it counted the FIRST special pair; with a blank first pair it now takes
+    the largest pair. The largest pair is the real worst case (any choice can be loaded): cheats6 23 -> 25 (+2, 366),
+    hav6 +5 (340), vegas1 +8 (381), rio2 27 (369). Vegas2 night = 381 / 384 (built with CHI_CLUT_MARGIN=3; the default margin
+    4 stops at 380), day / xd 379: Infrastructure to confirm in game (overflow would corrupt the first area slot's palettes).
+  - rio2 / vegas2 budgets: rio2 day/night 30 areas, spool 200 KB, CLUT 369, halved 68.6 %, models 1267 / 1266; rio2 _xd 25
+    areas (limit 200), 198 KB, 71.4 %; vegas2 day/night 9 areas, 200 KB, CLUT 379 / 381, 46.5 %, 997; _xd 10, 240 KB, 46.4 %.
+    In game (devtest/polish, build-wip): day / night / XD drive + police pass for both; Rio sea to the horizon on the
+    former void strips; choice 0 = D2 model 1 in both.
+
+- **28.10. rio2 / vegas2 (Polish):** Rio's coast 'void' strips carry D2's sea tiles (drawn, drowning); choice 0 = D2 model 1
+  in both (C124; model 1 has no special pages: a blank pair for choice 0, choices 1-3 keep pair k). Vegas lamp names swapped:
+  SLIGHT01 = D2 DLIGHT01 (double, kind 3: (+-1104, -3001)), SLIGHT00 = the single lamp (kind 2: (1092, -2568)); glow columns
+  swapped in the plugin. Runner rio_water (havana_water CITY=rio at D1 (370500, 21000) heading +x): timer -> -1 (drowns).
+  CLUT (Polish: largest special pair counted; vegas2 night 381 / 384, margin 3): runner car_choice (choice poked during
+  the menu / load from a second debug connection; Take a Ride's script sets 0 at 0x80068A38) Vegas night choice 3 (D2 8,
+  the 30-CLUT pair): no palette corruption seen on the car / world (start + 3 drive screenshots).
+- **C125 night roads (Polish 28.10.): cause = Driver 2 darkens ground tiles in its renderer, not in its night textures.**
+  REDRIVER2 tile.c DrawTILES: at night every tile is drawn with colour combointensity / 3 (NightAmbient 128 -> 42), in every
+  city. Driver 2's NLEVELS road textures are 1.0 of the day ones in Chicago (the converter's 'as bright as by day' rule darkens
+  them x0.3: fine) but 0.78-0.79 in Vegas / Rio and 0.63-0.68 in Havana, i.e. under NIGHT_KEEP_RATIO 0.8 -> kept as D2's
+  'night designs' -> day-bright roads in Driver 1 (no renderer darkening). Fix (data, profile night_tiles_third for Havana /
+  Vegas / Rio; Chicago unchanged, night re-checked byte-identical): at night every texture of a ground-tile model (shape
+  0x0400) x 1/3 (Rio 28, Vegas 20, Havana 17 textures). Levels: var_polish_rio3_night / _xd_night, vegas3_night / _xd_night
+  (CHI_CLUT_MARGIN=3, CLUT 381 / 379), hav7_night / _xd_night; the day levels stay rio2 / vegas2 / hav6. In game: dark
+  roads at the three night starts (screens in devtest/_out/runner/20261028-0508..0512 polish_drive_in).
+

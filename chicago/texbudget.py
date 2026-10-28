@@ -37,7 +37,8 @@ def rect_texels(ti, t):
 
 
 if __name__ == "__main__":
-    lev = Lev.parse(open("work/d2_CHICAGO.LEV", "rb").read())
+    import inputs
+    lev = Lev.parse(inputs.read("d2_CHICAGO.LEV"))
     ti = TexInfo.parse(lev.loadtime.get(34).data)
     sp = SpoolInfo.parse(lev.inmem.get(SPOOLINFO).data)
     mem, _ = inmem_models(lev)

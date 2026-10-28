@@ -26,10 +26,10 @@ import worldscale as ws
 
 RES = 256                 # Driver 2 units per reachability cell
 MIN_SHARE = 0.25          # each half of a split keeps at least this share of the regions
-SPAWN_D2 = (9216, 106496)
+SPAWN_D2 = tuple(__import__("cityprofile").P.start_d2 or (0, 0))   # M3 profile (Chicago: the Take a Ride start 9216, 106496)
 
 
-LIMIT_SHARE = float(os.environ.get("CHI_POLISH_AREAS_SHARE", "1.1"))   # mode 2: merging stops at this share of CHI_AREA_TEX
+LIMIT_SHARE = float(os.environ.get("CHI_POLISH_AREAS_SHARE", "0.8"))   # 0.8 default since corr5 (17.10.)   # mode 2: merging stops at this share of CHI_AREA_TEX
 
 
 CORRIDOR_MIN_EDGES = int(os.environ.get("CHI_POLISH_CORRIDOR_MIN", "20"))   # street edges for a corridor
@@ -41,11 +41,11 @@ def corridor():
     load starts 30 cells earlier; the border region becomes a corridor that both areas' texture and
     model sets cover (convert.loadable_areas simulates it), so nothing in it needs the other
     area's pages."""
-    return os.environ.get("CHI_POLISH_CORRIDOR", "") in ("1", "2")    # 2: + ping-pong-free entries
+    return os.environ.get("CHI_POLISH_CORRIDOR", "2") in ("1", "2")   # "2" default since corr5 (user 17.10.), "0" = off    # 2: + ping-pong-free entries
 
 
 def mode():
-    return os.environ.get("CHI_POLISH_AREAS", "")
+    return os.environ.get("CHI_POLISH_AREAS", "2").replace("0", "")   # "2" default since corr5 (user 17.10.), "0" = off
 
 
 def enabled():
@@ -53,9 +53,10 @@ def enabled():
 
 
 def reachability(d2_path: str):
-    """(reach bool[H, W], X0, Z0) in Driver 2 coordinates, cached in work/."""
-    key = hashlib.md5(open(d2_path, "rb").read(1 << 20) + open(__file__, "rb").read()).hexdigest()[:8]
-    cache = os.path.join(os.path.dirname(d2_path), "polish_reach_%s.pkl" % key)
+    """(reach bool[H, W], X0, Z0) in Driver 2 coordinates, cached (inputs.cache_dir(): work/ or the setup cache)."""
+    key = hashlib.md5(open(d2_path, "rb").read(1 << 20) + open(__file__, "rb").read() + repr(SPAWN_D2).encode()).hexdigest()[:8]
+    import inputs
+    cache = os.path.join(inputs.cache_dir(), "polish_reach_%s.pkl" % key)
     if os.path.exists(cache):
         return pickle.load(open(cache, "rb"))
     from PIL import Image, ImageDraw
@@ -282,7 +283,7 @@ BAND_LO, BAND_HI, RC = 13, 17, 30
 
 
 def pingpong_enabled():
-    return os.environ.get("CHI_POLISH_PINGPONG", "") == "1" or os.environ.get("CHI_POLISH_CORRIDOR", "") == "2"
+    return os.environ.get("CHI_POLISH_PINGPONG", "") == "1" or os.environ.get("CHI_POLISH_CORRIDOR", "2") == "2"
 
 
 def _fire(entries, ix, iz, loaded):

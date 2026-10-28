@@ -109,3 +109,69 @@ def pick(cands, fail_areas):
     """Replacement for the halving choice in texrepack.repack (switch 'cost')."""
     return max(cands, key=lambda it: (not (it.near & fail_areas) and max(it.w, it.h) >= 32,
                                       -int(loss(it) // LOSS_BAND), it.w * it.h))
+
+
+# --- street-level detail first (Design review 14.10., CHI_POLISH_TEX_HEIGHT=1) ----------------------
+# When the budget forces halving, textures used high up (roofs, upper storeys) go before street-level
+# ones (shopfronts, window grids at eye height). Height = mean model-space height (-y) of the polygons
+# using the texture over all Chicago models; HIGH_FROM units and above count as high.
+import os as _os
+HEIGHT = _os.environ.get("CHI_POLISH_TEX_HEIGHT", "1") == "1"      # C7 adopted 16.10. (user, probe "look 2"); 0 = off
+HIGH_FROM = int(_os.environ.get("CHI_POLISH_TEX_HIGH", "1536"))   # C7 default 16.10. (was 1200)
+# C7 round 2 (user 16.10.: blur only from 2-3 storeys up): D2 storeys are 512 units (mode of the vertex-level spacing
+# of Chicago's 448 tall models: 510-519). CHI_POLISH_TEX_HIGH_MODE=min rates a texture by its lowest vertex over all
+# its polygons instead of the mean height (a facade grid tiled from the ground up counted as high and was softened
+# at street level too); with CHI_POLISH_TEX_HIGH=1536 only textures wholly above the 3rd storey go first.
+HIGH_MODE = _os.environ.get("CHI_POLISH_TEX_HIGH_MODE", "mean")
+HIGH_SHARE = float(_os.environ.get("CHI_POLISH_TEX_HIGH_SHARE", "0.75"))
+
+
+def texture_heights(models: dict) -> dict:
+    """{(page, tex): mean height above the model origin (-y) of the vertices of polygons using it}."""
+    import struct as _st
+    from models import POLY_SIZES as _PS
+    acc = {}
+    for i, m in models.items():
+        src = models.get(m.instance_number, m) if m.instance_number >= 0 and m.instance_number != i else m
+        vb, nv = src.vertices, src.num_vertices
+        if m.poly_block >= len(m.data) or vb <= 0 or vb + 8 * nv > len(src.data):
+            continue
+        q = m.poly_block
+        for _ in range(m.num_polys):
+            t = m.data[q] & 31
+            if t in (4, 5, 7, 9, 10, 11, 17, 20, 21, 22, 23) and m.data[q + 1] != 0xFF:
+                ys = []
+                for vi in m.data[q + 4: q + 7]:
+                    if vi < nv:
+                        ys.append(-_st.unpack_from("<h", src.data, vb + 8 * vi + 2)[0])
+                if ys:
+                    a = acc.setdefault((m.data[q + 1], m.data[q + 2]), [0.0, 0, 1e9, 0])
+                    a[0] += sum(ys) / len(ys); a[1] += 1
+                    a[2] = min(a[2], min(ys))
+                    a[3] += min(ys) >= HIGH_FROM
+            q += _PS.get(t, 4)
+    if HIGH_MODE == "min":       # C7 r2: high only if the texture's LOWEST use is above HIGH_FROM
+        return {k: lo for k, (s, n, lo, up) in acc.items() if n}
+    if HIGH_MODE == "share":     # C7 r2: high if at least HIGH_SHARE of its polygons lie wholly above HIGH_FROM
+        return {k: (HIGH_FROM if up >= HIGH_SHARE * n else 0) for k, (s, n, lo, up) in acc.items() if n}
+    return {k: s / n for k, (s, n, lo, up) in acc.items() if n}
+
+
+# C45 corr5 (Polish 17.10.): CHI_POLISH_TEX_PROTECT=1 keeps Chicago's landmark textures (Navy Pier, Art Institute,
+# Merchandise Mart, Field Museum, Adler, Chinatown, Soldier Field, Wrigley, Hancock, the EL ...) out of the halving
+# while any other candidate is left (larger areas share pages and the budget used to fall on them).
+PROTECT = _os.environ.get("CHI_POLISH_TEX_PROTECT", "1") == "1"   # default since corr5 (user 17.10.)
+LANDMARK_PREFIX = tuple(__import__("cityprofile").P.landmark_prefix)   # M3 profile (Chicago: Navy Pier ... Tribune)
+
+
+def protected(it) -> bool:
+    if not PROTECT:
+        return False
+    n = it.name.decode("latin-1").upper() if isinstance(it.name, bytes) else str(it.name).upper()
+    return n.startswith(LANDMARK_PREFIX)
+
+
+def pick_height(cands, fail_areas):
+    """Halving choice with street-level detail first: high textures, then far-only ones, then the largest."""
+    return max(cands, key=lambda it: (not protected(it), getattr(it, "height", 0) >= HIGH_FROM,
+                                      not (it.near & fail_areas) and max(it.w, it.h) >= 32, it.w * it.h))

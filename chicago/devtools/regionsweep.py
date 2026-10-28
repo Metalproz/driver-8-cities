@@ -23,7 +23,8 @@ UNDER_MAP_Y = -1700                       # below the trench floor (car centre ~
 
 def regions():
     """Drivable regions, busiest first: (rx, rz, road_cells, spawn D1 x, z)."""
-    files = sorted(glob.glob(str(dt.CHI / "work" / "road_levels_*.pkl")), key=os.path.getmtime)
+    import inputs                         # Option A: converter caches live in inputs.cache_dir() (setup cache)
+    files = sorted(glob.glob(os.path.join(inputs.cache_dir(), "road_levels_*.pkl")), key=os.path.getmtime)
     g = pickle.load(open(files[-1], "rb"))
     cols, rows = max(k[0] for k in g) + 1, max(k[1] for k in g) + 1
     hx, hz = cols // 2 * 1500, rows // 2 * 1500

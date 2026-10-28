@@ -5,7 +5,7 @@ REDRIVER2 overmap.c: the lump starts with u16 offsets of 32x32 4-bit tiles
 12 across (width / 32). Pixel (px, py) <-> Driver 2 world:
 x = (px - x_offset - 48) * scale, z = (y_offset + 48 - py) * scale.
 
-    m = Overlay("work/d2_CHICAGO.LEV")
+    m = Overlay(inputs.path("d2_CHICAGO.LEV"))   # inputs.py: from the player's Driver 2 disc
     m.at(x, z) -> palette index; m.rgb(index) -> (r, g, b)
 """
 from __future__ import annotations
@@ -16,7 +16,9 @@ from levfile import Lev
 
 OVERLAYMAP = 24
 # x_offset, y_offset, width, height, toptile, dummy, scale (overmap.c overlaidmaps)
-CITY = {"CHICAGO": (197, 318, 384, 672, 252, 0x99, 2145)}
+# REDRIVER2 overmap.c overlaidmaps[GameLevel]: x_offset, y_offset, width, height, toptile, dummy, scale
+CITY = {"CHICAGO": (197, 318, 384, 672, 252, 0x99, 2145), "HAVANA": (229, 85, 544, 352, 187, 0x88, 2048),
+        "VEGAS": (68, 457, 288, 672, 189, 0xBB, 1911), "RIO": (159, 207, 416, 576, 252, 0x44, 2048)}
 WINDOW = 48     # pixels: the offsets are for the drawn window, not the bitmap (fitted on the roads)
 
 
@@ -92,7 +94,8 @@ def rnc2(src: bytes, size: int) -> bytes:
 
 
 class Overlay:
-    def __init__(self, path: str, city: str = "CHICAGO"):
+    def __init__(self, path: str, city: str = None):
+        city = city or __import__("cityprofile").P.name     # M3: the profile's city
         lev = Lev.parse(open(path, "rb").read())
         data = None
         for sec in (lev.loadtime, lev.inmem):
