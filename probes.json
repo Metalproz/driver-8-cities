@@ -1,6 +1,6 @@
 {
  "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop). NOTE: 'env' only feeds the PACKAGE BUILD (converter/build_package switches); runtime/plugin switches (e.g. CHI_C88_*) are NOT passed to the running game, so a runtime variant needs its own build/default.",
- "d2 cities 2": {
+ "d2 cities 3": {
   "lev": "work/var_polish_cheats6_day.lev",
   "night": "work/var_polish_cheats6_night.lev",
   "build": "build-test",
@@ -11,12 +11,12 @@
    "CHI_LA_DAY_LEV": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_la_day_15.lev",
    "CHI_XD_LEVELS": "1",
    "CHI_HAVANA_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav6_day.lev",
-   "CHI_HAVANA_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav7_night.lev",
-   "CHI_VEGAS_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas2_day.lev",
-   "CHI_VEGAS_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas3_night.lev",
+   "CHI_HAVANA_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav8_night.lev",
+   "CHI_VEGAS_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas4_day.lev",
+   "CHI_VEGAS_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas4_night.lev",
    "CHI_RIO_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio2_day.lev",
-   "CHI_RIO_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio3_night.lev"
+   "CHI_RIO_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio4_night.lev"
   },
-  "what": "Probe 'd2 cities 2' (= havana 2 + Las Vegas + Rio + dark night roads in Havana/Las Vegas/Rio like Driver 2) (3-disc). NEW: Las Vegas and Rio on page 2 of the city menu (Day/Night, own picture, sky, music + chase music, Driver 2 cars and car sounds, traffic-light glows, pause-menu map; Rio's sea drowns you; both start you in Driver 2's normal car). From havana 2: Havana chase music; Chicago/Havana Driver 2 engine + traffic sounds; pause-menu map in all Driver 2 cities (centred on you, d-pad pans, other buttons close; Driver 1 cities unchanged); reworked Uncap/Extra draw speed guard. Known: police sirens are still Driver 1's; Las Vegas lake is walled (no drowning there); Rio misses 2 special cars; Rio textures partly half resolution; Havana lights glow on the middle lamp only; ferries do not move; Chicago/Havana still start in the secret car (Q69)."
+  "what": "Probe 'd2 cities 3' (= d2 cities 2 + your review fixes) (3-disc). NEW: every Driver 2 city has its own day/night sky (no more Havana sky everywhere); no sound when a Driver 2 map starts loading; Las Vegas/Havana/Rio nights look like Driver 2 (lit casino neon and signs, Havana lamp heads lit, Vegas pole traffic lights glow); Mods > Quality of Life > 'Rewind' is its own setting; the 'Chicago' section is now 'Full Pro experience' with a required-for-custom-maps warning. From d2 cities 2: Las Vegas + Rio, dark night roads, Havana chase music, Driver 2 car sounds, pause-menu map in Driver 2 cities. Known: police sirens still Driver 1's; Vegas lake walled; Rio misses 2 special cars; D2 night shading of buildings/cars and lamp streaks not yet (C132); traffic still drives Driver 1's grid (C129, Q72); Chicago night unchanged (Q73); Chicago/Havana start in the secret car (Q69)."
  }
 }

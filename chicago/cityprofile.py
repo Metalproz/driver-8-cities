@@ -41,6 +41,7 @@ class CityProfile:
     inside_follow: bool = False                 # building-block cells (no surface) take the nearest street's level, not 0
     sea_tiles_water: bool = False               # 'void' cells under Driver 2's own sea tiles (tile models with the sea flag 0x80) are water
     night_tiles_third: bool = False             # night: textures of ground tiles x 1/3 (D2 DrawTILES: colour = combointensity / 3)
+    night_models_d2: bool = False               # night: other model textures as in D2's NLEVELS (D2 draws buildings at ambient 0x80 = 1.0); sprites x 1/3
     raised_ground: tuple = ()                   # D1 road-map levels (y down) that are ground, not decks (C17 deck fix skips them)
     wall_depth: int | None = None               # generated shore walls' depth (None: 2000 + water_level - 1084)
     light_turn: dict = field(default_factory=lambda: {"TLIGHT01": 48})        # model name -> yang steps (of 64)
@@ -138,6 +139,7 @@ HAVANA = CityProfile(
     raised_ground=(-2703, -2726),
     # (raised_ground: the raised quarters (D2 h 2048 / 2065) are ground, not Lake-Shore-style decks)
     night_tiles_third=True,                     # C125 (hav7 night): see RIO
+    night_models_d2=True,                       # hav8 (C128 rule, Strategy 28.10.): night textures as D2's (lamp heads BLAMP2 lit)
     wall_depth=3200,                            # (hav4; deep enough for any shore level, kept: hav5 no longer needs it)
     light_turn={"TLIGHT1": 32, "SLIGHT2": 32},  # arms to +x like Driver 1's / Chicago's lights
     light_rename={"TLIGHT1": "TLIGHT00", "SLIGHT1": "SLIGHT01", "SLIGHT2": "SLIGHT02", "DLIGHT1": "SLIGHT00"},
@@ -175,11 +177,18 @@ VEGAS = CityProfile(
     map_water=(7,),                             # overhead map: 7 = the lake (216, 240, 240); 11 = desert
     inside_follow=True,
     # freeway interchanges (768..1408 up) stay decks (C17 rule as Chicago's)
-    light_turn={"TLIGHT01": 32, "SLIGHT01": 32, "SLIGHT02": 32},   # their arms point -x (2198 / 929 / 688): to +x
+    # vegas4 (C128): TLIGHT02 is D2's pole traffic light (objanim.c GameLevel 2 case 1: lenses (-4, -537 / -466 / -395, -41),
+    # facing -z like Chicago's TLIGHT01 pole) -> Driver 1's pole kind TLIGHT01, turned 48 like Chicago's
+    light_turn={"TLIGHT01": 32, "SLIGHT01": 32, "SLIGHT02": 32, "TLIGHT02": 48},   # arms point -x (2198 / 929 / 688): to +x
     # vegas2 (Infrastructure 28.10.): Driver 1 draws ONE glow for SLIGHT00 and two for SLIGHT01: the double-headed DLIGHT01
     # becomes SLIGHT01, the single-headed SLIGHT01 SLIGHT00 (vegas1: DLIGHT01 -> SLIGHT00, one glow on a double lamp)
-    light_rename={"TLIGHT01": "TLIGHT00", "DLIGHT01": "SLIGHT01", "SLIGHT01": "SLIGHT00"},  # TLIGHT02 (46-unit pole) unnamed
+    light_rename={"TLIGHT01": "TLIGHT00", "DLIGHT01": "SLIGHT01", "SLIGHT01": "SLIGHT00", "TLIGHT02": "TLIGHT01"},
     night_tiles_third=True,                     # C125: see RIO
+    # vegas4 (C128): D2 draws its buildings at night at ambient 0x80 (= 1.0, draw.c SetupPlaneColours(combointensity),
+    # NightAmbient 128) with the NLEVELS textures as they are: the casino signs (FLAMINGO, IMP01-05, WSIGN, NEWY, EXC,
+    # MONTENT, DTSYN, MISCSNS ...) are as bright as (or brighter than) by day = lit neon; the converter's x0.3 'as bright as
+    # by day' rule (Chicago's look) dimmed 79 of them. Sprites (trees) x 1/3 as D2's lightLevel / 3
+    night_models_d2=True,
     water_model=426,                            # unnamed in-memory model, never placed, no instance / LOD use (683 exists here)
     hidden_engine_models=frozenset({"BOEING"}),
     landmark_prefix=(),
@@ -215,6 +224,7 @@ RIO = CityProfile(
     # DrawTILES, NightAmbient 128 -> 42); its NLEVELS road textures are only 0.6-0.8 of the day ones here (Chicago's: 1.0,
     # darkened by the converter's 'as bright as by day' rule), so the roads stayed day-bright under the night sky
     night_tiles_third=True,
+    night_models_d2=True,                       # rio4 (C128 rule, Strategy 28.10.)
     inside_follow=True,
     light_turn={"TLIGHT01": 32, "SLIGHT01": 32},  # arms point -x (770 / 580)
     light_rename={"TLIGHT01": "TLIGHT00"},

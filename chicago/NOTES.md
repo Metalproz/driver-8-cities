@@ -3391,3 +3391,176 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
   (CHI_CLUT_MARGIN=3, CLUT 381 / 379), hav7_night / _xd_night; the day levels stay rio2 / vegas2 / hav6. In game: dark
   roads at the three night starts (screens in devtest/_out/runner/20261028-0508..0512 polish_drive_in).
 
+
+## C129 D2 traffic lanes study (Analyst 28.10., offline)
+- **D2 road model (dr2types.h, dr2roads.h):** STRAIGHTS2 (lump 40, 28 B: Midx, Midz, length, bing, angle 0..4095 any
+  value, ConnectIdx[4], NumLanes, LaneDirs, AILanes, pad), CURVES2 (41, 28 B: Midx, Midz = arc centre, start/end
+  angle, ConnectIdx[4], gradient, height, NumLanes, LaneDirs, inside = inner radius in 1024 units, AILanes),
+  JUNCTIONS2_NEW (43, 12 B: ExitIdx[4], flags; bit 0 = lights, else yield rules). Surface ids: straight id,
+  0x2000|junction, 0x4000|curve; position -> id via the surface planes (GetSurfaceIndex = sdGetCell plane.surface - 32,
+  RoadInCell for spawns). NumLanes: bits 0-3 lane units (1024 wide, 2 x 512 sub-lanes), bits 4-5 speed id
+  (speedLimits 56/97/138), bit 6/7 left/right outer sub-lane = parking; LaneDirs / AILanes bit per unit.
+- **D2 civ AI (civ_ai.c):** each car keeps a 13-entry route ring (CIV_ROUTE_ENTRY dir, pathType, distAlongSegment,
+  x, z; CIV_STATE ~250 B). CreateNewNode adds nodes every 1024 units on straights, every 128/64/32 angle units on
+  curves (inside < 10 / < 20 / else) along the lane (GetNodePos: straights = Mid + dist*(sin,cos) + sideShift
+  (NumLanes*512 - lane*512 - 256)*(cos,-sin); curves = Mid + (inside*1024 + lane*512 + 256)*(sin,cos) of start+dist);
+  lane changes slide by 128 per node (changeLaneCount). At a segment end GetNextRoadInfo follows ConnectIdx: straight
+  <-> curve <-> straight directly, or a junction: 4 exit slots relative to the entry (turn -1024/0/+1024), left
+  lane = left/straight, right lane = right/straight, lights (junctionLightsPhase[exitFrom & 1]) or yield; corner
+  nodes (pathType 1) built from cornerAngle. CivSteerAngle/CivFindPointOnPath steer the physics car toward a look-ahead
+  point on the node path, CivAccel/CivAccelTrafficRules give speed (maxSpeed = speedLimits[speed id], car-ahead,
+  lights, junction yield). CheckChangeLanes: random/park lane changes with a collision check; parked cars via
+  CreateStationaryCivCar on parking sub-lanes. Spawn: PingInCivCar samples RoadInCell around the player.
+  Cops: patrol cars are civ cars until PassiveCopTasks -> InitCopState (CONTROL_TYPE_PURSUER_AI); pursuit uses the
+  pathfind.c obstacle/distance map (MapHeight based, omap 128x128) + FindCost, NOT the lane network. leadai.c (mission
+  getaway cars) walks straights/curves directly; felony.c reads road info for the player (wrong-way etc.).
+- **D1 model:** ROADS 16 B (id, ConnectIdx[2], NumLanes, LaneDirs, length, flags, pad, x, z), JUNCTIONS 44 B (4 entries
+  fromJunc/road/flags/extra, cardinal slots 0 -z, 1 +x, 2 +z, 3 -x), ROADBOUNDS = axis-aligned cell rectangles, road
+  map cell rot 2 bits. No angle or curve field anywhere. AI: mode 0..3 = the 4 axis directions (exit slot), lane line
+  0x80014FC4 = corner*1500 +- lane*1500 on ONE axis (+0x40 = x line, +0x44 = z line, 0x7FFFFFFF none), 0x80017780
+  snaps the car onto that line (|d| < 33) or pushes it sideways (d/32 or d/8 into 0x8009B324), headings quantised to
+  quadrants (& 0xC00, 0x8001262C), turns only inside junction boxes (0x80021820 cell 0x4000|id, picker 0x80016F0C).
+  ROADS readers: civ AI 0x80012E98..0x80019314, player rules 0x8001A9BC (-> 0x8001AC18 / 0x80020AE4, red light
+  0x8001AE14), map helpers 0x800213C8/0x80021820/0x80021DE8/0x80021F5C, script 0x800651F0 -> 0x80019314, 0x800394E0.
+- **Numbers** (scratch c129_roads.py / c129_diag.py; axis = within 8/4096 of an axis):
+
+  | city | straights (off-axis) | off-axis length | curves (AI) | mean span | junctions (lights) | D2 road lumps |
+  |---|---|---|---|---|---|---|
+  | Vegas | 525 (74: 66 at ~45 deg) | 13 % (1.3 M units) | 157 (145) | 78 deg, 105 >= 90 deg, r 5-25 k | 184 (0, all flags 2 = yield) | 21.3 KB |
+  | Chicago | 779 (2) | 1 % | 151 (151) | 98 deg | 252 (239) | ~29 KB |
+  | Havana | 611 (17) | 3 % | 126 (121) | 78 deg | 332 (17) | ~25 KB |
+  | Rio | 655 (6) | 1 % | 185 (182) | 88 deg | 279 (63) | ~27 KB |
+
+  Vegas links: straights -> junction 1094, -> curve 452, -> straight 360; speed ids 380 slow / 6 mid / 139 fast;
+  parking on 286 straights. Our converted vegas.lev (probe d2_cities_2): 282 D1 roads, 209 junctions; d1roads forces
+  every non-z straight onto the x axis (`axis = "z" if a < 8 or a > 2040 else "x"`), curves become corner junctions
+  only. Measured: 5 % of the 74 diagonals' centre line lies on a D1 road rect (0 diagonals > 50 % covered; the 12
+  roads touched are axis strips crossing them), curve centre lines 15 % (axis straights 60 %, the rest = junction
+  boxes / dropped). So Vegas has practically no traffic on diagonals and curves today.
+- **Options:** (A) translate to D1 format: impossible to be exact (no angles, one-axis lane lines, quadrant
+  headings, 90-degree box turns); at best staircase approximations. (B) D2 civ AI as guest code for D2 cities:
+  D2 road lumps resident in guest RAM (21-29 KB/city), D2 CIV_STATE per AI car (~250 B x cars), port of civ_ai.c's
+  road-following subset (InitNodeList, CreateNewNode, GetNodePos, GetNextRoadInfo, CheckChangeLanes, CivFindStation /
+  FindPointOnPath / SteerAngle, CivAccel(+TrafficRules), PingIn spawn by straight/curve search like leadai.c, no
+  surface grid needed) compiled with a PS1 MIPS toolchain into a level-loaded overlay (code est. 15-25 KB; too big
+  for exe caves) and hooked at D1's per-car AI entry (0x80013D88 and the mode/lane writers) for D2 slots only.
+  Output to the D1 car: the open item is D1's AI drive interface (research_traffic: throttle/steer not found; D1
+  moves civ cars along axes with direct lateral velocity 0x8009B324): either kinematic follow (set heading +
+  speed toward the D2 path point each frame; exact paths, robust) or locate D1's physics control inputs (D2-like
+  feel, more risk). Felony (0x8001A9BC) and red-light checks still read D1 roads: keep the D1 network as is for
+  them or give them a D2 road lookup. RAM ~45-60 KB total per D2 city (data + code + state); CPU like D2's own AI
+  on PS1 (it shipped at that cost). Recommendation: (B) with kinematic follow first, Vegas first; D1 roads kept for
+  player rules/cops until (B) is proven. D2 lights (global 2-phase) map onto D1's cycle; Vegas needs the yield path.
+- **Verification plan:** offline: a Python model of GetNodePos/CreateNewNode on Vegas data printing node paths for
+  10 diagonal/curve routes, compared with the guest port's traced nodes (exact match). In game (runner, Vegas):
+  trace AI car (x, z, heading) at 10 Hz on 3 diagonal boulevards and 3 large curves; pass = path within 256 units of
+  the D2 lane line, heading within 64/4096 of the tangent, no axis snapping, speeds = speedLimits per road; compare
+  with the same routes in D2 (REDRIVER2 or emulator capture of D2 Vegas); junction turns from diagonal roads,
+  yields at flags-2 junctions, no stalls in 10 min, then Chicago/Havana/Rio regression.
+- **C128 Vegas night checkup vs Driver 2 (Polish 28.10.).** D2's night (REDRIVER2):
+  - buildings / props: draw.c PlotBuildingModel colour = f4colourTable from SetupPlaneColours(combointensity); at night
+    combointensity = NightAmbient 128 = 0x808080 and with no weather every plane = ambient: NLEVELS textures drawn as they
+    are (1.0), FLAT (no per-face shading). Ground tiles: tile.c combointensity / 3 (C125). Sprites (trees): draw.c
+    lightLevel / 3 (Chicago: x2, the 'level bug'). Cars: cars.c night_colours 880 / 905 (vs day 3200) = about 0.28.
+  - lights: objanim.c per city / model: Vegas TLIGHT01 (3-head arm, AddTrafficLight x9), TLIGHT02 (POLE: (-4, -537 / -466 /
+    -395, -41)), SLIGHT01 AddLightEffect (-840, -1972, -61), DLIGHT01 (+-865, -2249), SLIGHT02 AddSmallStreetLight
+    (-620, -101) + AddLightEffect (-620, -1618); Rio TLIGHT01 (-719, -906 / -837 / -762, -22), TLIGHT02 (0, -654 / -578 /
+    -509, -21, unplaced), SLIGHT01 (-497, -1437); Havana 0..4 as named; plus lamp streaks (debris.c PreLampStreak / ShowFlare).
+  - Differences found in our Vegas night (vegas3) and their fix:
+    1. (data, FIXED vegas4) the converter's 'as bright as by day' rule (x0.3, Chicago's look) dimmed 79 Vegas model textures
+       that D2 draws at 1.0, incl. the casino signs (FLAMINGO 1.04, IMP01-05 up to 2.46, WSIGN 1.42, NEWY-01..05, EXC,
+       MONTENT1, BEGIOM, BELL02, SPHXPAW, DTSYN, MISCSNS, TISNTOP1, SYN-DET1, COKE, MNTDEW ...): neon dull. Profile
+       night_models_d2 (Vegas): night model textures stay as D2's NLEVELS, tiles x1/3 (C125), sprites x1/3. In game the
+       Flamingo sign is lit (shots 20261028-103908 vegas3 vs -103955 vegas4 polish_drive_in).
+    2. (data, FIXED vegas4) TLIGHT02 = D2's pole traffic light was unnamed -> no glows: renamed TLIGHT01 (Driver 1's pole kind),
+       turned 48 like Chicago's; lenses (+x face) at (54, -709 / -615 / -521, -5) D1 units (D2 x1.32 after the turn).
+    3. (engine) D2 draws night buildings flat (all planes = ambient); Driver 1 keeps its per-face light shading.
+    4. (engine) D2 cars are lit at ~0.28 at night (night_colours); Driver 1's night car lighting is its own.
+    5. (engine) glows: SLIGHT02 (single lamp + small street light) has no Driver 1 kind (CITY 3 list: TLIGHT00/01,
+       SLIGHT00/01); D2's lamp streaks / flare sizes and colours (type 0, colour 3) vs Driver 1's glow sprites.
+    6. (Infrastructure, C126) sky.
+  - vegas4 levels: day / night / _xd_day / _xd_night (CHI_CLUT_MARGIN=3; CLUT 381 / 379, 9 / 10 areas, spool 200 / 240 KB,
+    46.5 %); in game drive day + police, night + XD (XPVS 729) pass.
+  - Other cities (same check): the x0.3 rule also dims lit textures D2 draws at 1.0 - Chicago 55 model textures (lit
+    signs: CHICTHE1 / CHICTHE2 = Chicago Theatre sign 1.38 / 1.53, BIOGFRNT 1.26, CGTSGN03 / 04, DTL10, WALL4DRK), Havana 10
+    (BLAMP2 lamp head 2.09, LPOSTN5 1.13), Rio 20 (heli SIDEHELI / WINDHELI). Chicago's look is user-approved (decision).
+    D2 Rio SLIGHT01 has a light effect (-497, -1437) = our glow head (640, -1950) after the turn: consistent.
+
+- **C129 prep (Analyst 28.10.): reference model, D1 drive interface, toolchain.**
+  - `chicago/devtools/c129_ref.py` = line-by-line Python model of civ_ai.c (InitNodeList, GetNodePos, CreateNewNode incl.
+    left-turn corner nodes, GetNextRoadInfo incl. junction lane rules / lights-yield state / straight-curve lane fit,
+    Left/RightBoundLane, CivFindStation / FindPointOnPath / SteerAngle) + a kinematic follower with a yield brake ramp
+    (path shape only; no CheckChangeLanes, parking, other cars). rcossin = round(4096 sin) = D1's PsyQ table 0x8008EAA8
+    (4096/4096 equal); ratan2 = atan2 (+-1). Vegas run (seed 1, 900 frames): 10 cases, 0 confused: 4 diagonals
+    (S204/S202/S209/S201, follower within 18-23 units of the node line), 3 curves (C102 r 22k, C9, C4; 13-283),
+    junctions from diagonals: J173 L into curve C27 (493: corner cut), J170 S, J170 R (321). Output devtest/_out/c129/
+    (cases.json events, routes.csv nodes with D1 coords, traj.csv, sheet.png). Note: Vegas junctions are all flags 2
+    (yield, no lights); some diagonal junctions allow only S from inner lanes (D2 lane rules).
+  - **D1 drive interface (static):** AI records 0x80098950 + 0x50 * i (22), car = 0x8009B0A4 + (id + 1) * 0x18C
+    (id = record byte 0; car 0 = player). Car: +0x18/+0x1C/+0x20 position (where.t, snapped by 0x80017780), +0xF8 heading
+    (4096), +0xF4 steer (wheel angle, +-0x200), +0xF0 thrust, +0x108 speed (record +0x38 = signed copy), +0xC8/+0xD0 a
+    second position (player map reads car 0 +0xC8; the dispatcher adds 500 units along the heading each frame before
+    the AI's cell probes; role to confirm by one trace), car +3 = 0 marks AI control (0x8001D608 adds the car to
+    active_car_list -> normal physics). Per frame (dispatcher 0x8001A30C): state handler table 0x8008539C[record+1]
+    (2 = 0x80017DE8 drive: 0x80021820 cell probe, 0x80018100 steer = DIFF(heading, mode << 10): diff / 2 under 0x80,
+    else +-0x200 -> car +0xF4; if |diff| < 0x40, 0x80017780 lane hold: |d| < 33 snap +0x18 / +0x20 and steer 0, else
+    steer d / 32 (or / 8)); 3 = 0x800181B4 junction), then 0x80013D88 speed: target record +0x3C (0x800142CC: cruise
+    130/162/194/226 by record +9 & 3 from 0x800852FC, dist / 24 under 3500-3800 to the junction, 0 under 650 or when
+    0x80018F44 blocks; 0x8001262C car-ahead check with quadrant headings & 0xC00 -> 0), thrust car +0xF0 =
+    clamp(target - speed, +-32) * 5000 (accel) / 7000 (brake) >> 5; then 0x8001D608.
+  - **Minimal D2 hook (guest):** table words 0x800853A4 / 0x800853A8 (states 2 / 3) -> one D2 handler for D2 slots: keeps
+    the D2 node ring per record (22 x ~256 B), writes car +0xF4 = clamp(DIFF(car +0xF8, ratan2(look-ahead - pos)),
+    +-512) (D2 CivSteerAngle, same +-512 range as D1's steer) and record +0x3C = target speed from the D2 road
+    (speed class, yield ramp); 0x80013D88 needs a D2 branch at its record[3] / 0x800142CC step so the target is not
+    overwritten (its thrust law can stay). No 0x80017780 snap, no D1 junction cells for these cars. Spawn: hook after
+    0x800154A8 (D1 spawn) or replace 0x80016B24's pick with a D2 PingInCivCar (lane point near the player). Speed units
+    D1 car +0x108 vs D2 56/97/138 to calibrate by trace. 0x8001262C (car ahead) works by quadrant: fine first, D2's
+    box check later.
+  - **Toolchain:** no PS1 compiler in D:/recomps. Only exe_patches.py `asm()` (hand MIPS for caves) and an llvm-mingw
+    clang 22 (C:/Users/domin/.local/share/retcomm/...; no MIPS backend: "No available targets ... mipsel"). LLVM lacks
+    MIPS I load-delay handling anyway; fit: GCC mipsel-none-elf (as PSn00bSDK uses), `-march=r3000 -mabi=32 -msoft-float
+    -mno-abicalls -fno-pic -G0 -O2 -ffreestanding -nostdlib`, linked at a fixed guest address (linker script) with D1
+    symbols (0x8008EAA8 rcossin, car / record bases) as absolute symbols; ratan2 / SquareRoot0 ship in the overlay
+    unless found in D1's libgte. Loading (PS1-native): the overlay blob travels in the D2 city's LEV (an extra lump or
+    appended to the D2 road data lump) or as a file next to it, copied by a small cave loader into a reserved RAM range
+    at level load (fixed link address, no relocation), entry via the two table words. psxrecomp runs such code: runtime
+    overlays are captured -> interpreted until compiled -> native cache (README "Capture-and-compile for overlays");
+    exe-cave changes still need the regenerate step.
+- **C128 rule for Havana / Rio + Q73 switch (Polish 28.10.):** profile night_models_d2 on for Havana and Rio too (lamp heads
+  BLAMP2 / LPOSTN5 lit, heli textures as D2): var_polish_hav8_night / _xd_night (day stays hav6; CLUT 335 / 336) and
+  var_polish_rio4_night / _xd_night (day stays rio2; CLUT 369 / 365); in game night + XD drive and police pass. Chicago
+  (Q73, user decision): CHI_POLISH_NIGHT_D2=1 applies C125 + C128 to any city (tiles x1/3, sprites x1/3 (D2 itself draws
+  Chicago's trees x2: its 'level bug', not copied), other textures as D2's night level: Chicago Theatre / Biograph signs
+  lit); test level var_polish_q73_night.lev (cheats6 recipe + the switch, CLUT 364); without it Chicago night stays
+  byte-identical (re-checked).
+
+
+## R65 fixes (Infrastructure 28.10., build-wip / build-test 7d20d592)
+- **C126 every D2 city showed Havana's day sky:** sky_vblank only rewrote LoadSky's immediates (0x8004EDE0 / EC / EE00)
+  when they held LA's 2 / 3 or Chicago's 13-15; after the first D2 city with a sky >= 16 (Havana day 16/17) the words stuck
+  for every later city / time. Now any package sky (13..63) is rewritten. Runner `sky_check` (FIRST=<city> played first,
+  then CITY [NIGHT=1]; immediates vs the slot sidecar's first sky + night / rain): old exe stuck at [16, 18, 18], fixed
+  Vegas night [20, 21, 21]; suite: havana->vegas, vegas->chicago night, chicago->rio night, rio->havana PASS.
+- **C127 sound at the start of loading a D2 map (after any map was played):** the R36 car-sound code restarted car
+  channels (key-on) while the next level loaded: the previous level's channels still owned voices 0 / 1, and the player
+  slot was placed provisionally in the music block's tail that the load was refilling (spu_voices 0.3 s after the
+  confirm: voice 0 vol 0x3F90 at 0x3CB30; tap 3 RMS ~15000 for ~1 s, Miami -> Chicago on 6162815a). Now s_sx_live (game
+  frame counter moved in the last 8 vblanks): steps 2-5 only in a running level; outside, sx_restart retargets and keys the
+  voice OFF. Runner `d2_load_sound` (FIRST map, quit, D2 map: MMIO key-ons + tap 0 / 3 RMS per 0.1 s from the confirm):
+  silent for miami->chicago, chicago->havana, havana->vegas; car_sounds unchanged.
+- **C130 Rewind as its own Mods setting:** driver.personal feature `rewind` ('Rewind', Quality of Life, default on;
+  build-wip / build-test manifests, mods/preloaded untouched). The runtime applies the launcher's rewind switch after mod
+  activation, so driver_personal_rewind_vblank() (called from driver.chicago's model-table vblank) applies the feature on
+  the first vblank: on / off regardless of the launcher. Runner `rewind_setting` (WANT=on, and CHI_FEATURES_OFF=
+  driver.personal:rewind WANT=off; new env in dt.write_state / session) PASS.
+- **C131 'Chicago' section -> 'Full Pro experience':** build_package manifest: package name 'Full Pro experience' (+ warning
+  description), group 'Full Pro experience' (3 features), model-table 'Engine Extensions (required)' with the warning
+  (required for all custom Driver 2 maps and the custom map changes: Newtown, LA by day, Interview / Desert ...),
+  chicago-slot 'Driver 2 cities (own Take a Ride rows, Los Angeles restored)'. Ids unchanged (package driver.chicago,
+  feature ids): state.toml, probes, playable copy and plugins key on ids only (grep: no code reads group / names).
+- **C133 pole traffic light glows (vegas4 TLIGHT02 -> D1 kind 1):** exe cave LGTY 0x8008A378 (from the glow helper's draw
+  call 0x80053810): an x argument >= 0x2000 = kind 1 with its own height: x -= 0x4000, y += LGDY (0x80093638), z += LGDZ
+  (0x8009363C). Plugin: Vegas kind-1 word 0x24064306 (lens x 54 + 720 + 0x4000), LGDY +659 / LGDZ -75 (arm head -> pole
+  lenses; amber / green 19 / 38 low); 0 elsewhere. C17 cave end tightened to its code (0x8008A378).
+- **Levels:** vegas4 (day / night / _xd), hav8_night (+ _xd_night; day hav6), rio4_night (+ _xd_night; day rio2).
+- havana_ramp judges only the ramp (until street level + 3 samples): later bumps made it flaky in suites.

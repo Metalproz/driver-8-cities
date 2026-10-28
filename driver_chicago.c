@@ -1731,7 +1731,8 @@ static void chicago_slot_vblank(void) {
  * Chicago's offset between Polish's head and the plugin's glow point: -44 / +30). */
 static const uint32_t s_glow_words[][6] = {          /* address, LA, Chicago, Havana, Las Vegas, Rio */
     { 0x800530E4u, 0x2406FCFEu, 0x24060505u, 0x240604F6u , 0x24060579u, 0x24060683u },   /* kind 0 (TLIGHT00) a2: x = a2 - 720 */
-    { 0x800530F8u, 0x2406FD26u, 0x240602D0u, 0x240602D0u , 0x240602D0u, 0x240602D0u },   /* kind 1 (TLIGHT01) a2 (Havana has none) */
+    { 0x800530F8u, 0x2406FD26u, 0x240602D0u, 0x240602D0u , 0x24064306u, 0x240602D0u },   /* kind 1 (TLIGHT01) a2; Vegas (vegas4
+                                     pole light, lens x 54): 774 + 0x4000 = C133's own-height mark (exe cave LGTY) */
     { 0x800537E4u, 0x2406FA4Cu, 0x2406FC43u, 0x2406FBD0u , 0x2406FAA8u, 0x2406FB4Bu },   /* red y */
     { 0x800537F8u, 0x2406FABAu, 0x2406FC94u, 0x2406FBD0u , 0x2406FB19u, 0x2406FBB3u },   /* amber y */
     { 0x8005380Cu, 0x2406FB28u, 0x2406FCE5u, 0x2406FBD0u , 0x2406FB8Au, 0x2406FC1Au },   /* green y */
@@ -1750,7 +1751,16 @@ static const uint32_t s_glow_words[][6] = {          /* address, LA, Chicago, Ha
  * mirrored); vegas2 (Polish 28.10.) names it SLIGHT01 = kind 3 (0x80053118.., two glows: +-1104, -3001) and the single lamp
  * (1136, -2598) SLIGHT00 = kind 2 (0x8005310C / 14, one glow) -> (1092, -2568). (vegas1 had the names the other way.) Rio (rio1): one head x 947, red -1205 / amber -1101 / green -998 (separate lens textures), front z 13; lamp
  * SLIGHT01 only (as Chicago / Havana: both lamp words) head (640, -1950) -> (596, -1920). Neither city has a TLIGHT01. */
+/* C133: kind 1's own lens height / depth against kind 0's (exe cave LGTY, words LGDY / LGDZ): Las Vegas' pole light
+ * (vegas4, Polish: lenses (54, -709 / -615 / -521, -5)) vs the arm head (-1368 / -1255 / -1142, z 70): +659, -75 (amber /
+ * green land 19 / 38 below their lens: one shared offset). 0 elsewhere. */
+static void switch_glow_kind1(int col) {
+    int32_t dy = col == 4 ? 659 : 0, dz = col == 4 ? -75 : 0;
+    if ((int32_t)psx_mod_read_word(0x80093638u) != dy) psx_mod_write_word(0x80093638u, (uint32_t)dy);
+    if ((int32_t)psx_mod_read_word(0x8009363Cu) != dz) psx_mod_write_word(0x8009363Cu, (uint32_t)dz);
+}
 static void switch_glow(int col) {
+    switch_glow_kind1(col);
     for (unsigned i = 0; i < sizeof s_glow_words / sizeof s_glow_words[0]; i++) {
         uint32_t cur = psx_mod_read_word(s_glow_words[i][0]), want = s_glow_words[i][col];
         int known = 0;
@@ -1822,7 +1832,8 @@ static void sky_vblank(int chi) {
         uint32_t cur = psx_mod_read_word(addr[i]);
         uint32_t imm = cur & 0xFFFFu;
         if (cur != want && (cur & 0xFFFF0000u) == 0x24020000u
-            && (imm == la || (imm >= 13u && imm <= 15u) || imm == laday_sky(0) || imm == laday_sky(1)))
+            && (imm == la || (imm >= 13u && imm < 64u) || imm == laday_sky(0) || imm == laday_sky(1)))   /* C126: any of the
+            package's skies (13.. = Chicago, LA day, Havana, Las Vegas, Rio), not only Chicago's 13-15 */
             psx_mod_write_word(addr[i], want);
     }
 }
@@ -2744,6 +2755,12 @@ static uint32_t sx_bank_end(uint32_t b) {
     }
     return end;
 }
+/* C127 (user R65: a sound at the start of loading a D2 map after any map was played): while no game frame runs (menu /
+ * loading screen) the previous level's car channels still own their voices; restarting them keyed the engine on over the
+ * music block that the load is refilling (spu_voices: voice 0 vol 0x3F90 at 0x3CB30, ~1 s loud noise). s_sx_live = the
+ * game's frame counter moved in the last 8 vblanks; outside of it a restart only retargets the channel (attr address /
+ * rate) and keys the voice OFF; the game keys its car channels on itself when the level starts. */
+static int s_sx_live;
 /* restart a logical channel's voice on table slot `slot` (attr addr + rate, voice start address, key on) */
 static void sx_restart(uint32_t ch, uint32_t slot) {
     uint32_t base = 0x800BD498u + 0x84u * ch, e = SFX_TAB + 16u * slot;
@@ -2754,6 +2771,10 @@ static void sx_restart(uint32_t ch, uint32_t slot) {
     if (v >= 24u) return;
     psx_mod_write_word(base + 0x1Cu, want);
     psx_mod_write_word(base + 0x44u, psx_mod_read_word(e + 12u));
+    if (!s_sx_live) {                                        /* C127: no key-on outside of a running game */
+        if (v < 16u) spu_write(0x1F801D8Cu, 1u << v); else spu_write(0x1F801D8Eu, 1u << (v - 16u));
+        return;
+    }
     spu_write(0x1F801C06u + 16u * v, (want >> 3) & 0xFFFFu);
     if (v < 16u) spu_write(0x1F801D88u, 1u << v); else spu_write(0x1F801D8Au, 1u << (v - 16u));
 }
@@ -2804,6 +2825,13 @@ static void sx_horn_play(uint32_t slot, int32_t vol) {
 static void sfx_v2_vblank(void) {
     uint8_t* spu = spu_get_ram_ptr();
     if (!spu || !sx_parse()) return;
+    {   /* C127: is a game frame running (frame counter moved within 8 vblanks)? */
+        static uint32_t last_fc, vb, last_move;
+        uint32_t fc = psx_mod_read_word(0x800970D8u);
+        vb++;
+        if (fc != last_fc) { last_fc = fc; last_move = vb; }
+        s_sx_live = vb - last_move <= 8u;
+    }
     uint32_t a1 = psx_mod_read_word(SFX_TAB + 16u), sz1 = psx_mod_read_word(SFX_TAB + 20u);
     uint32_t a2 = psx_mod_read_word(SFX_TAB + 32u), sz2 = psx_mod_read_word(SFX_TAB + 36u);
     uint32_t base0 = psx_mod_read_word(SFX_BANK_BASE);
@@ -2845,6 +2873,7 @@ static void sfx_v2_vblank(void) {
                 a1, at, horn_at[1] + hmax);
     }
     if (!base0 || s_sx_done != base0 + 0x3710u) return;
+    if (!s_sx_live) return;                              /* C127: the rest once the level runs (banks all loaded) */
     /* 2. the block tails (the music / mission banks are loaded by now) */
     uint32_t b2 = psx_mod_read_word(SFX_BANK_BASE + 8u), b3 = psx_mod_read_word(SFX_BANK_BASE + 12u), b4 = psx_mod_read_word(SFX_BANK_BASE + 16u);
     uint32_t m_end = sx_bank_end(2u), q_end = sx_bank_end(4u);
@@ -3353,7 +3382,9 @@ static void restore_vblank(void) {
     last_vb = vb;
 }
 
+extern void driver_personal_rewind_vblank(void);   /* C130: the Mods 'Rewind' choice (driver_personal.c) */
 static void area_switch_guard_vblank(void) {
+    driver_personal_rewind_vblank();
     restore_vblank();
     shadow_vblank();
     s_vbl_n++;

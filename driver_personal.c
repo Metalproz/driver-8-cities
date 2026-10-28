@@ -291,6 +291,19 @@ static void dev_tools_activate(void) {
     psx_mod_request_dev_tools();
 }
 
+/* C130 (user R65): "Rewind" is its own Mods setting (feature rewind, default on). The runtime applies the launcher's rewind
+ * switch after mod activation, so the choice is applied on the first vblank by driver_personal_rewind_vblank() (called from
+ * driver.chicago's always-on model-table vblank): feature on = rewind on, off = rewind off, whatever the launcher says. */
+static int s_rewind_feature;
+static void rewind_activate(void) { s_rewind_feature = 1; }
+void driver_personal_rewind_vblank(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    psx_rewind_set_enabled(s_rewind_feature);
+    fprintf(stdout, "driver.personal: rewind %s (Mods setting)\n", s_rewind_feature ? "on" : "off");
+}
+
 static void dev_mode_activate(void) {
     char ts[32], path[1300];
     dp_timestamp(ts, sizeof(ts));
@@ -679,6 +692,7 @@ static void dev_mode_vblank(void) {
 
 PSX_MOD_CONSTRUCTOR(driver_personal_register) {
     psx_mod_register_activation_plugin("driver.dev-tools", dev_tools_activate);
+    psx_mod_register_activation_plugin("driver.rewind", rewind_activate);
     psx_mod_register_activation_plugin("driver.dev-mode", dev_mode_activate);
     psx_mod_register_vblank_plugin("driver.dev-mode", dev_mode_vblank);
 }

@@ -990,7 +990,7 @@ DROWN_EDGE = [
 # gp -0x314C) instead: the plugin writes the city's band start (Chicago 1120, Havana 2750 + 36); 0 with DROWN_RANGE 0
 # in the D1 cities = the D1 rule as before. The old cave words after the jump stay (unreachable).
 C17_BANDW, C17_BANDW_GP = 0x80093624, -0x314C
-C17_CAVE, C17_CAVE_END = 0x8008A340, 0x8008A3A0
+C17_CAVE, C17_CAVE_END = 0x8008A340, 0x8008A378         # (end tightened 28.10. for C133's cave behind it)
 
 
 def drown_edge_patches(exe_path):
@@ -2964,6 +2964,44 @@ def c122_patches(exe_path):
     return out
 
 
+# --- C133 pole traffic light glows (Infrastructure 28.10., vegas4: D2 TLIGHT02 = Driver 1's kind 1 TLIGHT01) ---------------
+# Driver 1 draws kind 0 (TLIGHT00) and kind 1 (TLIGHT01) glows through ONE helper (0x80053764): only the x offset (a2 at the
+# call sites 0x800530E4 / 0x800530F8, plugin glow words) differs, the lens heights (0x800537E4 / F8 / 0x8005380C) and z
+# (0x80053814) are shared. LA / Chicago heads sit at one height; Las Vegas' pole light (vegas4) is ~660 lower than its arm
+# heads. Cave LGTY (jal from the helper's draw call 0x80053810, a3 = z already set in the delay slot): an x argument
+# a1 >= 0x2000 marks kind 1 with its own height (the plugin writes kind 1's x + 0x4000; real offsets stay below +-3000):
+# a1 -= 0x4000, y (a2) += LGDY, z (a3) += LGDZ (zero-block words, plugin per city), then on to 0x8004343C. Unmarked x =
+# Driver 1 unchanged. PS1: pure exe + 2 data words. CHI_C133=0 = off.
+C133_DY, C133_DY_GP = 0x80093638, -0x3138
+C133_DZ_GP = -0x3134
+C133_CAVE, C133_CAVE_END = 0x8008A378, 0x8008A3C0
+
+
+def c133_patches(exe_path):
+    if os.environ.get("CHI_C133") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    for a in range(C133_CAVE, C133_CAVE_END, 4):
+        if word(a) != 0:
+            raise RuntimeError("C133: cave word %08X not zero" % a)
+    for a in (C133_DY, C133_DY + 4):
+        if word(a) != 0:
+            raise RuntimeError("C133: word %08X not free" % a)
+    src = ["slti at, a1, 0x2000", "bne at, zero, GO", "nop",
+           "addiu a1, a1, -0x4000", "lw at, %d(gp)" % C133_DY_GP, "nop", "addu a2, a2, at",
+           "lw at, %d(gp)" % C133_DZ_GP, "nop", "addu a3, a3, at",
+           "GO:", "j 0x8004343c", "nop"]
+    cw = asm(C133_CAVE, src)
+    assert C133_CAVE + 4 * len(cw) <= C133_CAVE_END, hex(C133_CAVE + 4 * len(cw))
+    out = [(C133_CAVE + 4 * i, 0, w, "C133: pole light glow height %d" % i) for i, w in enumerate(cw) if w]
+    old, new = asm(0x80053810, ["jal 0x8004343c"])[0], asm(0x80053810, ["jal %#x" % C133_CAVE])[0]
+    if word(0x80053810) != old:
+        raise RuntimeError("C133: site 80053810")
+    out.append((0x80053810, old, new, "C133: traffic light glow draw -> LGTY"))
+    return out
+
+
 # --- C109 libgpu GPU-timeout limit (Infrastructure 27.10., Strategy go: A) ------------------------------------------------
 # libgpu's wait helper FUN_764C4 ends a GPU wait after VSync(-1) passes the deadline (+240 vblanks) or after 0xF0000
 # iterations. Inside the interrupt handler VSync does not advance, so a queued StoreImage whose 'ready to send VRAM'
@@ -2994,7 +3032,7 @@ def all_patches(exe_path):
             + c42m_patches(exe_path) + c42l_patches(exe_path) + c42p_patches(exe_path) + c35t_patches(exe_path)
             + sky_dome_patches(exe_path) + s1_clut_patches(exe_path) + s1_slot15_patches(exe_path)
             + s1_cave_patches(exe_path) + s4_patches(exe_path) + c82_patches(exe_path) + c87_patches(exe_path) + c88_patches(exe_path)
-            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path))
+            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path))
 
 
 def apply(exe_in, exe_out):

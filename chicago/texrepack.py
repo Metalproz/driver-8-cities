@@ -315,12 +315,24 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
     day_tex, dark_f = night_same_as_day(chicago)
     ndark = 0
     night_tiles = set()                       # C125 (CityProfile.night_tiles_third): textures of ground tile models
-    if day_tex is not None and __import__("cityprofile").P.night_tiles_third:
+    # Q73 (Chicago, user decision pending): CHI_POLISH_NIGHT_D2=1 applies the C125 + C128 night rules to any city (default
+    # off: Chicago's shipped look); Havana / Vegas / Rio have them in their profiles
+    _nd2_env = __import__("os").environ.get("CHI_POLISH_NIGHT_D2", "0") == "1"
+    if day_tex is not None and (__import__("cityprofile").P.night_tiles_third or _nd2_env):
         _cm, _ = inmem_models(chicago)
         for _m in {**area_models(chicago), **_cm}.values():
             if _m.shape_flags & 0x0400:
                 night_tiles |= model_texrefs(_m, {})
         print("night: %d ground-tile textures darkened x1/3 (C125)" % len(night_tiles))
+    night_d2 = day_tex is not None and (__import__("cityprofile").P.night_models_d2 or _nd2_env)   # C128: as D2's
+    if night_d2:                              # sprites (trees): D2 lightLevel / 3 at night (draw.c, not Chicago)
+        _cm, _ = inmem_models(chicago)
+        _ns = set()
+        for _m in {**area_models(chicago), **_cm}.values():
+            if _m.shape_flags & 0x4000 and not _m.shape_flags & 0x0400:
+                _ns |= model_texrefs(_m, {})
+        night_tiles |= _ns
+        print("night: %d sprite textures darkened x1/3, other model textures as Driver 2's night level (C128)" % len(_ns))
     bti, bpages = read_pages(base)
     cnames = chicago.loadtime.get(5).data
     bnames = base.loadtime.get(5).data
@@ -397,7 +409,7 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
         if src == "C" and day_tex is not None and t in night_tiles:
             clut = darken_clut(clut, 1.0 / 3)           # C125: D2 draws night tiles at combointensity / 3
             ndark += 1
-        elif src == "C" and day_tex is not None and day_tex.get(nm) and \
+        elif src == "C" and day_tex is not None and not night_d2 and day_tex.get(nm) and \
                 mean_brightness(rows, clut) >= NIGHT_KEEP_RATIO * day_tex[nm]:
             clut = darken_clut(clut, dark_f)            # as bright as by day in D2: darkened
             ndark += 1

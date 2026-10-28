@@ -190,6 +190,10 @@ def write_state(d: Path, features):
         s += '\n[[package]]\nid = "%s"\nversion = "%s"\n' % (p, "0.1.0" if p == "driver.chicago" else "1.0.0")
     for p, f in features:
         s += '\n[[feature]]\npackage_id = "%s"\nid = "%s"\nenabled = true\n' % (p, f)
+    # CHI_FEATURES_OFF="pkg:feature,..." (tests): features switched off explicitly (e.g. driver.personal:rewind, C130)
+    for pf in filter(None, os.environ.get("CHI_FEATURES_OFF", "").split(",")):
+        p, f = pf.split(":")
+        s += '\n[[feature]]\npackage_id = "%s"\nid = "%s"\nenabled = false\n' % (p, f)
     (d / "mods").mkdir(parents=True, exist_ok=True)
     (d / "mods" / "state.toml").write_text(s)
 

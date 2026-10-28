@@ -572,9 +572,9 @@ def main():
         'id = "driver.chicago"',
         'version = "0.1.0"',
         'channel = "developer"',
-        'name = "Driver - Chicago (work in progress)"',
+        'name = "Full Pro experience"',   # C131 (user R65): was "Driver - Chicago (work in progress)" (id driver.chicago kept)
         'author = "local"',
-        'description = "Local-only work in progress: engine support and test data for porting Driver 2\'s Chicago into Driver 1."',
+        'description = "WARNING: required for ALL custom Driver 2 maps (Chicago, Havana, Las Vegas, Rio) and for the custom map changes (Newtown, Los Angeles by day, Interview and Desert in Take a Ride, ...). Keep Engine Extensions on. Local-only: engine support and the Driver 2 cities built from your own Driver 2 discs."',
         'resolver = "declarative"',
         'save_compatibility = "shared"',
         "",
@@ -584,9 +584,9 @@ def main():
         "",
         "[[feature]]",
         'id = "model-table"',
-        'name = "Engine Extensions (Chicago)"',
-        'description = "Lets levels use up to 2048 models (Driver 1 allows 800) and keeps the city object buffer in extra memory. Needed by the Chicago level; harmless for the original cities. Keep it on: the game code is compiled with it, so turning it off runs those parts slower."',
-        'group = "Chicago"',
+        'name = "Engine Extensions (required)"',
+        'description = "WARNING: required for ALL custom Driver 2 maps (Chicago, Havana, Las Vegas, Rio) and for the custom map changes (Newtown, Los Angeles by day, Interview and Desert in Take a Ride, ...). Turning it off breaks them. Lets levels use up to 2048 models (Driver 1 allows 800) and keeps the city object buffer in extra memory; harmless for the original cities. The game code is compiled with it, so turning it off also runs those parts slower."',
+        'group = "Full Pro experience"',   # C131 (user R65): was "Chicago" (display only; state keys on feature ids)
         "default_enabled = true",
         "",
         "[[plugin]]",
@@ -812,9 +812,9 @@ def main():
         out += [
             "[[feature]]",
             'id = "chicago-slot"',
-            'name = "Chicago (own city, Los Angeles restored)"',
-            'description = "Work in progress: Chicago from Driver 2 as its own city (5th Take a Ride row, with Day/Night). Los Angeles is the original again. Needs Engine Extensions (Chicago)."',
-            'group = "Chicago"',
+            'name = "Driver 2 cities (own Take a Ride rows, Los Angeles restored)"',
+            'description = "The Driver 2 cities as their own Take a Ride cities with Day / Night (page 2, Driver 2 cities: Chicago, Havana, Las Vegas, Rio, as far as this package carries them). Los Angeles is the original again. Needs Engine Extensions (required)."',
+            'group = "Full Pro experience"',   # C131 (user R65): was "Chicago" (display only; state keys on feature ids)
             "default_enabled = false",
             "",
             "[[plugin]]",
@@ -925,8 +925,8 @@ def main():
             "[[feature]]",
             'id = "chicago-la"',
             'name = "Chicago (replaces Los Angeles)"',
-            'description = "Work in progress: Chicago from Driver 2, converted for Driver 1 and loaded in place of Los Angeles. Needs Engine Extensions (Chicago). Start downtown; traffic and cops are not in yet."',
-            'group = "Chicago"',
+            'description = "Work in progress: Chicago from Driver 2, converted for Driver 1 and loaded in place of Los Angeles. Needs Engine Extensions (required). Start downtown; traffic and cops are not in yet."',
+            'group = "Full Pro experience"',   # C131 (user R65): was "Chicago" (display only; state keys on feature ids)
             "default_enabled = false",
             "",
             "[[overlay]]",

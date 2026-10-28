@@ -111,6 +111,9 @@ class Session:
             if os.environ.get("RUNNER_UNCAP"):           # C92: "Uncap GPU usage" at RUNNER_UNCAP % CPU
                 st += ('\n[[feature]]\npackage_id = "driver.personal"\nid = "uncap-gpu"\nenabled = true\n'
                        'values = { cpu_percent = %d }\n' % int(os.environ["RUNNER_UNCAP"]))
+            for pf in filter(None, os.environ.get("CHI_FEATURES_OFF", "").split(",")):   # C130: e.g. driver.personal:rewind
+                pk, fe = pf.split(":")
+                st += '\n[[feature]]\npackage_id = "%s"\nid = "%s"\nenabled = false\n' % (pk, fe)
             (d0 / "mods" / "state.toml").write_text(st, encoding="utf-8")
             # RUNNER_SETTINGS="key=value;key=value": settings.toml overrides in the copy (host-speed profiling)
             sf = d0 / "settings.toml"
