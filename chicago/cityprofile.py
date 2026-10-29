@@ -48,6 +48,7 @@ class CityProfile:
     light_rename: dict = field(default_factory=lambda: {"TLIGHT02": "TLIGHT00"})   # -> Driver 1's glow-table names
     water_model: int = 683                      # free in-memory model slot < 900 for the water tile
     water_relocate: bool = False                # the Driver 2 model at water_model moves to a new last index first (no free slot)
+    resident_models: tuple = ()                 # Driver 2 AREA models (by name) made in-memory (glow models Driver 1 resolves by name at load)
     water_tex: tuple = ()                       # a basin's own rim / water textures (C75)
     wall_texture: tuple | None = None           # (source, page, detail) of the quay wall texture
     quay_models: tuple = ()
@@ -189,6 +190,9 @@ VEGAS = CityProfile(
     # MONTENT, DTSYN, MISCSNS ...) are as bright as (or brighter than) by day = lit neon; the converter's x0.3 'as bright as
     # by day' rule (Chicago's look) dimmed 79 of them. Sprites (trees) x 1/3 as D2's lightLevel / 3
     night_models_d2=True,
+    # vegas5 (C132 c, Infrastructure): glow kind 4 = SLIGHT02; Driver 1 resolves glow models by name at level load
+    # (FUN_80052A78): D2's SLIGHT02 is an area model -> made in-memory
+    resident_models=("SLIGHT02",),
     water_model=426,                            # unnamed in-memory model, never placed, no instance / LOD use (683 exists here)
     hidden_engine_models=frozenset({"BOEING"}),
     landmark_prefix=(),

@@ -973,6 +973,30 @@ def relocated_index() -> int:
     return struct.unpack_from("<i", Lev.parse(open(D2_LEV, "rb").read()).inmem.get(L_MODELS).data, 0)[0]
 
 
+def make_resident(chi: Lev, names):
+    """M3 Vegas (vegas5, C132 c): the named Driver 2 AREA models get their data into the in-memory model lump (the area
+    spool copies are then left out: build_models takes area models 'not in cmem'), so Driver 1 finds them by name at load."""
+    allnames = model_names(chi)
+    areas = area_models(chi)
+    lump = chi.inmem.get(L_MODELS)
+    raw = lump.data
+    count = struct.unpack_from("<i", raw, 0)[0]
+    want = {allnames.index(n): n for n in names if n in allnames}
+    out, p = bytearray(raw[:4]), 4
+    done = []
+    for i in range(count):
+        size = struct.unpack_from("<i", raw, p)[0]
+        body = raw[p + 4: p + 4 + max(size, 0)]
+        p += 4 + max(size, 0)
+        if i in want and size <= 0 and i in areas:
+            body = areas[i].data
+            done.append(want[i])
+        out += struct.pack("<i", len(body) if body else size) + body
+    out += raw[p:]
+    lump.data = bytes(out)
+    print("resident models (in memory): %s" % done)
+
+
 def relocate_water_slot(chi: Lev):
     """M3 Rio: no model slot < 900 is free (all placed, instance sources or LOD targets). The Driver 2 model at
     WATER_MODEL is appended as model `count` (its objects follow, d2_extract_cached) and its slot is left to the
@@ -3289,6 +3313,8 @@ def convert(out_path: str):
     chi = Lev.parse(open(D2_LEV, "rb").read())
     if CITY.water_relocate:
         relocate_water_slot(chi)
+    if CITY.resident_models:
+        make_resident(chi, CITY.resident_models)
     base = Lev.parse(inputs.read("d1_LA.lev"))
     cmem0, _ = inmem_models(chi)
     models0 = {**area_models(chi), **cmem0}

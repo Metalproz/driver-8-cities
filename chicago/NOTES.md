@@ -3564,3 +3564,76 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
   lenses; amber / green 19 / 38 low); 0 elsewhere. C17 cave end tightened to its code (0x8008A378).
 - **Levels:** vegas4 (day / night / _xd), hav8_night (+ _xd_night; day hav6), rio4_night (+ _xd_night; day rio2).
 - havana_ramp judges only the ramp (until street level + 3 samples): later bumps made it flaky in suites.
+- **vegas5 (C132 c, Polish 28.10.):** profile resident_models=("SLIGHT02",) -> convert.make_resident moves the D2 area model
+  into the in-memory lump on the parsed level (Driver 1 resolves glow models by name at load, FUN_80052A78); SLIGHT02 is in
+  no area list. Head (lamp quad PARK03) (815, -2156, 4) D1 units after the turn 32. Levels var_polish_vegas5_day / _night /
+  _xd_day / _xd_night (CLUT 381 / 379, spool 200 / 238 KB). Open observation: downtown start (D2 172000, 682000) + 1.5k north,
+  colour noise next to models 46 / 47 (SHOP01A / GHOSTMB / STN2RAIL, areas 7 / 8), also in vegas4.
+- **C134 Vegas downtown 'shop glitch' (Polish 28.10.): engine side (minimap), not the shop model.** At the downtown start
+  (D2 172383, 678898) the colour noise sits around the minimap frame (screen x 375..520, y 141..238). GPU capture
+  (scratchpad vr/cap_shop/cap.json): 16 semi-transparent 32-px quads, tpage 12 (VRAM 768, 0), CLUT 15380, UVs u 155..250 /
+  v 30..125 = Driver 1's 4 x 4 minimap tile cache, drawn unclipped beyond the frame and holding garbage, while the map inside
+  the frame is right. Same in vegas1 (no blank C124 pair) and vegas4 / vegas5, so not the car pages. Our minimap lump is
+  clean (all 189 tiles decode; the downtown window cols 477..605 / rows 158..286 lies inside the 672 x 288 map, toptile 189).
+  The shop models 45-48 (SHOP01A / GHOSTMB / STN2RAIL / WALL5 / S-SYN04, page 12, areas 7 / 8, types 10 / 11) are the same
+  objects as D2's (42 objects in the box, identical) and draw fine; the dark band under the car is no geometry (D2 has no
+  ground tiles there either: roads / paths only) = Driver 1's clear colour.
+
+
+## C132 D2 night look + C134 frame clear (Infrastructure 28.10., build-wip; Strategy go)
+- **Where Driver 1 shades (subagent study + own):** D2 cities run their nights with night flag 0 and LOOK_CITY 3, so Driver 1
+  uses its DAY facing colours (FUN_8002D0F4 day branch: scratchpad 0x1F800024..43 = 0x808080 / 0x707070 / 0x606060 /
+  0x505050 / 0x404040 by 45-degree facing, lui/ori immediates 0x8002D464..88) and LA's night car colour (DrawCar
+  FUN_8003A698: LOOK_CITY 3 -> 0x800971A0 = 0x282828, lui/ori 0x8003A6D0 / D4; one flat colour for every car body poly,
+  player and AI; wheels / far cars / later generic drawers read the same word). No GTE car lighting in Driver 1.
+- **(a) + (b) (plugin night_look_vblank, CHI_C132_LOOK=0 off):** while a D2 city runs at night the four darker facing
+  immediates become 0x808080 (flat, D2 SetupPlaneColours: every plane = ambient) and the car word 0x242323 (D2 night_colours
+  880 / 905 of 3200); Driver 1 values otherwise (LA night keeps 0x282828, D1 nights use their own night branch).
+  **psx_mod_write_code_word is required** for code immediates: psx_mod_write_word left the native block stale (car colour
+  sampled 0x282828 until switched). The glow (s_glow_words) and sky (sky_vblank) immediates now go through the same call:
+  before, the D2 glows were drawn with Driver 1's native constants (Havana night shots: lamp glows appear only now).
+- **(c) glow kind 4 = SLIGHT02 (exe c132_patches, one shared window):** CITY 3's glow table already holds a 5th entry
+  {4, 0, "SLIGHT02"} (count 4 at 0x8008AE68); cave K4 0x8008A6A0 from the dispatch default 0x800530D8 draws one lamp glow
+  (like kind 2) at LX4 / LY4 (0x80093640 / 44); the plugin sets count 5 + Vegas (771, -2126) (vegas5 head (815, -2156)
+  + (-44, +30)) only while Las Vegas is chosen (vegas5 keeps SLIGHT02 in memory; resolved by name at load).
+- **Build note:** this generate grew the generator's shard count (48 -> 54 files): build-wip needed a cmake reconfigure
+  (`cmake build-wip`), else link errors on the new shards' functions.
+- **C134 Vegas Fremont 'noise' = no frame clear:** Driver 1 never clears the frame (sky + ground cover it); D2 maps have
+  spots without ground geometry (Fremont start: D2 has roads / paths only), so old VRAM showed (the minimap-cache quads
+  Polish found are clipped by the draw area E3/E4 and were not the cause; MAPD2 off changed nothing). Plugin
+  clear_bg_vblank: both DRAWENVs (0x800BDFB4 / 0x800BE034, +0x18 isbg r0 g0 b0) isbg = 1, black, while a D2 city runs
+  (CHI_C134=0 off; D1 cities unchanged). Runner `c134_clear` (start CHI_START_VEGAS 172000,682000: neighbour difference
+  beside the minimap 40.3 off -> PASS on). The hole itself stays black (as D2's clear).
+- Runner `night_capture` (CITY / NIGHT / POSE, screenshot, night-look words, car colour samples, optional GPU frame).
+
+## C135 probe q73 freezes / crash (Infrastructure 29.10., build-wip; user laptop session 28.10. 17:26-17:53, exe 7d20d592)
+- **Four events, two causes.** Dumps 17:30 / 17:43 + psx_crash.txt (FAIL-FAST 0x04200374, ra 0x80077AC8, last store
+  0x80077AC4) = cause 1; dump 17:37 (in FUN_8002E230's far-car loop, ra 0x8002E650, s0 0x9F0E0554) = cause 2.
+  Not the C109 GPU-timeout family, not C126 sky / C127 load-sound code.
+- **Cause 1: stale CITY opcode (extras via LA).** Newtown / Desert run LA's Take a Ride 0x7C with CITY_OP_WORD 0x800689F8
+  (`lw v0,4(t0)` -> `addiu v0,zero,7/6`). The plugin wrote it with psx_mod_write_word: RAM changed, the native block kept
+  its old instruction (it picks the change up only at some later invalidation), so a ride ran with the PREVIOUS choice's
+  city id. With the wrong level-table entry the loader read REPLAY.BLK (LBA 15522-15712) into 0x80114600 /
+  0x801E0E6C, past 0x80200000, wrapping onto 0x0: exception vectors + BIOS tables gone -> unknown dispatch 0x04200374.
+  The 17:37 session's log ('Los Angeles day' -> 'mission 0xAE (level 2)' -> level 6) is a menu path: LA's Day/Night
+  screen, back, cursor over Interview (the mission swaps to 0xAE while browsing, harmless: the confirm rewrites 0x7C),
+  confirm Desert. Fix: CITY_OP_WORD and switch_words through psx_mod_write_code_word (all plugin code-word writes now do).
+  build-dev 6162815a has it too (crash reproduced on an exact copy).
+- **Cause 2: special-car block overflow across cities.** specials_vblank gave each special id ONE guest block, sized for
+  the first city's special of that id; later cities copied theirs into it. Rio 8 (13684 B) into Vegas 8's block (13460 B):
+  the low model's last 224 bytes lay in the next allocation (Vegas 10's block in the runner, another owner in the user's
+  session); when that owner wrote, the far-car drawer (lbu type byte, no & 0x1F, table 0x80089FFC) read garbage and
+  jumped into nowhere. Chicago 9 -> Havana 9 overflowed by 140 B too (build-dev). Fix: per-slot capacity (>= 16 KiB;
+  every special so far <= 14.6 KiB), re-allocated when a bigger one arrives. Host-only (M8: a fixed 16 KiB buffer per
+  special slot in guest RAM).
+- **Runner:** `extra_load` (CITY=newtown|desert|interview: CITY id, opcode, frames moving), `menu_route` (LA Day/Night ->
+  back -> over Interview -> confirm TARGET=desert|newtown; needs CHI_LA_DAY_LEV for LA's Day/Night screen; old exe:
+  FAIL-FAST 0x04200374 = the user's crash), `special_swap` (FIRST=vegas CITY=rio, CHI_SPC_CYCLE=3: special blocks never
+  overlap, low models' polygon types valid; old exe: Rio 8 overlaps Vegas 10).
+- **Regression (build-wip d4ea9929 -> build-test, marked 30.10. 00:14):** 26 runs PASS (extra_load x3, special_swap x2,
+  cheats_menu, replay_header, nightmare_start, cd_restore, city_switch, shadow_bus, havana_drive x3, sky_check x2,
+  d2_load_sound, car_choice, night_capture x2, c134_clear, rewind_setting, ship_check, flip_wreck rerun).
+- **Side finding (not C135, rare, test-induced):** flip_wreck crashed once in ~28 runs (FAIL-FAST 0x000000B0, same
+  ra 0x80077AC8): the flipped Miami car slid ~173000 units (z 420k -> 593k) into the sea on its roof; the in-game area
+  spool then read from 0x801852BC over 0x80200000. Miami, no D2 data. Runner `wreck_end` (flip_wreck's order + 30 s with
+  dma_cdrom_history logging) did not reproduce in 5 runs. Open: does Driver 1's spool size an off-map / sea area wrongly?

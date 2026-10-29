@@ -2876,7 +2876,7 @@ def c114_patches(exe_path):
 # + one data word (MAPD2 comes from the city's data block on PS1; host plugin today). CHI_C122=0 = off.
 C122_MAPD2, C122_MAPD2_GP = 0x80093628, -0x3148
 C122_MAPSX_GP, C122_MAPSY_GP, C122_MAPVB_GP = -0x3144, -0x3140, -0x313C
-C122_CAVE, C122_CAVE_END = 0x8008A4D0, 0x8008A6BC         # MAPC (the zero run after the list ending 0x8008A4CE)
+C122_CAVE, C122_CAVE_END = 0x8008A4D0, 0x8008A6A0         # MAPC (the zero run after the list ending 0x8008A4CE; C132 K4 behind it)
 C122_MAPW = 0x8001188C                                    # 10 words: the MDEC strings the C60 table used before C120
 C122_MAPK, C122_MAPK_END = 0x8008A440, 0x8008A464         # 9 words: zero padding after the C113 cave
 C122_K = int(os.environ.get("CHI_C122_K", "49"))     # D1 0x80058278 (CITY 0/5) and D2 WorldToFullscreenMap: + 49
@@ -2887,7 +2887,7 @@ def c122_patches(exe_path):
         return []
     img, base = load_exe(exe_path)
     word = lambda a: struct.unpack_from("<I", img, a - base)[0]
-    for a in list(range(0x8008A4D0, 0x8008A6BC, 4)) + list(range(C122_MAPK, C122_MAPK_END, 4)):
+    for a in list(range(0x8008A4D0, C122_CAVE_END, 4)) + list(range(C122_MAPK, C122_MAPK_END, 4)):
         if word(a) != 0:
             raise RuntimeError("C122: cave word %08X not zero" % a)
     if img[C122_MAPW - 8 - base: C122_MAPW + 4 - base] != b"MDEC_in_sync":
@@ -3002,6 +3002,46 @@ def c133_patches(exe_path):
     return out
 
 
+# --- C132 (c) glow kind 4 = SLIGHT02 in CITY 3 (Infrastructure 28.10., user: the D2 night look) --------------------------
+# CITY 3's glow table 0x8008AD7C already holds an unused 5th entry {4, 0, "SLIGHT02", 0} (count word 0x8008AE68 = 4); the
+# plugin sets the count to 5 for a D2 city whose level keeps SLIGHT02 resident (Las Vegas), 4 elsewhere (an unresolved entry
+# keeps model id 0). CITY 3's dispatch (0x800530C8..DC) knows kinds 0-3 only: its default 'j 0x80053254' now jumps to cave
+# K4 (delay slot: at = 4): kind 4 draws ONE lamp glow like kind 2 (0x80053104: 5th arg v1, a0 = s1 set in the delay slot of
+# 0x800530D0, a1 / a2 = x / y) at (LX4, LY4) (zero-block words, plugin per city), via 0x800531B0 (jal 0x80042EBC, a3 = 0).
+# PS1: pure exe + 2 data words + the count word. CHI_C132=0 = off.
+C132_LX4, C132_LX4_GP = 0x80093640, -0x3130
+C132_LY4_GP = -0x312C
+C132_CAVE, C132_CAVE_END = 0x8008A6A0, 0x8008A6BC
+
+
+def c132_patches(exe_path):
+    if os.environ.get("CHI_C132") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    for a in range(C132_CAVE, C132_CAVE_END, 4):
+        if word(a) != 0:
+            raise RuntimeError("C132: cave word %08X not zero" % a)
+    for a in (C132_LX4, C132_LX4 + 4):
+        if word(a) != 0:
+            raise RuntimeError("C132: word %08X not free" % a)
+    if img[0x8008ADBC - base: 0x8008ADCC - base] != struct.pack("<4I", 4, 0, 0x00010A58, 0) or \
+            img[0x80010A58 - base: 0x80010A60 - base] != b"SLIGHT02":
+        raise RuntimeError("C132: CITY 3's 5th glow entry is not SLIGHT02")
+    src = ["beq a1, at, DO", "sw v1, 0x10(sp)", "j 0x80053254", "nop",
+           "DO:", "lw a1, %d(gp)" % C132_LX4_GP, "j 0x800531b0", "lw a2, %d(gp)" % C132_LY4_GP]
+    cw = asm(C132_CAVE, src)
+    assert C132_CAVE + 4 * len(cw) <= C132_CAVE_END, hex(C132_CAVE + 4 * len(cw))
+    out = [(C132_CAVE + 4 * i, 0, w, "C132: glow kind 4 (SLIGHT02) %d" % i) for i, w in enumerate(cw) if w]
+    old = asm(0x800530D8, ["j 0x80053254", "nop"])
+    new = asm(0x800530D8, ["j %#x" % C132_CAVE, "addiu at, zero, 4"])
+    for k in range(2):
+        if word(0x800530D8 + 4 * k) != old[k]:
+            raise RuntimeError("C132: site %08X" % (0x800530D8 + 4 * k))
+        out.append((0x800530D8 + 4 * k, old[k], new[k], "C132: CITY 3 glow dispatch default -> K4 %d" % k))
+    return out
+
+
 # --- C109 libgpu GPU-timeout limit (Infrastructure 27.10., Strategy go: A) ------------------------------------------------
 # libgpu's wait helper FUN_764C4 ends a GPU wait after VSync(-1) passes the deadline (+240 vblanks) or after 0xF0000
 # iterations. Inside the interrupt handler VSync does not advance, so a queued StoreImage whose 'ready to send VRAM'
@@ -3032,7 +3072,7 @@ def all_patches(exe_path):
             + c42m_patches(exe_path) + c42l_patches(exe_path) + c42p_patches(exe_path) + c35t_patches(exe_path)
             + sky_dome_patches(exe_path) + s1_clut_patches(exe_path) + s1_slot15_patches(exe_path)
             + s1_cave_patches(exe_path) + s4_patches(exe_path) + c82_patches(exe_path) + c87_patches(exe_path) + c88_patches(exe_path)
-            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path))
+            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path) + c132_patches(exe_path))
 
 
 def apply(exe_in, exe_out):

@@ -1653,9 +1653,13 @@ static void chicago_slot_vblank(void) {
         int via_la = via_la_for(s_virtual) && is_extra(s_virtual);
         int on = s_slot_enabled && !s_classic && via_la && psx_mod_read_word(MISSION_NUMBER) == 0x7Cu;
         uint32_t want_op = 0x24020000u | (uint32_t)(on ? s_virtual : 0);   /* addiu v0, zero, CITY */
+        /* C135 (probe q73 freeze dumps): code words MUST go through psx_mod_write_code_word; a plain data write left the
+         * native block running 'lw v0,4(t0)' (LA's CITY 3) while the plugin ran Newtown / Desert: the level loaded with
+         * the wrong city's tables and a REPLAY.BLK read ran past the top of RAM into the exception vectors (FAIL-FAST
+         * unknown dispatch 0x04200374 / 0x0C010034, ra 0x80077AC8). */
         uint32_t w = psx_mod_read_word(CITY_OP_WORD);
-        if (on && w != want_op && (w == CITY_OP_ORIG || (w & 0xFFFFFFF8u) == 0x24020000u)) psx_mod_write_word(CITY_OP_WORD, want_op);
-        else if (!on && (w & 0xFFFFFFF8u) == 0x24020000u) psx_mod_write_word(CITY_OP_WORD, CITY_OP_ORIG);
+        if (on && w != want_op && (w == CITY_OP_ORIG || (w & 0xFFFFFFF8u) == 0x24020000u)) psx_mod_write_code_word(CITY_OP_WORD, want_op);
+        else if (!on && (w & 0xFFFFFFF8u) == 0x24020000u) psx_mod_write_code_word(CITY_OP_WORD, CITY_OP_ORIG);
     }
     if (s_sea_level)                                       /* the flag word shares the sea level block */
         psx_mod_write_word(CHICAGO_FLAG_ADDR, chicago_active() ? 1u : 0u);
@@ -1766,7 +1770,7 @@ static void switch_glow(int col) {
         int known = 0;
         for (int c = 1; c < 6; c++) known |= cur == s_glow_words[i][c];
         if (cur != want && known)
-            psx_mod_write_word(s_glow_words[i][0], want);
+            psx_mod_write_code_word(s_glow_words[i][0], want);   /* code immediates: executable-RAM path */
     }
 }
 /* Chicago by DAY (user R15, 2026-10-13): LA is night-only, and the exe gives CITY 3 its night
@@ -1791,7 +1795,7 @@ static void switch_words(const uint32_t (*t)[3], unsigned n, int alt) {
         uint32_t cur = psx_mod_read_word(t[i][0]);
         uint32_t want = t[i][alt ? 2 : 1];
         if (cur != want && (cur == t[i][1] || cur == t[i][2]))
-            psx_mod_write_word(t[i][0], want);
+            psx_mod_write_code_word(t[i][0], want);              /* code: executable-RAM path */
     }
 }
 /* Minimap (C12, Polish): the exe's per-city frame table 0x8008B080 (24 bytes per CITY: x / y
@@ -1834,7 +1838,7 @@ static void sky_vblank(int chi) {
         if (cur != want && (cur & 0xFFFF0000u) == 0x24020000u
             && (imm == la || (imm >= 13u && imm < 64u) || imm == laday_sky(0) || imm == laday_sky(1)))   /* C126: any of the
             package's skies (13.. = Chicago, LA day, Havana, Las Vegas, Rio), not only Chicago's 13-15 */
-            psx_mod_write_word(addr[i], want);
+            psx_mod_write_code_word(addr[i], want);   /* code immediates */
     }
 }
 /* EXPERIMENT ONLY (CHI_C45=1), not a fix: the wait below is deliberate. 0x80032F98 only asks to
@@ -1994,11 +1998,63 @@ static void start_heading_vblank(void) {
     done = 1;
     fprintf(stdout, "driver.chicago: start heading %d (frame %u)\n", (int)s_start_rot, (unsigned)fc);
 }
+/* C132 (user: the Driver 2 night look; D2 cities at night only, CHI_C132_LOOK=0 = off). D2 cities run their nights with
+ * Driver 1's night flag 0 and LOOK_CITY 3, so Driver 1 draws them with its DAY facing colours and LA's night car colour:
+ * (a) FUN_8002D0F4's day branch loads the 8 facing colours 0x808080 / 0x707070 / 0x606060 / 0x505050 / 0x404040 (scratchpad
+ *     0x1F800024..43, by 45-degree facing): D2 draws night buildings flat (draw.c SetupPlaneColours: every plane = ambient
+ *     0x80) -> the four darker immediates become 0x808080 while a D2 night runs;
+ * (b) DrawCar (FUN_8003A698) forces the car colour word 0x800971A0 to 0x282828 for LOOK_CITY 3 at night (LA's night):
+ *     D2's night cars are lit at 880 / 905 of 3200 (cars.c night_colours) -> 0x242323 (R / G 35, B 36).
+ * Host-written code immediates like the glows (M8: a guest flag word / data words instead). */
+static const uint32_t s_night_look_words[][3] = {    /* address, Driver 1, D2 night */
+    { 0x8002D46Cu, 0x3C060070u, 0x3C060080u }, { 0x8002D470u, 0x34C67070u, 0x34C68080u },
+    { 0x8002D474u, 0x3C040060u, 0x3C040080u }, { 0x8002D478u, 0x34846060u, 0x34848080u },
+    { 0x8002D47Cu, 0x3C020050u, 0x3C020080u }, { 0x8002D480u, 0x34425050u, 0x34428080u },
+    { 0x8002D484u, 0x3C030040u, 0x3C030080u }, { 0x8002D488u, 0x34634040u, 0x34638080u },
+    { 0x8003A6D0u, 0x3C020028u, 0x3C020024u }, { 0x8003A6D4u, 0x34422828u, 0x34422323u },
+};
+static void night_look_vblank(int chi) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("CHI_C132_LOOK"); on = !(e && *e == '0'); }
+    int col = on && chi && s_chi_night ? 2 : 1;
+    for (unsigned i = 0; i < sizeof s_night_look_words / sizeof s_night_look_words[0]; i++) {
+        uint32_t cur = psx_mod_read_word(s_night_look_words[i][0]), want = s_night_look_words[i][col];
+        if (cur != want && (cur == s_night_look_words[i][1] || cur == s_night_look_words[i][2]))
+            psx_mod_write_code_word(s_night_look_words[i][0], want);   /* code: the executable-RAM path (native blocks) */
+    }
+    /* (c) glow kind 4 = SLIGHT02 (exe_patches c132_patches: cave K4, words LX4 / LY4 0x80093640 / 44): CITY 3's table count
+     * 0x8008AE68 = 5 only while a city whose level keeps SLIGHT02 resident is chosen (Las Vegas, vegas5 keeps it in memory), else Driver 1's 4
+     * (the 5th entry would keep model id 0 where nothing resolves it). */
+    int k4 = s_slot_enabled && s_virtual == V_VEGAS && on;
+    uint32_t cnt = k4 ? 5u : 4u;
+    if (psx_mod_read_word(0x8008AE68u) != cnt) psx_mod_write_word(0x8008AE68u, cnt);
+    int32_t lx = k4 ? 771 : 0, ly = k4 ? -2126 : 0;          /* vegas5: SLIGHT02 head (815, -2156) + (-44, +30) */
+    if ((int32_t)psx_mod_read_word(0x80093640u) != lx) psx_mod_write_word(0x80093640u, (uint32_t)lx);
+    if ((int32_t)psx_mod_read_word(0x80093644u) != ly) psx_mod_write_word(0x80093644u, (uint32_t)ly);
+}
+/* C134 (Polish 28.10.: Vegas downtown 'colour noise'): Driver 1 never clears the frame (its sky + ground tiles always cover
+ * it); Driver 2 cities have spots without ground geometry (D2 draws roads / paths only there), so the previous VRAM content
+ * shows (the noise at the Fremont start, black elsewhere). While a D2 city runs, both DRAWENVs (0x800BDFB4 / 0x800BE034:
+ * clip, ofs, tw, tpage, dtd, dfe, isbg +0x18, r0 g0 b0 +0x19..1B) get isbg = 1 with a black background, so PutDrawEnv
+ * clears like Driver 2. D1 cities: isbg 0 as before. CHI_C134=0 = off. (M8: a guest data word, cheap.) */
+static void clear_bg_vblank(int chi) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("CHI_C134"); on = !(e && *e == '0'); }
+    static const uint32_t env[2] = { 0x800BDFB4u, 0x800BE034u };
+    for (int i = 0; i < 2; i++) {
+        uint32_t a = env[i] + 0x18u, w = psx_mod_read_word(a);    /* isbg | r0 << 8 | g0 << 16 | b0 << 24 */
+        if (psx_mod_read_half(env[i] + 4u) != 0x200u) continue;    /* not a DRAWENV (yet) */
+        uint32_t want = (on && chi) ? 1u : 0u;
+        if (w != want && (w == 0u || w == 1u)) psx_mod_write_word(a, want);
+    }
+}
 static void glow_offsets_vblank(void) {
     test_oc_vblank();
     test_pose_vblank();
     start_heading_vblank();
     int chi = chicago_active();
+    night_look_vblank(chi);
+    clear_bg_vblank(chi);
     (void)s_c38_words;   /* C38: static exe patch now (exe_patches look_city_patches); no RAM rewrite */
     c45_vblank(chi);
     /* C45 part 3: the guest page loop (exe patch group CHI_C45_SKIP) reads the stable-page end from main RAM
@@ -2304,7 +2360,7 @@ static void carry_release(void);
 #define SPC_STRUCT   (0x800A1078u + 5u * 0x3Cu)
 #define SPC_BUF_IDX  1402u                      /* group 5 entries start here in the car polygon buffer (PCAP_D2 + 2) */
 #define SPC_BUF_MAX  240u
-static uint32_t s_spc_mem[16], s_spc_built_area = 0xFFFFFFFFu;
+static uint32_t s_spc_mem[16], s_spc_cap[16], s_spc_built_area = 0xFFFFFFFFu;
 
 static int32_t s_spc_box[2];
 /* R34 slot asset ("2CPS"): 7 header ints + slot header (page, first entry, x, y, w, h, entries, block bytes); every entry
@@ -2574,7 +2630,18 @@ static void specials_vblank(uint32_t cs) {
         if (npolys <= 150u) {                            /* the AI per-car UV buffer holds 150 polygons */
             uint32_t slot = want & 15u;
             uint32_t need = ((sizes[0] + 3u) & ~3u) + ((sizes[1] + 3u) & ~3u) + ((sizes[2] + 3u) & ~3u) + 64u;
-            if (!s_spc_mem[slot]) s_spc_mem[slot] = psx_mod_alloc_guest_memory(need, 16u);
+            /* C135 (probe q73 crash in the far-car drawer, Vegas -> Rio): the slot's block was allocated once with the FIRST
+             * city's size and reused by every later city: Rio's special 8 (13684 bytes) wrote 224 bytes past Vegas's block
+             * (13460), so its low model's tail lay in the next allocation; when that owner wrote there, FUN_8002E230 read a
+             * garbage polygon type and dispatched into nowhere. Chicago 9 -> Havana 9 overflowed too (+140). The block now
+             * has a capacity (at least 16 KiB, every special so far is <= 14.6 KiB) and is replaced when a bigger one comes.
+             * Host-only (M8: one fixed 16 KiB special buffer per slot in guest RAM). */
+            if (need > s_spc_cap[slot]) {
+                uint32_t cap = need > 16384u ? (need + 1023u) & ~1023u : 16384u;
+                uint32_t nb = psx_mod_alloc_guest_memory(cap, 16u);
+                if (nb) { s_spc_mem[slot] = nb; s_spc_cap[slot] = cap; }
+                else { s_spc_mem[slot] = 0; s_spc_cap[slot] = 0; }
+            }
             uint32_t m = s_spc_mem[slot];
             if (m) {
                 uint32_t mc = m, md = mc + ((sizes[0] + 3u) & ~3u), ml = md + ((sizes[1] + 3u) & ~3u);
@@ -3397,7 +3464,9 @@ static void area_switch_guard_vblank(void) {
     glow_offsets_vblank();
     {   /* C122 (exe_patches c122_patches): MAPD2 = the running D2 city has its own minimap frame -> the pause map centres on
          * the player, clamps, pans with the d-pad; 0 = Driver 1's map. PS1 path: part of the city's data block. */
-        uint32_t want = (d2_city() >= 0 && s_have_map) ? 1u : 0u;
+        static int mapd2_on = -1;
+        if (mapd2_on < 0) { const char* e = getenv("CHI_MAPD2"); mapd2_on = !(e && *e == '0'); }   /* test switch */
+        uint32_t want = (mapd2_on && d2_city() >= 0 && s_have_map) ? 1u : 0u;
         if (psx_mod_read_word(0x80093628u) != want) psx_mod_write_word(0x80093628u, want);
     }
     if (s_sea_level) {                                   /* Chicago's water lies 1084 below the street */
