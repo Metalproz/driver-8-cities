@@ -113,6 +113,8 @@ CHICAGO = CityProfile(
     special_default=10,
     car_banks={0: 4, 1: 12, 2: 4, 3: 13, 4: 5, 5: 16, 6: 9, 7: 2, 8: 16, 9: 9, 10: 2, 11: 15, 12: 10},
     songs=(2, 6), chase_pos=(7, 8),
+    night_tiles_third=True,                     # Q73 = A (user 30.10.): Chicago night = the D2 night rules (C125 + C128),
+    night_models_d2=True,                       # = var_polish_q73_night (CHI_POLISH_NIGHT_D2=0: the old Chicago night)
 )
 
 HAVANA = CityProfile(

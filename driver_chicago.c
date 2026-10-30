@@ -846,6 +846,7 @@ static void sfx_vblank(uint32_t cs);
 static uint8_t* s_sfx; static uint32_t s_sfx_n;
 static uint32_t s_spc_valid, s_spc_cur, s_spc_wheel;
 static uint32_t s_spc_unloadable;
+static int32_t s_pps[2][2 + 12 * 4]; static uint32_t s_pps_n[2];   /* C138: "PPS1", 4, per choice {model, 4 x (x, z), box x / z, ratio} */
 static int32_t s_sps[2][2 + 9 * 16]; static uint32_t s_sps_n[2];   /* C102: "SPS1", n, n x {model, 4 x (x, z)} */
 static uint8_t* s_spc[4]; static uint32_t s_spc_n[4];   /* 2/3: the extra-draw levels (C101) */                 /* C42 r3 (b): civ zone rows / car polygon buffer in mod memory */
 static uint32_t s_dmg_ply[720], s_dmg_ply_n;        /* C42E: player verts (300 words) + polys (420 words), D2 player cars */
@@ -976,6 +977,11 @@ static int city_assets_load(int city) {
         for (int t = 0; t < 2; t++) {                    /* C102: the specials' shadow quads (Polish .sps.bin, SPS1) */
             g = fopen(apath(t ? "spcshadow_night.bin" : "spcshadow_day.bin"), "rb");
             if (g) { s_sps_n[t] = (uint32_t)fread(s_sps[t], 4, sizeof s_sps[t] / 4, g); fclose(g); }
+        }
+        for (int t = 0; t < 2; t++) {                    /* C138: the player cars' D2 shadow quads (Polish .pps.bin, PPS1) */
+            s_pps_n[t] = 0;
+            g = fopen(apath(t ? "plrshadow_night.bin" : "plrshadow_day.bin"), "rb");
+            if (g) { s_pps_n[t] = (uint32_t)fread(s_pps[t], 4, sizeof s_pps[t] / 4, g); fclose(g); }
         }
         for (int t = 0; t < 2; t++) {                    /* C82: the specials' twistRateY per city (Polish .spt.bin) */
             g = fopen(apath(t ? "spctwist_night.bin" : "spctwist_day.bin"), "rb");
@@ -2889,6 +2895,63 @@ static void sx_horn_play(uint32_t slot, int32_t vol) {
     spu_write(0x1F801D88u, 1u << v);
 }
 
+/* C137 (user rule Q71, Analyst inventory NOTES "C137 sound inventory"): in a D2 city every Driver 1 sound that a Driver 2
+ * sound replaces leaves SPU RAM. Driver 1's horns (bank 0 samples 6 / 7 / 8, 18,352 B contiguous; AI horn 0x800180D8 plays
+ * entry 6 + (id & 3, 3 -> 2) on any voice, R1 entry 8 on channel 4) -> entries 6 / 7 / 8 point at the city's D2 civilian
+ * horns (slots 25 / 24 / 26; entry 8 keeps an address of its own, the R1 detection below compares channel 4 with it) and
+ * the freed block holds the city's D2 siren (car_sfx kind 3, 8 kHz loop) as entry 4 = Driver 1's siren (sample 4 dropped).
+ * Driver 1 sweeps the siren's pitch and volume by its phase (0x8004CA5C: arg car*4 - phase*48 + 0x1000, vol -2000 -
+ * phase*30); Driver 2's siren holds the wail in the sample and plays it at a fixed pitch (gamesnd.c), so while the D2
+ * siren is in entry 4 the two code words become constants (pitch arg 0x1000, vol -2000). D1 cities: untouched (bank 0
+ * reloads from the disc, the code words go back). CHI_C137=0: off. Host-only (M8: the same SPU upload + 3 table entries +
+ * 2 code words from guest code at level load). */
+#define SIREN_PITCH_PC   0x8004CCB4u   /* subu v1, v1, v0 -> addiu v1, zero, 0x1000 */
+#define SIREN_PITCH_ORIG 0x00621823u
+#define SIREN_PITCH_D2   0x24031000u
+#define SIREN_VOL_PC     0x8004CC84u   /* subu a3, v0, a3 -> addiu a3, zero, -2000 */
+#define SIREN_VOL_ORIG   0x00473823u
+#define SIREN_VOL_D2     0x2407F830u
+static uint32_t s_siren_addr;                          /* SPU address of the D2 siren in entry 4 (0 = none) */
+static int c137_on(void) {
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("CHI_C137"); on = !(e && *e == '0'); }
+    return on;
+}
+static void siren_words(int d2) {
+    static const uint32_t w[2][3] = { { SIREN_PITCH_PC, SIREN_PITCH_ORIG, SIREN_PITCH_D2 },
+                                      { SIREN_VOL_PC, SIREN_VOL_ORIG, SIREN_VOL_D2 } };
+    for (int i = 0; i < 2; i++) {
+        uint32_t cur = psx_mod_read_word(w[i][0]), want = w[i][d2 ? 2 : 1];
+        if (cur != want && (cur == w[i][1] || cur == w[i][2])) psx_mod_write_code_word(w[i][0], want);
+    }
+}
+/* step 1 of a fresh bank 0 in a D2 city (the civilian horns are in slots 24-26 by now) */
+static void c137_bank0(uint8_t* spu) {
+    s_siren_addr = 0;
+    if (!c137_on()) return;
+    uint32_t e[3], z[3];
+    for (uint32_t k = 0; k < 3u; k++) { e[k] = psx_mod_read_word(SFX_TAB + 16u * (6u + k)); z[k] = psx_mod_read_word(SFX_TAB + 16u * (6u + k) + 4u); }
+    int hole = e[0] && z[0] && e[1] == e[0] + z[0] && e[2] == e[1] + z[1] && z[2] && e[2] + z[2] <= 0x80000u;
+    static const uint32_t src[3] = { 25u, 24u, 26u };
+    int horns = 0;
+    for (uint32_t k = 0; k < 3u; k++) {
+        uint32_t sl = psx_mod_read_word(SFX_TAB + 16u * src[k]) ? src[k] : 25u;
+        if (!psx_mod_read_word(SFX_TAB + 16u * sl)) continue;
+        for (uint32_t w = 0; w < 4u; w++)
+            psx_mod_write_word(SFX_TAB + 16u * (6u + k) + 4u * w, psx_mod_read_word(SFX_TAB + 16u * sl + 4u * w));
+        horns++;
+    }
+    int is = -1;
+    for (int i = 0; i < s_sx_n; i++) if (s_sx[i].kind == 3) { is = i; break; }
+    if (horns == 3 && hole && is >= 0 && (uint32_t)s_sx[is].size <= e[2] + z[2] - e[0]) {
+        sx_put(spu, is, e[0], 4u);
+        s_siren_addr = e[0];
+    }
+    fprintf(stdout, "driver.chicago: C137 D1 horns -> D2 civilian horns (%d of 3); D2 siren %s (bank %d, %d B at SPU 0x%05X, "
+                    "D1 horn block %u B)\n", horns, s_siren_addr ? "in entry 4" : "not loaded", is >= 0 ? s_sx[is].bank : -1,
+            is >= 0 ? s_sx[is].size : 0, e[0], hole ? e[2] + z[2] - e[0] : 0u);
+}
+
 static void sfx_v2_vblank(void) {
     uint8_t* spu = spu_get_ram_ptr();
     if (!spu || !sx_parse()) return;
@@ -2927,6 +2990,7 @@ static void sfx_v2_vblank(void) {
         if (!ok || horn_at[1] + hmax > lim) { horn_at[0] = horn_at[1] = 0; }
         psx_mod_write_word(SFX_TAB + 16u * 27u, horn_at[0]);  /* address only for now; size etc. when the slot loads */
         psx_mod_write_word(SFX_TAB + 16u * 28u, horn_at[1]);
+        c137_bank0(spu);                                    /* C137: D1 horns out, D2 siren in */
         /* player engine / idle stay on Driver 2's bank 12 until the player slot is placed (slots 1 / 2 = 20 / 21) */
         for (uint32_t k = 0; k < 2u; k++)
             for (uint32_t w = 0; w < 4u; w++)
@@ -3055,6 +3119,10 @@ static void sfx_v2_vblank(void) {
 }
 
 static void sfx_vblank(uint32_t cs) {
+    {   /* C137: the fixed-pitch siren words only while entry 4 holds the D2 siren (any other level: Driver 1's) */
+        int d2 = cs == 4u && s_siren_addr && chicago_active() && psx_mod_read_word(SFX_TAB + 16u * 4u) == s_siren_addr;
+        siren_words(d2);
+    }
     if (cs != 4u || !s_sfx || s_sfx_n < 4u || !chicago_active() || !psx_mod_game_started()) return;
     {   uint32_t mg; memcpy(&mg, s_sfx, 4);
         if (mg == SFX_V2_MAGIC) { sfx_v2_vblank(); return; } }
@@ -3373,8 +3441,60 @@ static void nightmare_vblank(void) {
  * stretch the quad along its own two axes to the .sps.bin size (Driver 2's cPoints x 1.32: half length = (zmax - zmin)
  * / 2, half width = (xmax - xmin) / 2); the axes come from the quad itself (a = (P0+P1)/2 - c, b = (P0+P3)/2 - c, the
  * longer one = length). Every vblank (the orientation changes slowly; positions are not used). 0 elsewhere. */
+/* the SHD offsets that stretch car `car`'s corner quad to half length hl / half width hw along its own axes (0 = unusable) */
+static int shadow_stretch(uint32_t car, double hl, double hw, int16_t d[8]) {
+    static const uint32_t off[4] = { 0x88u, 0x98u, 0xA8u, 0xB8u };   /* P0 P1 P3 P2 */
+    double px[4], pz[4], cx = 0, cz = 0;
+    for (int k = 0; k < 4; k++) {
+        px[k] = (double)(int32_t)psx_mod_read_word(car + off[k]); pz[k] = (double)(int32_t)psx_mod_read_word(car + off[k] + 8u);
+        cx += px[k] / 4; cz += pz[k] / 4;
+    }
+    double ax = (px[0] + px[1]) / 2 - cx, az = (pz[0] + pz[1]) / 2 - cz;   /* a: P0 P1 side */
+    double bx = (px[0] + px[2]) / 2 - cx, bz = (pz[0] + pz[2]) / 2 - cz;   /* b: P0 P3 side */
+    double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
+    if (!(la > 50 && lb > 50 && la < 5000 && lb < 5000)) return 0;
+    double ka = (la >= lb ? hl : hw) / la, kb = (la >= lb ? hw : hl) / lb;
+    static const int sa[4] = { 1, 1, -1, -1 }, sb[4] = { 1, -1, 1, -1 };
+    for (int k = 0; k < 4; k++) {
+        double nx = cx + sa[k] * ka * ax + sb[k] * kb * bx, nz = cz + sa[k] * ka * az + sb[k] * kb * bz;
+        double dx = nx - px[k], dz = nz - pz[k];
+        if (dx > 3000) dx = 3000; if (dx < -3000) dx = -3000; if (dz > 3000) dz = 3000; if (dz < -3000) dz = -3000;
+        d[2 * k] = (int16_t)lround(dx); d[2 * k + 1] = (int16_t)lround(dz);
+    }
+    return 1;
+}
+/* C138 (Polish: the Havana mini's shadow 1.5 x too wide, 1.9 x too long): Driver 1's corner quad is its fixed 370 x 1040
+ * body box for every player car; in a D2 city car 0's quad is stretched like the special's (C102) to the chosen car's
+ * D2 cPoints x 1.32 from the level's .pps.bin (PPS1 entry = player choice 0x8009683C). The physics corners stay
+ * (handling). Host-only (M8: the same SHD words written by guest code per frame). CHI_C138_SHADOW=0: off. */
+static void player_shadow(int t) {
+    static int had, en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C138_SHADOW"); en = !(e && *e == '0'); }
+    const int32_t* q = s_pps[t];
+    int16_t d[8] = {0};
+    int use = 0;
+    if (en && chicago_active() && psx_mod_game_started() && s_pps_n[t] >= 2u + 12u && q[0] == 0x31535050) {
+        uint32_t ch = psx_mod_read_word(0x8009683Cu) & 3u;
+        if ((int32_t)ch < q[1] && 2u + 12u * ch + 12u <= s_pps_n[t]) {
+            const int32_t* e = q + 2 + 12 * ch;
+            int32_t x0 = e[1], x1 = e[1], z0 = e[2], z1 = e[2];
+            for (int c = 1; c < 4; c++) {
+                if (e[1 + 2 * c] < x0) x0 = e[1 + 2 * c]; if (e[1 + 2 * c] > x1) x1 = e[1 + 2 * c];
+                if (e[2 + 2 * c] < z0) z0 = e[2 + 2 * c]; if (e[2 + 2 * c] > z1) z1 = e[2 + 2 * c];
+            }
+            double hl = (z1 - z0) / 2.0, hw = (x1 - x0) / 2.0;
+            use = hl > 0 && hw > 0 && shadow_stretch(0x8009B0A4u, hl, hw, d);
+        }
+    }
+    if (!use && !had) return;
+    if (!use) memset(d, 0, sizeof d);
+    for (int k = 0; k < 4; k++)
+        psx_mod_write_word(0x80093480u + 4u * (uint32_t)k, (uint32_t)(uint16_t)d[2 * k] | ((uint32_t)(uint16_t)d[2 * k + 1] << 16));
+    had = use;
+}
 static void shadow_vblank(void) {
     static uint8_t had[25];
+    player_shadow(s_chi_night ? 1 : 0);
     int t = s_chi_night ? 1 : 0;
     const int32_t* q = s_sps[t];
     int ok = chicago_active() && psx_mod_game_started() && s_spc_cur && s_sps_n[t] >= 2u && q[0] == 0x31535053;
@@ -3397,27 +3517,7 @@ static void shadow_vblank(void) {
         uint32_t rec = 0x80098950u + 0x50u * (ci - 1u), car = 0x8009B0A4u + 0x18Cu * ci, shd = 0x80093480u + 16u * ci;
         int16_t d[8] = {0};
         int use = ok && psx_mod_read_byte(rec + 1u) != 0u && psx_mod_read_byte(rec + 0x10u) == 5u;
-        if (use) {
-            static const uint32_t off[4] = { 0x88u, 0x98u, 0xA8u, 0xB8u };   /* P0 P1 P3 P2 */
-            double px[4], pz[4], cx = 0, cz = 0;
-            for (int k = 0; k < 4; k++) {
-                px[k] = (double)(int32_t)psx_mod_read_word(car + off[k]); pz[k] = (double)(int32_t)psx_mod_read_word(car + off[k] + 8u);
-                cx += px[k] / 4; cz += pz[k] / 4;
-            }
-            double ax = (px[0] + px[1]) / 2 - cx, az = (pz[0] + pz[1]) / 2 - cz;   /* a: P0 P1 side */
-            double bx = (px[0] + px[2]) / 2 - cx, bz = (pz[0] + pz[2]) / 2 - cz;   /* b: P0 P3 side */
-            double la = sqrt(ax * ax + az * az), lb = sqrt(bx * bx + bz * bz);
-            if (la > 50 && lb > 50 && la < 5000 && lb < 5000) {
-                double ka = (la >= lb ? hl : hw) / la, kb = (la >= lb ? hw : hl) / lb;
-                static const int sa[4] = { 1, 1, -1, -1 }, sb[4] = { 1, -1, 1, -1 };
-                for (int k = 0; k < 4; k++) {
-                    double nx = cx + sa[k] * ka * ax + sb[k] * kb * bx, nz = cz + sa[k] * ka * az + sb[k] * kb * bz;
-                    double dx = nx - px[k], dz = nz - pz[k];
-                    if (dx > 3000) dx = 3000; if (dx < -3000) dx = -3000; if (dz > 3000) dz = 3000; if (dz < -3000) dz = -3000;
-                    d[2 * k] = (int16_t)lround(dx); d[2 * k + 1] = (int16_t)lround(dz);
-                }
-            } else use = 0;
-        }
+        if (use && !shadow_stretch(car, hl, hw, d)) { use = 0; memset(d, 0, sizeof d); }
         if (!use && !had[ci]) continue;
         for (int k = 0; k < 4; k++)
             psx_mod_write_word(shd + 4u * (uint32_t)k, (uint32_t)(uint16_t)d[2 * k] | ((uint32_t)(uint16_t)d[2 * k + 1] << 16));
@@ -3449,11 +3549,32 @@ static void restore_vblank(void) {
     last_vb = vb;
 }
 
+/* C138 (Polish: the Havana mini's light glows oversized): Driver 1's ShowCarlight 0x80043FDC sizes are immediates at its 14
+ * call sites (reverse 20, indicators 30, brake 25, night headlights 30, night tail 25); Driver 2 draws every car with
+ * fixed sizes (cosmetic.c: HEADLIGHT 18, BRAKE / BACK 17, INDICATOR 20, REVERSE 14 D2 units -> x1.32 = 24 / 22 / 26 / 18).
+ * While a D2 city runs those immediates are Driver 2's (every car); Driver 1's elsewhere. CHI_C138_LIGHTS=0: off.
+ * Host-only (M8: the same 14 code words from guest code at level load). */
+static const uint32_t s_c138_light_words[][3] = {
+    { 0x80043970u, 0x24070014u, 0x24070012u }, { 0x800439A8u, 0x24070014u, 0x24070012u },   /* AddReverseLight 20 -> 18 */
+    { 0x80043BB0u, 0x2407001Eu, 0x2407001Au }, { 0x80043BF8u, 0x2407001Eu, 0x2407001Au },   /* AddIndicatorLight 30 -> 26 */
+    { 0x80043C64u, 0x2407001Eu, 0x2407001Au }, { 0x80043CBCu, 0x2407001Eu, 0x2407001Au },
+    { 0x80043DF4u, 0x24070019u, 0x24070016u }, { 0x80043E3Cu, 0x24070019u, 0x24070016u },   /* AddBrakeLight 25 -> 22 */
+    { 0x80046398u, 0x2407001Eu, 0x24070018u }, { 0x800463F0u, 0x2407001Eu, 0x24070018u },   /* AddNightLights head 30 -> 24 */
+    { 0x800464ACu, 0x2407001Eu, 0x24070018u }, { 0x80046504u, 0x2407001Eu, 0x24070018u },
+    { 0x800465A8u, 0x24070019u, 0x24070016u }, { 0x800465F4u, 0x24070019u, 0x24070016u },   /* AddNightLights tail 25 -> 22 */
+};
+static void c138_lights_vblank(void) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C138_LIGHTS"); en = !(e && *e == '0'); }
+    switch_words(s_c138_light_words, sizeof s_c138_light_words / sizeof s_c138_light_words[0], en && chicago_active());
+}
+
 extern void driver_personal_rewind_vblank(void);   /* C130: the Mods 'Rewind' choice (driver_personal.c) */
 static void area_switch_guard_vblank(void) {
     driver_personal_rewind_vblank();
     restore_vblank();
     shadow_vblank();
+    c138_lights_vblank();
     s_vbl_n++;
     car_lod_vblank();
     cop_slots_vblank();

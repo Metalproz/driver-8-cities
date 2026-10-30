@@ -3732,6 +3732,28 @@ def convert(out_path: str):
             v = struct.unpack_from("<h", lcf, offs[d2m] + 114)[0] if d2m is not None and offs[d2m] > 0 else 0
             wsz.append(int(round(v * polish_cars.SCALE)))
         open(out_path + ".whl.bin", "wb").write(struct.pack("<%dh" % len(wsz), *wsz))
+        if os.environ.get("CHI_POLISH_PLAYERSHADOW") == "1":
+            # C138 (Havana's mini car): Driver 1 draws every car's shadow through its physics corners (car + 0x88 .. 0xB8),
+            # a fixed 370 x 1040 box (measured: Miami and the Havana mini alike) -> 1.3 x wider / 1.9 x longer than the mini
+            # (D2 cPoints span 245 x 548 after x1.32). <lev>.pps.bin = "PPS1", 4, then per player choice 0..3 {D2 model,
+            # 4 x (x, z) = Driver 2's cPoints[0..3] x the car scale (SetShadowPoints, car frame), colBox half x / z x scale,
+            # car length / 1040 x 4096 (a glow scale for the car's lights)} for the plugin's shadow offsets (SHD, C102) on car 0
+            pps = struct.pack("<2i", 0x31535050, 4)
+            for c in range(4):
+                d2m = polish_cars.slot_map().get(5 + c)
+                if d2m is None or offs[d2m] <= 0:
+                    pps += struct.pack("<i", -1) + bytes(8 * 4 + 12)
+                    continue
+                pts = [struct.unpack_from("<3h", lcf, offs[d2m] + 116 + 8 * k_) for k_ in range(4)]
+                pps += struct.pack("<i", d2m)
+                for cx_, _cy, cz_ in pts:
+                    pps += struct.pack("<2i", int(round(cx_ * polish_cars.SCALE)), int(round(cz_ * polish_cars.SCALE)))
+                bx_, _by, bz_ = struct.unpack_from("<3h", lcf, offs[d2m] + 212)
+                length = (max(p[2] for p in pts) - min(p[2] for p in pts)) * polish_cars.SCALE
+                pps += struct.pack("<3i", int(round(bx_ * polish_cars.SCALE)), int(round(bz_ * polish_cars.SCALE)),
+                                   int(round(4096 * length / 1040.0)))
+            open(out_path + ".pps.bin", "wb").write(pps)
+            print("player shadow corners (C138): %s (%d bytes)" % (out_path + ".pps.bin", len(pps)))
         if polish_specials.enabled():                # C42 r3 (c): the four specials for the plugin's runtime swap
             cosb = open(out_path + ".cos.bin", "rb").read()
             sm = polish_cars.slot_map()

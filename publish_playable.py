@@ -313,7 +313,17 @@ def probe_package(p: dict) -> Path:
     deps = [p["lev"], p.get("night") or p["lev"], APP / "driver_personal" / "chicago" / "exe_patches.py",
             APP / "driver_personal" / "chicago" / "build_package.py", p["build"] / "Driver_Recompiled.exe"]
     newest = max(f.stat().st_mtime for f in deps if f.exists())
-    env_stamp = json.dumps(p.get("env", {}), sort_keys=True)
+    # Strategy 30.10.: mtimes alone missed a probe switched to an OLDER level file; the stamp now also names every input
+    # file (lev, night, file-valued env such as CHI_VEGAS_DAY) with its size and mtime, and the slot / night / menu options
+    def _fid(v):
+        try:
+            f = Path(str(v))
+            return [str(f.resolve()), f.stat().st_size, int(f.stat().st_mtime)] if f.is_file() else v
+        except (OSError, ValueError):
+            return v
+    env_stamp = json.dumps({"env": {k: _fid(v) for k, v in p.get("env", {}).items()}, "lev": _fid(p["lev"]),
+                            "night": _fid(p.get("night")), "slot": p.get("slot"), "menu": p.get("menu")},
+                           sort_keys=True, default=str)
     stamp_file = built.parent / "probe_env.json"
     same_env = stamp_file.exists() and stamp_file.read_text(encoding="utf-8") == env_stamp
     if not lev_out.exists() or lev_out.stat().st_mtime < newest or not same_env:

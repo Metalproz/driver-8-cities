@@ -3637,3 +3637,118 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
   ra 0x80077AC8): the flipped Miami car slid ~173000 units (z 420k -> 593k) into the sea on its roof; the in-game area
   spool then read from 0x801852BC over 0x80200000. Miami, no D2 data. Runner `wreck_end` (flip_wreck's order + 30 s with
   dma_cdrom_history logging) did not reproduce in 5 runs. Open: does Driver 1's spool size an off-map / sea area wrongly?
+
+## C137 sound inventory (Analyst 30.10., offline: ghq + exe disassembly + disc data; scratch c137_banks.py / c137_budget.py)
+- **SPU blocks (InitSound 0x8004D3DC, same in every city):** bank 0 0x28000 (D1 VOICES lump 0, 163,956 B, base 0x1010),
+  bank 1 0x400, music 0x19000, mission bank 4 0x21800, bank 3 0x10000 (VOICES lump 1 = police radio, 64,964 B), reverb
+  43.5 KB, system 4 KB, ~5.5 KB unallocated. Bank 0 table 0x800BCA74 {addr, size, loop, rate} x 32.
+- **Bank 0 samples and their users (call sites with immediate args, D1 exe):**
+
+  | s | bytes | rate / loop | user (call site) | D2 cities today | verdict |
+  |---|---|---|---|---|---|
+  | 0 | 14096 | 11025 | crash: ch 2 GlobalTimeStep 0x8001C960, StepOneCar 0x8001DCB8, 0x8003FF0C (0x80040430/748), 0x80066778 | played | keep (no D2 crash wired) |
+  | 1 | 57744 | 22050 loop | engine, ch 0 / 7 / 8 (FUN_8004C438) | space reused by D2 civ engines / horns (plugin) | dropped already |
+  | 2 | 15440 | 22050 loop | idle, ch 1 | reused (same block) | dropped already |
+  | 3 | 24800 | 22050 loop | skid, ch 3 | played | keep |
+  | 4 | 1920 | 11025 loop | **the siren**: ch 5 / 6 (0x8004C528 / C554), moved to cop cars with car +0x12E == 1 and pitch-swept by phase (record +0xD) in 0x8004CA5C | played (D1 siren in D2 cities) | drop once the D2 siren is loaded |
+  | 5 | 6000 | 22050 loop | no static caller (mission script events 0x8006A6C8 take bank / sample from data) | unknown | keep (runtime check) |
+  | 6 | 9648 | 11025 | AI horn 0x800180D8: sample 6 + (id & 3, 3 -> 2) | **D1 horns still sound in D2 cities** (any voice) | drop after redirect to D2 civ horns |
+  | 7 | 4560 | 11025 | AI horn (same) | same | drop after redirect |
+  | 8 | 4144 | 22050 | player horn R1 0x800234D4 (ch 4) + AI horn | plugin retargets ch 4 to the D2 player horn; AI use as 6 | drop after redirect |
+  | 9 | 4800 | 22050 | no static caller | unknown | keep (runtime check) |
+  | 10 | 1024 | 22050 | BOX_TASTIC hit (smash table 0x8008AE8C via 0x8003FF0C) | played | keep |
+  | 11 | 2976 | 22050 | cones / TRAININGCONES hits (pitch 800) + player suspension bump StepOneCar 0x8001E514 (any voice) | played | keep (**not the siren**) |
+  | 12 | 4560 | 22050 | barrel / phone / parking meter hits | played | keep |
+  | 13 | 10224 | 22050 | bin / barrier / table / chair / umbrella / sign / news / fence hits | played | keep |
+  | 14 | 944 | 22050 | no static caller | unknown | keep (runtime check) |
+  | 15 | 816 | 22050 | no static caller | unknown | keep (runtime check) |
+
+  Correction to "Sirens (open, SPU budget)": sample 11 (0x24340) is the cone / bump sound (the "voices 10-15 in a chase"
+  were cone hits and the player's suspension bumps); Driver 1's siren is sample 4 (0x1C5E0) on channels 5 / 6.
+- **Other banks:** bank 3 (police radio) is used in every city: speech queue 0x8004C96C -> channel 9 via 0x8004CF50
+  (felony callouts 0x800650E4 samples 7 / 10, 0x800635C0 sample 8, mission events); no D2 cop phrases are wired -> keep.
+  Bank 4 (Take a Ride = VOICES lump 2, 117,108 B, tail 20,108 B = the special's engine): samples 0-6 are queued by
+  0x8006B9D8 (random 100 + rand % 7 on driving events, condition table 0x8008C354) and mission script events; whether Take
+  a Ride fires them is a runtime question (if never, 117 KB would be dead in every D2 city) -> keep until checked.
+- **Today's use of the replaced space (car_sfx.bin of probe d2_cities_4, plugin step-1 algorithm):**
+
+  | city | civ banks | civ engines / idles / horns | 2 reserved horns | free in s1-2 (73,184) | music tail - player engine | mission tail - special |
+  |---|---|---|---|---|---|---|
+  | Chicago | 12 / 4 / 13 | 59,200 | 12,672 | 1,312 | 21,740 - 18,992 = 2,748 | 20,108 - 18,992 = 1,116 |
+  | Havana | 10 / 11 / 7 | 59,312 | 7,936 | 5,936 | 28,252 - 18,992 = 9,260 | 1,116 |
+  | Las Vegas | 14 / 3 / 4 | 55,504 | 12,000 | 5,680 | 25,356 - 18,992 = 6,364 | 1,116 |
+  | Rio | 8 / 7 / 13 | 56,928 | 12,672 | 3,584 | 29,004 - 18,992 = 10,012 | 1,116 |
+
+  (music tail = 0x19000 minus the larger of the city's day / night D2 song banks.)
+- **D2 sirens (VOICES2 69 + GameLevel, `& 2` cities 69 + (level & 1) * 2):** one 8 kHz loop each: Chicago 69 = 6,048 B,
+  Havana 70 = 14,848, Las Vegas 69 = 6,048, Rio 71 = 12,336. Today none fits the s1-2 space; Vegas fits the music tail
+  (6,364), Havana / Rio only there too, Chicago nowhere.
+- **Freed by the rule:** s6 + s7 + s8 = 18,352 B contiguous (bank 0 +120,000 .. +138,352 = SPU 0x1E4D0 .. 0x22C80), +
+  s4 1,920 once the D2 siren takes over = 20,272 B (beyond the 73,184 B of s1-2 already reused). Every D2 siren fits the
+  s6-s8 hole (largest 14,848; 3,504 B left), in all four cities, without touching the music / mission tails.
+- **Must not break:** (1) the player-horn trigger: the plugin recognises R1 by channel 4 starting at table entry 8's ADDRESS
+  (c4a == s8) - keep an entry-8 address or switch to the call site 0x800234D4; (2) AI horns 0x800180D8 play table entries
+  6-8 on any voice: point entries 6 / 7 / 8 at the city's D2 civilian horns (slots 24-26) before the data goes; (3) the
+  siren: D1 sweeps the pitch of channels 5 / 6 (0x8004CA5C, phase-based) while D2's siren sample already contains the
+  wail (D2 plays it at a fixed pitch, gamesnd.c Start3DSoundVolPitch(..., 129)) -> with a D2 siren in entry 4 that sweep
+  must be neutralised (fixed pitch for 5 / 6) and the rate set to 8000; (4) keep crash s0, skid s3, smash / bump s10-13,
+  the unknown s5 / s9 / s14 / s15, bank 3 radio, bank 1 and FESAMPS (menus) untouched; D1 cities unchanged (the rewrite is
+  per level load, gated on a D2 city, PS1-native as an SPU upload of the siren + 3 table entries).
+
+## Q73 = A: Chicago night = D2 night rules by default (Infrastructure 30.10.)
+- cityprofile CHICAGO now has night_tiles_third + night_models_d2 (C125 + C128) like Havana / Vegas / Rio, so the
+  converter default and setup_chicago's recipe (level_key hashes the converter sources) give the q73 night without a switch.
+  CHI_POLISH_NIGHT_D2 is now an override: 1 = on for any city, 0 = off (Chicago's pre-Q73 night), unset = profile.
+- Check: setup recipe (cheats6 + CHI_NIGHT_MOON) night conversion with no switch = var_polish_q73_night byte-identical.
+
+## C129 toolchain (Infrastructure 30.10.)
+- GCC MIPS toolchain, user-local, no PATH / registry change: `D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/` = PSn00bSDK v0.24
+  release asset `gcc-mipsel-none-elf-12.3.0-windows.zip` (GCC 12.3.0, mipsel-none-elf; github.com/Lameguy64/PSn00bSDK),
+  SHA-256 51df48145d5ef4b396d3932b72ccba538cc605c7c7745b32c58c277aa00523c5 (zip kept in tools/dl).
+- Status: extracted; running it was refused by the Claude Code permission system (downloaded binaries). Needs the user
+  to allow it (a Bash permission rule for `D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/bin/*`) before C129 can build.
+- **C138 Havana mini car (Polish 30.10.):** the mini is D2 model 12 (Havana choice 0, D2's secret car): body 280 x 554 D1
+  (model x1.32), colBox (94, 66, 210) -> 124 / 277 half, cPoints (-93..92, -186..226) -> 240 x 544 shadow quad, wheel 33.
+  - Shadow: Driver 1 draws it through the physics corners car + 0x88 .. 0xB8, measured 370 x 1040 for EVERY car (Miami's
+    D1 car and the Havana mini alike: Driver 1's fixed body box) -> 1.5 x wider, 1.9 x longer than D2's. The plugin's SHD
+    offsets (C102, 0x80093480 + 16 car) already stretch the special's quad from .sps.bin; car 0 has none. Data:
+    CHI_POLISH_PLAYERSHADOW=1 -> <lev>.pps.bin = "PPS1", 4, per player choice {D2 model, 4 x (x, z) cPoints x1.32,
+    colBox half x / z x1.32, length / 1040 x 4096}. hav9 = hav6 day / hav8 night levels byte-identical + .pps.bin.
+  - Lights: positions are the mini's own D2 cosmetics x1.32 (head z -260 of -277, brake x 107 of 140: inside the body);
+    D2 draws fixed sizes (cosmetic.c HEADLIGHT 18, BRAKE / BACK 17, INDICATOR 20, REVERSE 14 D2 units -> x1.32 24 / 22 / 26 /
+    18); Driver 1's glow sizes are its own (engine): a per-car scale (length ratio in .pps.bin) or D2's sizes are Infrastructure's.
+  - Box: the car-car box (C42E) already = D2 colBox; the physics corners (shadow, ground contact) are the engine's fixed box.
+
+
+## C137 step 1: D1 horns + siren replaced in D2 cities (Infrastructure 30.10., build-wip; Analyst inventory above)
+- **Package:** car_sfx.bin (CSX2) gets the city's D2 siren as kind 3 (VOICES2 bank 69 Chicago / Vegas, 70 Havana, 71 Rio;
+  6,048 / 14,848 / 6,048 / 12,336 B, 8 kHz loop; build_package SIREN_BANK, CHI_C137_SIREN=0 none). Older plugins ignore it.
+- **Plugin (c137_bank0, at the fresh bank 0 of a D2 city, after the civilian banks):** entries 6 / 7 / 8 (D1 horns, AI
+  horn 0x800180D8 + R1) = the D2 civilian horns of slots 25 / 24 / 26 (fallback 25; entry 8 keeps an address of its own,
+  so the R1 -> player-horn retarget still triggers); the freed D1 horn block (18,352 B, SPU 0x1E4D0) holds the D2 siren as
+  entry 4 (D1's siren sample 4 dropped). While entry 4 = the D2 siren, the D1 sweep in 0x8004CA5C is neutralised by two
+  code words (psx_mod_write_code_word): 0x8004CCB4 subu v1,v1,v0 (0x00621823) -> addiu v1,zero,0x1000 (pitch arg fixed),
+  0x8004CC84 subu a3,v0,a3 (0x00473823) -> addiu a3,zero,-2000 (volume fixed); restored in every other level. Doppler
+  (scale +0x52, FUN_0004e5e4) stays: siren pitch 0x2E7 = 8000 Hz, up to ~+13 % for an approaching cop. CHI_C137=0: off.
+  Host-only (M8: SPU upload + 3 table entries + 2 code words from guest code at level load).
+- **Runner `c137_sounds`** (CITY, SECOND=miami|la, DRIVE; Rio sits still: its start faces the sea): entries 6-8 = D2 horns,
+  entry 4 = the siren, the words, siren voices at the sample's pitch, R1/R3 player horn = slot 27, then the D1 city has
+  Driver 1's table and words back. PASS Vegas / Havana / Rio / Chicago (+ Vegas -> LA, Rio -> LA / Miami); d4ea9929 fails.
+- **Open (step 2):** s5 / s9 / s14 / s15 (12,560 B) and Take a Ride bank 4 (117 KB): no static caller; a usage check run
+  before any drop. The freed s4 (1,920 B) is unused for now.
+
+## C138 plugin side: D2 player shadow + D2 light sizes (Infrastructure 30.10., build-test 848956e9)
+- **Shadow (player_shadow, in shadow_vblank):** car 0's SHD offsets (0x80093480) stretch Driver 1's corner quad to the
+  chosen car's D2 size from assets/<city>/plrshadow_<day|night>.bin (= the level's .pps.bin, Polish PPS1; build_package
+  copies it like .sps.bin; entry = player choice 0x8009683C), only while a D2 city runs; 0 elsewhere. Physics corners stay
+  Driver 1's 370 x 1040 (handling). Shared helper shadow_stretch() with the specials (C102). CHI_C138_SHADOW=0: off.
+  Havana mini (hav9, choice 0, D2 model 12): quad 544 x 244 = .pps.bin, 537-556 after a crash drive. Applies to every D2
+  city / choice whose level carries a .pps.bin (Polish: CHI_POLISH_PLAYERSHADOW=1 for the other cities).
+- **Lights (c138_lights_vblank):** Driver 1's ShowCarlight 0x80043FDC sizes are immediates at 14 call sites (reverse 20
+  0x80043970 / 9A8, indicators 30 0x80043BB0 / BF8 / C64 / CBC, brake 25 0x80043DF4 / E3C, night head 30 0x80046398 / 3F0 /
+  4AC / 504, night tail 25 0x800465A8 / 5F4); in D2 cities they are Driver 2's fixed sizes x1.32 (head 24, brake / tail 22,
+  indicator 26, reverse 18) for every car, Driver 1's elsewhere (switch_words, code-word writes). CHI_C138_LIGHTS=0: off.
+  Host-only (M8: SHD words per frame + 14 code words from guest code).
+- **Runner `c138_mini`** (CITY, NIGHT; hav9 levels): start shot (as Polish's 20261030-010048 / -010135), shadow quad =
+  .pps.bin, physics 1040 x 370, light words, 10 s drive into traffic / wall, alive; PASS day + night. c137_sounds' D1 leg
+  checks D1 light words + SHD0 = 0 (PASS Havana -> Miami). Regression: shadow_bus, city_switch, havana_drive, cheats_menu PASS.

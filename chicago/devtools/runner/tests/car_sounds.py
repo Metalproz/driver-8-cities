@@ -58,7 +58,7 @@ def run(s):
         d = sfx.read_bytes(); n = st_.unpack_from("<i", d, 4)[0]; dp = 8 + 20 * n + 28
         for i in range(n):
             bk, kd, sz, lp, rt = st_.unpack_from("<5i", d, 8 + 20 * i)
-            smp[d[dp + 16: dp + 48]] = "D2 bank %d %s" % (bk, ("engine", "idle", "horn")[kd])
+            smp[d[dp + 16: dp + 48]] = "D2 bank %d %s" % (bk, ("engine", "idle", "horn", "siren")[kd])
             dp += (sz + 15) & ~15
     what = {}
     for ch in (0, 1, 4, 7, 8):

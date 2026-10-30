@@ -315,16 +315,18 @@ def collect(chicago: Lev, base: Lev, model_areas=None, model_near=None, cars: Le
     day_tex, dark_f = night_same_as_day(chicago)
     ndark = 0
     night_tiles = set()                       # C125 (CityProfile.night_tiles_third): textures of ground tile models
-    # Q73 (Chicago, user decision pending): CHI_POLISH_NIGHT_D2=1 applies the C125 + C128 night rules to any city (default
-    # off: Chicago's shipped look); Havana / Vegas / Rio have them in their profiles
-    _nd2_env = __import__("os").environ.get("CHI_POLISH_NIGHT_D2", "0") == "1"
-    if day_tex is not None and (__import__("cityprofile").P.night_tiles_third or _nd2_env):
+    # Q73 = A (user 30.10.): every D2 city's profile now carries the C125 + C128 night rules (Chicago included).
+    # CHI_POLISH_NIGHT_D2 overrides the profile: 1 = on for any city, 0 = off (Chicago's pre-Q73 look); unset = profile.
+    _nd2_raw = __import__("os").environ.get("CHI_POLISH_NIGHT_D2", "")
+    _nd2_env = _nd2_raw == "1"
+    _nd2_off = _nd2_raw == "0"
+    if day_tex is not None and not _nd2_off and (__import__("cityprofile").P.night_tiles_third or _nd2_env):
         _cm, _ = inmem_models(chicago)
         for _m in {**area_models(chicago), **_cm}.values():
             if _m.shape_flags & 0x0400:
                 night_tiles |= model_texrefs(_m, {})
         print("night: %d ground-tile textures darkened x1/3 (C125)" % len(night_tiles))
-    night_d2 = day_tex is not None and (__import__("cityprofile").P.night_models_d2 or _nd2_env)   # C128: as D2's
+    night_d2 = day_tex is not None and not _nd2_off and (__import__("cityprofile").P.night_models_d2 or _nd2_env)   # C128: as D2's
     if night_d2:                              # sprites (trees): D2 lightLevel / 3 at night (draw.c, not Chicago)
         _cm, _ = inmem_models(chicago)
         _ns = set()

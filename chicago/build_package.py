@@ -96,6 +96,7 @@ CAR_SFX_BANKS = (12, 4, 13)
 # (car_banks[0] = {12, 4, 13, 5, 16, 9, 2, 15, 10}; index = model - 1, model 0 -> 1, > 6 -> -3): D2 model -> bank.
 D2_CHICAGO_BANK = dict(__import__("cityprofile").P.car_banks)   # M3 profile (Chicago: car_banks[0])
 CAR_SFX_V2 = os.environ.get("CHI_CAR_SFX_V2", "1") != "0"
+SIREN_BANK = {"CHICAGO": 69, "HAVANA": 70, "VEGAS": 69, "RIO": 71}   # C137: D2 VOICES2 siren bank per city
 CAR_SFX_RATE = int(os.environ.get("CHI_CAR_SFX_RATE", "11025"))   # engine / idle loops resampled (SPU RAM budget)
 
 
@@ -134,6 +135,17 @@ def car_sfx_v2() -> bytes:
                 smp, rate = vag.convert(smp, rate, CAR_SFX_RATE, bool(loop)), CAR_SFX_RATE
             hdr.append(struct.pack("<5i", b, kind, len(smp), loop, rate))
             data += smp + bytes((-len(smp)) % 16)
+    # C137 (user rule Q71): the city's own D2 siren as kind 3 (bank = its VOICES2 bank; REDRIVER2 gamesnd.c: 69 + GameLevel,
+    # cities with level & 2 -> 69 + (level & 1) * 2: Chicago / Las Vegas 69, Havana 70, Rio 71; one 8 kHz loop each). The
+    # plugin puts it into Driver 1's horn samples 6-8 (dropped in D2 cities) as bank 0 entry 4 (D1's siren). Older plugins
+    # ignore kind 3. CHI_C137_SIREN=0: none.
+    sb = SIREN_BANK.get(__import__("cityprofile").P.name)
+    if sb and os.environ.get("CHI_C137_SIREN", "1") != "0":
+        blk = v2[offs[sb]: offs[sb + 1]]
+        o, size, loop, rate = struct.unpack_from("<4I", blk, 4)
+        smp = blk[4 + 16 * struct.unpack_from("<I", blk, 0)[0]:][o: o + size]
+        hdr.append(struct.pack("<5i", sb, 3, len(smp), loop, rate))
+        data += smp + bytes((-len(smp)) % 16)
     mp = bytes(civ) + bytes(player) + bytes(spc)
     return struct.pack("<Ii", 0x32585343, len(hdr)) + b"".join(hdr) + mp + data
 
@@ -407,6 +419,11 @@ def city_assets(day, night, adir, xd_src=None):
             shutil.copyfile(lev_ + ".sps.bin", sps_asset)
         elif os.path.exists(sps_asset):
             os.remove(sps_asset)
+        pps_asset = os.path.join(adir, "plrshadow_%s.bin" % tag_)  # C138: the player cars' D2 shadow quads (Polish PPS1)
+        if d2ply and lev_ and os.path.exists(lev_ + ".pps.bin"):
+            shutil.copyfile(lev_ + ".pps.bin", pps_asset)
+        elif os.path.exists(pps_asset):
+            os.remove(pps_asset)
         spt_asset = os.path.join(adir, "spctwist_%s.bin" % tag_)   # C82: the specials' twistRateY (Polish SPT1)
         if d2ply and lev_ and os.path.exists(lev_ + ".spt.bin"):
             shutil.copyfile(lev_ + ".spt.bin", spt_asset)

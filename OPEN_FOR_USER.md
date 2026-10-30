@@ -6,13 +6,15 @@ Every section is ordered by impact: what changes the engine / the whole game mos
 
 ## Decisions waiting for you
 
-None right now.
+| # | Since | Impact | Question | Recommendation |
+|---|---|---|---|---|
+| Q74 | 30.10. | **Engine, all 4 D2 cities:** blocks the Driver 2 traffic work (C129, your Q72 = B) | The PS1 compiler (GCC 12.3.0 for MIPS, from the open-source PSn00bSDK project on GitHub, release v0.24) is downloaded to `D:/recomps/tools/gcc-mipsel-none-elf-12.3.0`. Claude Code's permission system blocks running downloaded programs until you allow it. Allow Claude to run the programs in that folder's `bin`? | **Allow** only that folder (e.g. `/permissions` -> allow `Bash(D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/bin/*)`), or tell me "allow it" and I add that one rule. |
 
 ## Checks waiting for you
 
-### Probe "d2 cities 4" (since 30.10.; replaces "d2 cities 3" and "q73 chicago night")
+### Probe "d2 cities 5" (since 30.10.; replaces "d2 cities 3/4" and "q73 chicago night")
 1. No more freezes: Newtown / Desert / Interview rides (also after LA Day/Night -> back), and switching Driver 2 cities (e.g. Las Vegas -> Rio, Chicago -> Havana) then driving (C135).
-2. Loading a Driver 2 map after another map: no noise at the start of loading (C127).
+2. Sounds in Driver 2 cities: traffic honks with Driver 2 horns, police use Driver 2's siren; back in Miami/LA the Driver 1 sounds return (C137). Loading a Driver 2 map after another map: no noise at the start (C127).
 3. Sky: each Driver 2 city shows its own sky, day and night (also after playing another city first) (C126).
 4. Las Vegas + Rio day/night: driving, ramps, own music + chase music, Driver 2 car sounds; Rio sea drowns you; Vegas no odd colours with different cars.
 5. Havana chase music; Havana/Chicago Driver 2 engine sounds (also after moving the menu cursor over another city) (C120/C121).
@@ -20,9 +22,10 @@ None right now.
 7. Night look as in Driver 2: Chicago signs lit (Q73 A), buildings lit flat, darker cars, no colour noise in map holes; Las Vegas casino neon/signs lit, lamp glow, pole traffic lights glow; Havana lamp heads lit; Rio; roads dark (C128/C132-C134).
 8. Mods > Quality of Life > "Rewind" switches rewind on/off on its own; "Full Pro experience" section with the warning (C130/C131).
 9. City menu page 2: Las Vegas and Rio pictures.
+10. Havana mini car (start car): smaller shadow, smaller light glows; all D2 cities use Driver 2's light sizes (C138).
 
 ### Questions about your last session
-1. 28.10. ~17:30-17:45 on the laptop (probe "q73 chicago night"): the game froze 3 times and crashed once (after Newtown, while driving a Driver 2 city, after picking LA day). What were you doing, and how did it look (frozen picture, black screen, sound loop)? Cause found + fixed (C135, two bugs: wrong level table for Newtown/Desert; special car overwriting memory after a city switch), now in probe "d2 cities 4". Anything else you noticed?
+1. 28.10. ~17:30-17:45 on the laptop (probe "q73 chicago night"): the game froze 3 times and crashed once (after Newtown, while driving a Driver 2 city, after picking LA day). What were you doing, and how did it look (frozen picture, black screen, sound loop)? Cause found + fixed (C135, two bugs: wrong level table for Newtown/Desert; special car overwriting memory after a city switch), now in probe "d2 cities 5". Anything else you noticed?
 
 ### Waiting for details from you
 - Havana map fixes: you said you'd send details later (27.10.).
