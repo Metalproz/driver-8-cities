@@ -13,6 +13,13 @@ WAIT = float(os.environ.get("WAIT", "45"))
 CODE = [0x92220010, 0x92260000, 0x00021140, 0x00C23021, 0x00DC3021, 0x90C6CED8, 0x2404FFFF, 0x00002821, 0x24C60006]
 
 
+SFX_TAB0 = 0x800BCA74   # bank 0 sample table (16 B per entry: address first; driver_chicago.c SFX_TAB)
+
+
+def aliased(s, k, slot):
+    return s.word(SFX_TAB0 + 16 * k) != 0 and s.word(SFX_TAB0 + 16 * k) == s.word(SFX_TAB0 + 16 * slot)
+
+
 def run(s):
     s.menu("take_a_ride/" + CITY); s.wait_world(what=CITY)
     code = [s.word(0x80018084 + 4 * k) for k in range(9)]
@@ -47,5 +54,9 @@ def run(s):
     if d1:
         s.check("Driver 1 city: horn starts only on 6-8", all(k in (6, 7, 8) for k in horns), str(horns))
     else:
-        s.check("D2 city: no Driver 1 horn entry (6-8) started", not any(k in (6, 7) for k in horns), str(horns))
+        # since C137 entries 6 / 7 / 8 hold the D2 civilian horns of slots 25 / 24 / 26 (same SPU address), so the trace
+        # names a slot-24 / 25 horn '7' / '6'; a Driver 1 horn = an entry 6-8 address that is NOT one of the D2 slots'
+        alias = {6: 25, 7: 24, 8: 26}
+        d1 = [k for k in horns if k in alias and not aliased(s, k, alias[k])]
+        s.check("D2 city: no Driver 1 horn entry (6-8) started", not d1, "%s (D1 ones %s)" % (horns, d1))
     s.check("alive", s.alive())

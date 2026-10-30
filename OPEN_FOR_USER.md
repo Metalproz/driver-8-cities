@@ -10,6 +10,11 @@ None right now.
 
 ## Checks waiting for you
 
+### Probe "d2 cities 8" (since 30.10. evening; replaces "d2 cities 7", your save copied)
+1. Havana mini: tyres stay the right size after knocks / longer driving.
+2. Night: head/tail glows and the light pool on the road match each car's size (mini much smaller).
+3. Restart in Havana: if the car still drops from the air, F9 right after.
+
 ### Not yet confirmed from earlier probes (optional, whenever you play)
 - Sky: each Driver 2 city shows its own sky, day and night (C126); no noise at the start of loading (C127).
 - Sounds: Driver 2 sirens; Havana chase music; Driver 2 engine sounds after moving the menu cursor over another city (C120/C121/C137).
@@ -17,6 +22,7 @@ None right now.
 - City menu page 2 pictures for Las Vegas and Rio.
 
 ### Questions about your last session
+- Havana restart dropping the car from the air (C148): we could not make it happen (Havana day/night and Miami restarts stay level). If you see it again, press F9 (snapshot) right after the drop, and tell us how you restarted (pause -> Restart, or after a crash).
 - 30.10. 16:33 and 16:40 (probe "d2 cities 6"): the game froze twice. What were you doing right before (city, menu, ride)? Infrastructure is analysing the dumps (C140).
 1. 28.10. ~17:30-17:45 on the laptop (probe "q73 chicago night"): the game froze 3 times and crashed once (after Newtown, while driving a Driver 2 city, after picking LA day). What were you doing, and how did it look (frozen picture, black screen, sound loop)? Cause found + fixed (C135, two bugs: wrong level table for Newtown/Desert; special car overwriting memory after a city switch), now in probe "d2 cities 6". Anything else you noticed?
 

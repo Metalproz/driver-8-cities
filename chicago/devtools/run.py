@@ -17,6 +17,10 @@ LOGS = APP / "devtest" / "_out" / "logs"
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(errors="replace")   # generator output carries non-cp1252 characters
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--head", type=int, default=15)
     ap.add_argument("--tail", type=int, default=25)

@@ -1,6 +1,6 @@
 {
  "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop). NOTE: 'env' only feeds the PACKAGE BUILD (converter/build_package switches); runtime/plugin switches (e.g. CHI_C88_*) are NOT passed to the running game, so a runtime variant needs its own build/default.",
- "d2 cities 7": {
+ "d2 cities 8": {
   "lev": "work/var_polish_chi8_day.lev",
   "night": "work/var_polish_chi8_night.lev",
   "build": "build-test",
@@ -20,6 +20,6 @@
    "CHI_POLISH_D2BANKS": "1",
    "CHI_POLISH_D2TRAFFIC": "day"
   },
-  "what": "d2 cities 6 + C140/C141 Newtown (no police, menu-route fix) + C142 no black void + C143 horns per car model + C144 tyres on the road + C145 bus lights + Vegas D2 traffic set; exe fd1c0945"
+  "what": "d2 cities 7 + C148 Havana mini: damaged-wheel tyres resized, head/tail glows + ground light pool scaled per car; exe f855f71f"
  }
 }

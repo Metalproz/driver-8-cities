@@ -4046,3 +4046,39 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
   D1's AI for D2-driven slots (return 0 like the parked case). Entry hooks need game.toml mod_function_entry_funcs + a
   regenerate (shared window). Open: the placement decision (host plugin now vs main-RAM overlay after the M8 diet).
 - **Decision (Strategy 30.10.):** core host-side in the plugin now (D2 cities only); the mipsel build stays verified against the host path in every C129 test; exact D2 paths remain the pass criterion (runner traces vs the host reference). M8 host-only row added (~50 KB); RAM-diet candidate: Driver 1's replay recording buffer in D2 cities.
+
+## C148 Havana mini: tyres after damage, restart, light sizes; dump perf triage (Infrastructure 30.10., build-wip f855f71f)
+- **Tyres too big after driving a little:** DrawCarWheels (0x8003B208) draws each wheel with gCleanWheelModelPtr 0x800970C0,
+  gFastWheelModelPtr 0x800970AC (spinning) or, for a damaged wheel of the player (byte 0x800B700C[3 - wheel] == 0),
+  gDamWheelModelPtr 0x800970C4. wheels_entry resized only the first two; the damaged model kept hub / tread 73 (Miami dump:
+  same 24-vertex layout, its vertices 8..15 = an unrotated square that DrawCarWheels overwrites with the rim at draw time).
+  Now all three get hub 0..7 / tread 16..23 = the car's wheel size. Checked: after a crash in Havana all three models carry
+  the mini's 44.
+- **Restart drop (user):** not reproduced. Pause -> Restart -> Yes (runner: start, down, cross, left, cross) in Havana day and
+  night after driving 10-12 s away, and in Miami: player y within 2 units over game frames 0-60 (2810 / 164); rapid shots
+  show the restart intro camera with the car standing still. Waiting for a user snapshot taken right after the drop.
+- **Light glows per car (exe c148_patches, 14 sites):** ShowCarlight's size immediates -> 'lh a3, LSZ+k(gp)', LSZ =
+  0x80093750 (reverse, indicator, brake, head, tail), initialised in the exe image to Driver 1's 20 / 30 / 25 / 30 / 25
+  (an older plugin keeps Driver 1's lights). Entry hook DrawCar 0x8003A698 (a0 = car; PlayerCarFX and AddNightLights run
+  inside it, the AI indicators / brake right after it in FUN_80014A8C) writes the car's sizes: Driver 1's outside D2
+  cities, Driver 2's fixed 18 / 26 / 22 / 24 / 22 for every D2 car, the player's car scaled by its D2 length ratio
+  (.pps.bin entry +11, length / 1040 x 4096; mini ~0.53). Replaces C138's runtime code-word switch (a diverged page).
+- **Ground light pool per car:** FUN_80040BAC (a0 = car; head beam / brake pool from immediate car-space points rotated by
+  FUN_8004EAC0, calls 0x80040DD4 / 0x80040E30). Entry hooks 0x80040BAC (remember the car) and 0x8004EAC0 (when ra =
+  0x80040DDC / 0x80040E38): x scaled by the car's D2 half width (colBox x / 185), z: points on the body scaled by the length
+  ratio, points past Driver 1's bumper (520) keep their throw beyond the car's own bumper. Mini at night: beams just
+  outside the body, brake pool attached at the back (shots devtest/_out/runner/20261030-2005..-c148x_havana_night_none).
+  CHI_C148_LIGHTS=0 / CHI_C148_BEAM=0: off. Host-only (M8: per-car table + a small cave at the two call sites).
+- **Runner:** c144_wheels Havana / Chicago / Miami + Havana night, c138_mini day / night (check now reads LSZ on a C148 exe)
+  PASS on build-wip.
+- **Dump perf triage (probe d2 cities 7, 18:56, slow_frames; copy devtest/_out/c148):** not the C143 / C144 caves. The
+  runtime's dirty_ram_stats (Havana night, build-wip) list the interpreted ('diverged') text pages: exactly the pages the
+  plugin rewrites at runtime with psx_mod_write_code_word: C132 night look 0x8002D46C.. and the car colour 0x8003A6D0 (DrawCar
+  page: DrawCar runs interpreted at night), C137 siren 0x8004CCB4 / 84, sky 0x8004EDE0.. , glows 0x800530E4.. (and C138's
+  light words 0x80043 / 0x80046 in exes before C148). ~6.0k (day) / 6.7k (night) interpreted instructions per game frame;
+  build-dev (fd1c0945) 10.5-11.9k. Same dirty rate as the d2 cities 6 dump (106cfe7c). The dump's hot spot FindSurfaceD2
+  (0x8001EEB4, interpreted per instruction ~100 calls / frame) is on a clean page: cause open (precise-IRQ slicing?).
+  Fix proposal: turn the remaining runtime code-word switches into data-driven exe patches (LSZ-style), one window.
+- Runtime fact: a copy's text-guard reference is game.toml exe (project root = first ancestor with .git / .gitignore /
+  CMakeLists.txt: build-dev and devtest copies use the shared disc/SLUS_008.42); code runs from the disc image + the package's
+  patch list, so a newer shared SLUS does not change an older build's behaviour (checked on an exact build-dev copy).

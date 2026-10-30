@@ -68,8 +68,17 @@ def run(s):
                 "%.0f x %.0f vs %d x %d" % (shd[0], shd[1], want[0], want[1]))
     s.check("physics corners unchanged (Driver 1's 1040 x 370)", abs(phys[0] - 1040) <= 16 and abs(phys[1] - 370) <= 16,
             "%.0f x %.0f" % phys)
-    bad = {hex(a): hex(s.word(a)) for a, v in LIGHT_D2.items() if s.word(a) != v}
-    s.check("light sizes = Driver 2's (14 words)", not bad, str(bad))
+    if s.word(0x80043970) == 0x8787CFE0:          # C148 exe: sizes come from LSZ 0x80093750 per car (DrawCar hook)
+        import struct as _st
+        sizes = set()
+        for _ in range(40):
+            sizes.add(_st.unpack("<5h", s.ram(0x80093750, 10))); time.sleep(0.05)
+        # civilians: Driver 2's fixed sizes; the player's car: scaled by its length ratio (smaller for the mini)
+        ok = (18, 26, 22, 24, 22) in sizes and all(v[k] <= (18, 26, 22, 24, 22)[k] for v in sizes for k in range(5))
+        s.check("light sizes = Driver 2's, player's scaled (C148 LSZ)", ok, str(sorted(sizes)))
+    else:
+        bad = {hex(a): hex(s.word(a)) for a, v in LIGHT_D2.items() if s.word(a) != v}
+        s.check("light sizes = Driver 2's (14 words)", not bad, str(bad))
     x, y, z, h, _ = s.car(0)
     s.drive(DRIVE, h)
     time.sleep(1.0)

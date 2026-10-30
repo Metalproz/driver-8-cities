@@ -3070,7 +3070,8 @@ def c144_patches(exe_path):
 # The 14 ShowCarlight size immediates 'addiu a3, zero, N' (reverse 20, indicator 30, brake 25, night head 30, tail 25) ->
 # 'lh a3, LSZ+k(gp)' with LSZ = 5 halfwords in the zero block 0x80093750 (gp-0x3020: reverse, indicator, brake, head,
 # tail). The plugin's DrawCar entry hook writes the drawn car's sizes (Driver 1's outside D2 cities). The instruction
-# after each site does not read a3 (load delay). NOT zero-safe alone: the plugin keeps the table filled every vblank.
+# after each site does not read a3 (load delay). The table is initialised in the image to Driver 1's sizes (an older
+# plugin = Driver 1's lights); the plugin writes it per car.
 # PS1: pure exe + a 10-byte table (guest code fills it per car). CHI_C148=0 = off.
 C148_LSZ, C148_LSZ_GP = 0x80093750, -0x3020
 C148_SITES = [(0x80043970, 20, 0), (0x800439A8, 20, 0), (0x80043BB0, 30, 1), (0x80043BF8, 30, 1), (0x80043C64, 30, 1),
@@ -3095,6 +3096,9 @@ def c148_patches(exe_path):
             raise RuntimeError("C148: %08X next instruction reads a3" % a)
         lh = asm(a, ["lh a3, %d(gp)" % (C148_LSZ_GP + 2 * k)])[0]
         out.append((a, word(a), lh, "C148: light size %d -> LSZ[%d]" % (n, k)))
+    # the table starts as Driver 1's sizes in the image: an exe + an older plugin (no LSZ writes) keeps every light
+    for k, w in enumerate((20 | 30 << 16, 25 | 30 << 16, 25)):
+        out.append((C148_LSZ + 4 * k, 0, w, "C148: LSZ initial (Driver 1 sizes) %d" % k))
     return out
 
 

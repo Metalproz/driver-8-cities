@@ -132,7 +132,11 @@ def run(s):
     # C138: Driver 1's light sizes and no car-0 shadow offsets in the Driver 1 city
     d1_lights = {0x80043970: 0x24070014, 0x80043BB0: 0x2407001E, 0x80043DF4: 0x24070019, 0x80046398: 0x2407001E,
                  0x800465A8: 0x24070019}
-    bad = {hex(a): hex(s.word(a)) for a, v in d1_lights.items() if s.word(a) != v}
+    if s.word(0x80043970) == 0x8787CFE0:          # C148 exe: sizes come from the LSZ table (Driver 1's in a D1 city)
+        lsz = struct.unpack("<5h", s.ram(0x80093750, 10))
+        bad = {} if lsz == (20, 30, 25, 30, 25) else {"LSZ": lsz}
+    else:
+        bad = {hex(a): hex(s.word(a)) for a, v in d1_lights.items() if s.word(a) != v}
     shd0 = [s.word(0x80093480 + 4 * k) for k in range(4)]
     s.check("%s: Driver 1's light sizes, no player shadow offsets (C138)" % SECOND, not bad and not any(shd0),
             "words %s, SHD0 %s" % (bad, [hex(w) for w in shd0]))

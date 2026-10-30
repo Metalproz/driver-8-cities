@@ -3805,23 +3805,59 @@ static void lsz_write(const int16_t v[5]) {
     for (uint32_t k = 0; k < 5u; k++)
         if ((int16_t)psx_mod_read_half(LSZ + 2u * k) != v[k]) psx_mod_write_half(LSZ + 2u * k, (uint16_t)v[k]);
 }
+static int32_t car_light_ratio(uint32_t car);
 static void lsz_for_car(uint32_t car) {
     static const int16_t d1[5] = { 20, 30, 25, 30, 25 }, d2[5] = { 18, 26, 22, 24, 22 };
     static int en = -1, sc = -1;
     if (en < 0) { const char* e = getenv("CHI_C138_LIGHTS"); en = !(e && *e == '0'); }
     if (sc < 0) { const char* e = getenv("CHI_C148_LIGHTS"); sc = !(e && *e == '0'); }
     if (!en || !chicago_active()) { lsz_write(d1); return; }
-    int32_t ratio = 4096;
-    int t = s_chi_night ? 1 : 0;
-    const int32_t* q = s_pps[t];
-    if (sc && car == 0u && s_pps_n[t] >= 2u + 12u && q[0] == 0x31535050) {
-        uint32_t ch = psx_mod_read_word(0x8009683Cu) & 3u;
-        if ((int32_t)ch < q[1] && 2u + 12u * ch + 12u <= s_pps_n[t] && q[2 + 12 * ch + 11] > 1024 && q[2 + 12 * ch + 11] < 8192)
-            ratio = q[2 + 12 * ch + 11];
-    }
+    int32_t ratio = sc ? car_light_ratio(car) : 4096;
     int16_t v[5];
     for (int k = 0; k < 5; k++) { int32_t x = (d2[k] * ratio + 2048) >> 12; v[k] = (int16_t)(x < 6 ? 6 : x); }
     lsz_write(v);
+}
+/* C148 (user: the ground headlight / light pool does not match the car's size): FUN_80040BAC (a0 = car index) builds the
+ * pool polygon from immediate car-space points and rotates each with FUN_8004EAC0 (calls 0x80040DD4 / 0x80040E30, return
+ * 0x80040DDC / 0x80040E38). Entry hooks: 0x80040BAC remembers the car, 0x8004EAC0 scales the point (x / z) by the car's
+ * D2 length ratio when called from there (player's car in a D2 city; 4096 = unchanged). CHI_C148_BEAM=0: off.
+ * Host-only (M8: a 6-word cave at the two call sites scaling by a per-car table word). */
+static uint32_t s_beam_car = 0xFFu;
+static int32_t car_light_ratio(uint32_t car) {
+    static int sc = -1;
+    if (sc < 0) { const char* e = getenv("CHI_C148_LIGHTS"); sc = !(e && *e == '0'); }
+    int t = s_chi_night ? 1 : 0;
+    const int32_t* q = s_pps[t];
+    if (!sc || car != 0u || !chicago_active() || s_pps_n[t] < 2u + 12u || q[0] != 0x31535050) return 4096;
+    uint32_t ch = psx_mod_read_word(0x8009683Cu) & 3u;
+    if ((int32_t)ch >= q[1] || 2u + 12u * ch + 12u > s_pps_n[t]) return 4096;
+    int32_t r = q[2 + 12 * ch + 11];
+    return r > 1024 && r < 8192 ? r : 4096;
+}
+static void beam_entry(struct CPUState* cpu, uint32_t address) {
+    (void)address;
+    s_beam_car = cpu->gpr[4];
+}
+static void rotpoint_entry(struct CPUState* cpu, uint32_t address) {
+    (void)address;
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C148_BEAM"); en = !(e && *e == '0'); }
+    uint32_t ra = cpu->gpr[31];
+    if (!en || (ra != 0x80040DDCu && ra != 0x80040E38u)) return;
+    int32_t r = car_light_ratio(s_beam_car);
+    if (r == 4096) return;
+    /* width: the car's D2 half width (.pps.bin colBox x, x1.32) against Driver 1's 185; length: points on the body
+     * scale, points past Driver 1's bumper (half length 520) keep their throw beyond the car's own bumper */
+    int32_t rw = 4096, t = s_chi_night ? 1 : 0;
+    const int32_t* q = s_pps[t];
+    uint32_t ch = psx_mod_read_word(0x8009683Cu) & 3u;
+    if (q[0] == 0x31535050 && (int32_t)ch < q[1] && q[2 + 12 * ch + 9] > 40 && q[2 + 12 * ch + 9] < 400) rw = q[2 + 12 * ch + 9] * 4096 / 185;
+    uint32_t v = cpu->gpr[4];
+    int32_t x = (int32_t)psx_mod_read_word(v), z = (int32_t)psx_mod_read_word(v + 8u);
+    int32_t hl = (520 * r) >> 12;
+    int32_t nz = z > 520 ? z - 520 + hl : z < -520 ? z + 520 - hl : (int32_t)(((int64_t)z * r) >> 12);
+    psx_mod_write_word(v, (uint32_t)(int32_t)(((int64_t)x * rw) >> 12));
+    psx_mod_write_word(v + 8u, (uint32_t)nz);
 }
 static void drawcar_entry(struct CPUState* cpu, uint32_t address) {
     (void)address;
@@ -4087,6 +4123,7 @@ static void wheels_entry(struct CPUState* cpu, uint32_t address) {
         if ((mdl & 0x1FFFFFFFu) < 0x10000u || (mdl & 0x1FFFFFFFu) >= 0x200000u) continue;
         uint32_t vtx = psx_mod_read_word(mdl + 0x10u);
         if ((vtx & 0x1FFFFFFFu) < 0x10000u || (vtx & 0x1FFFFFFFu) >= 0x200000u || psx_mod_read_half(mdl + 12u) != 24u) continue;
+        /* vertices 8..15 (rim) are written by DrawCarWheels itself at the RIM radius for whichever model it draws */
         for (int i = 0; i < 8; i++) {
             psx_mod_write_half(vtx + 8u * (uint32_t)i + 2u, (uint16_t)(int16_t)(hub[i][0] * ws));
             psx_mod_write_half(vtx + 8u * (uint32_t)i + 4u, (uint16_t)(int16_t)(hub[i][1] * ws));
@@ -4346,4 +4383,6 @@ PSX_MOD_CONSTRUCTOR(driver_chicago_register) {
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8001B720u, nightmare_spawn_entry);   /* C88 r3 */
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8004C15Cu, c129_post_physics_entry);   /* C129 */
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8003A698u, drawcar_entry);   /* C148 light sizes */
+    psx_mod_register_function_entry_plugin("driver.model-table", 0x80040BACu, beam_entry);      /* C148 light pool car */
+    psx_mod_register_function_entry_plugin("driver.model-table", 0x8004EAC0u, rotpoint_entry);  /* C148 light pool scale */
 }
