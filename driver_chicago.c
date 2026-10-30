@@ -3085,8 +3085,7 @@ static void civ_time_select(void) {
     memcpy(s_car_whl, s_t_car_whl[nw], sizeof s_car_whl); s_car_whl_n = s_t_car_whl_n[nw];
     if (s_sx_map_day) { s_sx_map = t && s_sx_map_night_ok ? s_sx_map_night : s_sx_map_day; sx_civ_banks(); }
     if (nd || nl || nw || (t && s_sx_map_night_ok))
-        fprintf(stdout, "driver.chicago: C147 night civilian set (damage %d, levels %d, wheels %d, sound map %d)
-", nd, nl, nw, t && s_sx_map_night_ok);
+        fprintf(stdout, "driver.chicago: C147 night civilian set (damage %d, levels %d, wheels %d, sound map %d)\n", nd, nl, nw, t && s_sx_map_night_ok);
 }
 static void sfx_v2_vblank(void) {
     uint8_t* spu = spu_get_ram_ptr();
@@ -3793,9 +3792,45 @@ static void c141_newtown_vblank(void) {
         if (!told++) fprintf(stdout, "driver.chicago: C141 Newtown: cop cap forced to 0 (the script still had it)\n");
     }
 }
+/* C148 (user: the glows do not match the car's size): exe c148_patches turn the 14 size immediates into 'lh a3, LSZ+k(gp)'
+ * (LSZ 0x80093750: reverse, indicator, brake, head, tail halfwords). The DrawCar entry hook (0x8003A698, a0 = car, 0 =
+ * player; PlayerCarFX / AddNightLights run inside it, the AI indicators / brake right after it) writes the car's sizes:
+ * Driver 1's (20 / 30 / 25 / 30 / 25) outside D2 cities, else Driver 2's fixed ones (18 / 26 / 22 / 24 / 22, x1.32)
+ * scaled for the player's car by its D2 length ratio (.pps.bin, length / 1040 x 4096; the Havana mini ~0.53).
+ * The vblank keeps the table valid between frames; old exes (immediates) keep the C138 word switch. CHI_C148_LIGHTS=0:
+ * no per-car scaling. Host-only (M8: a guest table per car model written at level load + the same lh sites). */
+#define LSZ 0x80093750u
+static int lsz_patched(void) { return psx_mod_read_word(0x80043970u) == 0x8787CFE0u; }
+static void lsz_write(const int16_t v[5]) {
+    for (uint32_t k = 0; k < 5u; k++)
+        if ((int16_t)psx_mod_read_half(LSZ + 2u * k) != v[k]) psx_mod_write_half(LSZ + 2u * k, (uint16_t)v[k]);
+}
+static void lsz_for_car(uint32_t car) {
+    static const int16_t d1[5] = { 20, 30, 25, 30, 25 }, d2[5] = { 18, 26, 22, 24, 22 };
+    static int en = -1, sc = -1;
+    if (en < 0) { const char* e = getenv("CHI_C138_LIGHTS"); en = !(e && *e == '0'); }
+    if (sc < 0) { const char* e = getenv("CHI_C148_LIGHTS"); sc = !(e && *e == '0'); }
+    if (!en || !chicago_active()) { lsz_write(d1); return; }
+    int32_t ratio = 4096;
+    int t = s_chi_night ? 1 : 0;
+    const int32_t* q = s_pps[t];
+    if (sc && car == 0u && s_pps_n[t] >= 2u + 12u && q[0] == 0x31535050) {
+        uint32_t ch = psx_mod_read_word(0x8009683Cu) & 3u;
+        if ((int32_t)ch < q[1] && 2u + 12u * ch + 12u <= s_pps_n[t] && q[2 + 12 * ch + 11] > 1024 && q[2 + 12 * ch + 11] < 8192)
+            ratio = q[2 + 12 * ch + 11];
+    }
+    int16_t v[5];
+    for (int k = 0; k < 5; k++) { int32_t x = (d2[k] * ratio + 2048) >> 12; v[k] = (int16_t)(x < 6 ? 6 : x); }
+    lsz_write(v);
+}
+static void drawcar_entry(struct CPUState* cpu, uint32_t address) {
+    (void)address;
+    if (lsz_patched()) lsz_for_car(cpu->gpr[4]);
+}
 static void c138_lights_vblank(void) {
     static int en = -1;
     if (en < 0) { const char* e = getenv("CHI_C138_LIGHTS"); en = !(e && *e == '0'); }
+    if (lsz_patched()) { lsz_for_car(0xFFu); return; }   /* C148 exe: data table (AI default between frames) */
     switch_words(s_c138_light_words, sizeof s_c138_light_words / sizeof s_c138_light_words[0], en && chicago_active());
 }
 
@@ -4044,8 +4079,11 @@ static void wheels_entry(struct CPUState* cpu, uint32_t address) {
     psx_mod_write_word(WHEEL_RIM, (uint32_t)(rim - 101));
     static const int8_t hub[8][2] = { {1,-1}, {1,1}, {-1,1}, {-1,-1}, {1,1}, {1,-1}, {-1,-1}, {-1,1} };
     static const int8_t tread[8][2] = { {-1,0}, {-1,0}, {0,-1}, {0,-1}, {0,1}, {0,1}, {1,0}, {1,0} };
-    for (int m = 0; m < 2; m++) {
-        uint32_t mdl = psx_mod_read_word(m ? 0x800970ACu : 0x800970C0u);
+    /* C148 (user: the mini's tyres too big again after driving a little): DrawCarWheels picks gCleanWheelModelPtr
+     * 0x800970C0, gFastWheelModelPtr 0x800970AC (spinning) and, for the player's damaged wheels, gDamWheelModelPtr
+     * 0x800970C4 (this one was never resized) */
+    for (int m = 0; m < 3; m++) {
+        uint32_t mdl = psx_mod_read_word(m == 2 ? 0x800970C4u : m ? 0x800970ACu : 0x800970C0u);
         if ((mdl & 0x1FFFFFFFu) < 0x10000u || (mdl & 0x1FFFFFFFu) >= 0x200000u) continue;
         uint32_t vtx = psx_mod_read_word(mdl + 0x10u);
         if ((vtx & 0x1FFFFFFFu) < 0x10000u || (vtx & 0x1FFFFFFFu) >= 0x200000u || psx_mod_read_half(mdl + 12u) != 24u) continue;
@@ -4307,4 +4345,5 @@ PSX_MOD_CONSTRUCTOR(driver_chicago_register) {
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8002E230u, lod_entry);   /* R33: far-car palettes */
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8001B720u, nightmare_spawn_entry);   /* C88 r3 */
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8004C15Cu, c129_post_physics_entry);   /* C129 */
+    psx_mod_register_function_entry_plugin("driver.model-table", 0x8003A698u, drawcar_entry);   /* C148 light sizes */
 }

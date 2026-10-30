@@ -3066,6 +3066,55 @@ def c144_patches(exe_path):
     return out
 
 
+# --- C148 car light sizes per car (Infrastructure 30.10., user: the Havana mini's glows do not match its size) -----------
+# The 14 ShowCarlight size immediates 'addiu a3, zero, N' (reverse 20, indicator 30, brake 25, night head 30, tail 25) ->
+# 'lh a3, LSZ+k(gp)' with LSZ = 5 halfwords in the zero block 0x80093750 (gp-0x3020: reverse, indicator, brake, head,
+# tail). The plugin's DrawCar entry hook writes the drawn car's sizes (Driver 1's outside D2 cities). The instruction
+# after each site does not read a3 (load delay). NOT zero-safe alone: the plugin keeps the table filled every vblank.
+# PS1: pure exe + a 10-byte table (guest code fills it per car). CHI_C148=0 = off.
+C148_LSZ, C148_LSZ_GP = 0x80093750, -0x3020
+C148_SITES = [(0x80043970, 20, 0), (0x800439A8, 20, 0), (0x80043BB0, 30, 1), (0x80043BF8, 30, 1), (0x80043C64, 30, 1),
+              (0x80043CBC, 30, 1), (0x80043DF4, 25, 2), (0x80043E3C, 25, 2), (0x80046398, 30, 3), (0x800463F0, 30, 3),
+              (0x800464AC, 30, 3), (0x80046504, 30, 3), (0x800465A8, 25, 4), (0x800465F4, 25, 4)]
+
+
+def c148_patches(exe_path):
+    if os.environ.get("CHI_C148") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    for k in range(3):
+        if word(C148_LSZ + 4 * k) != 0:
+            raise RuntimeError("C148: LSZ table not free")
+    out = []
+    for a, n, k in C148_SITES:
+        if word(a) != 0x24070000 | n:
+            raise RuntimeError("C148: size site %08X = %08X" % (a, word(a)))
+        nxt = word(a + 4)
+        if (nxt >> 21) & 31 == 7 or ((nxt >> 16) & 31 == 7 and (nxt >> 26) not in (0x0F,) and (nxt >> 26) != 0x23 and (nxt >> 26) < 0x20 and (nxt >> 26) != 0):
+            raise RuntimeError("C148: %08X next instruction reads a3" % a)
+        lh = asm(a, ["lh a3, %d(gp)" % (C148_LSZ_GP + 2 * k)])[0]
+        out.append((a, word(a), lh, "C148: light size %d -> LSZ[%d]" % (n, k)))
+    return out
+
+
+# --- C129 phase 2 (Infrastructure 30.10.): Driver 2 traffic core host-side in the plugin (D2 cities) --------------------
+# FUN_80013D88 (per-car AI speed / junction logic) returns early for record state 1 and 9; it now returns for state >= 9:
+# 0x80013DC4 'addiu v0, zero, 9' -> 'sltiu v0, v1, 9', 0x80013DC8 'beq v1, v0, ret' -> 'beqz v0, ret' (delay slot 'move
+# v0, zero' kept). State 10 (handler table entry 10 = the empty handler, never stored by Driver 1) = a car the plugin's
+# D2 core drives. States 1 / 9 behave as before. PS1: pure exe. CHI_C129_EXE=0 = off.
+def c129_patches(exe_path):
+    if os.environ.get("CHI_C129_EXE") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    if word(0x80013DC4) != 0x24020009 or word(0x80013DC8) != 0x10620139 or word(0x80013DCC) != 0x00001021:
+        raise RuntimeError("C129: FUN_80013D88 state test %08X %08X %08X" % (word(0x80013DC4), word(0x80013DC8), word(0x80013DCC)))
+    w = asm(0x80013DC4, ["sltiu v0, v1, 9", "beq v0, zero, 0x800142b0"])
+    return [(0x80013DC4, word(0x80013DC4), w[0], "C129: state >= 9 -> return (D2-driven cars = state 10)"),
+            (0x80013DC8, word(0x80013DC8), w[1], "C129: (branch)")]
+
+
 # --- C132 (c) glow kind 4 = SLIGHT02 in CITY 3 (Infrastructure 28.10., user: the D2 night look) --------------------------
 # CITY 3's glow table 0x8008AD7C already holds an unused 5th entry {4, 0, "SLIGHT02", 0} (count word 0x8008AE68 = 4); the
 # plugin sets the count to 5 for a D2 city whose level keeps SLIGHT02 resident (Las Vegas), 4 elsewhere (an unresolved entry
@@ -3136,7 +3185,7 @@ def all_patches(exe_path):
             + c42m_patches(exe_path) + c42l_patches(exe_path) + c42p_patches(exe_path) + c35t_patches(exe_path)
             + sky_dome_patches(exe_path) + s1_clut_patches(exe_path) + s1_slot15_patches(exe_path)
             + s1_cave_patches(exe_path) + s4_patches(exe_path) + c82_patches(exe_path) + c87_patches(exe_path) + c88_patches(exe_path)
-            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path) + c132_patches(exe_path) + c143_patches(exe_path) + c144_patches(exe_path))
+            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path) + c132_patches(exe_path) + c143_patches(exe_path) + c144_patches(exe_path) + c148_patches(exe_path) + c129_patches(exe_path))
 
 
 def apply(exe_in, exe_out):

@@ -39,9 +39,13 @@ LOGS = os.path.join(inputs.CACHE, "logs")
 # 27.10. (Strategy, after the 'havana 1' ship): the recipe follows the SHIPPED package = Polish's cheats6 levels (+ d2wheel ride,
 # shadow sidecar) for every city; CHI_NIGHT_MOON only on night conversions (as Polish ran them); the Extra-draw pair of
 # each city adds CHI_POLISH_XDRAW=1. CITIES lists every shipped city (Chicago, Havana; Las Vegas / Rio join here).
+# 30.10. (ship of probe 'd2 cities 7', user go via Strategy): + Polish's chi8 / hav10 / vegas7 / rio6 switches: player
+# shadow sidecar (C138), light rows with the cog shift (C145), D2 ride rows (C144), Las Vegas' day civilians for both
+# times (C146 'day' until per-time civilian assets ship); Las Vegas converts with CHI_CLUT_MARGIN=3 (vegas4..7).
 RECIPE = {"CHI_ROADS": "1", "CHI_S4": "1", "CHI_POLISH_D2CARS": "1", "CHI_POLISH_CARMIX_HALF": "1",
           "CHI_POLISH_S1_SLOT15": "1", "CHI_POLISH_STREAM_INMEM": "1", "CHI_POLISH_SPECDMG": "1",
-          "CHI_POLISH_SPCRIDE": "d2wheel", "CHI_POLISH_SPCSHADOW": "1"}
+          "CHI_POLISH_SPCRIDE": "d2wheel", "CHI_POLISH_SPCSHADOW": "1", "CHI_POLISH_PLAYERSHADOW": "1",
+          "CHI_POLISH_LIGHTCOG": "1", "CHI_POLISH_WHEELROAD": "1", "CHI_POLISH_D2TRAFFIC": "day"}
 NIGHT_RECIPE = {"CHI_NIGHT_MOON": "1"}
 XD_RECIPE = {"CHI_POLISH_XDRAW": "1"}
 PACKAGE_RECIPE = {"CHI_SLOT": "1", "CHI_MENU_PAGES": "1", "CHI_XD_LEVELS": "1"}
@@ -51,6 +55,10 @@ CITIES = [
     dict(tag="chicago", env={}, pkg=None, needs=("d2_CHICAGO.LEV", "d2_CHICAGO_night.lev")),
     dict(tag="havana", env={"CHI_CITY": "HAVANA"}, pkg=("CHI_HAVANA_DAY", "CHI_HAVANA_NIGHT"),
          needs=("d2_HAVANA.LEV", "d2_HAVANA_night.lev")),
+    dict(tag="vegas", env={"CHI_CITY": "VEGAS", "CHI_CLUT_MARGIN": "3"}, pkg=("CHI_VEGAS_DAY", "CHI_VEGAS_NIGHT"),
+         needs=("d2_VEGAS.LEV", "d2_VEGAS_night.lev")),
+    dict(tag="rio", env={"CHI_CITY": "RIO"}, pkg=("CHI_RIO_DAY", "CHI_RIO_NIGHT"),
+         needs=("d2_RIO.LEV", "d2_RIO_night.lev")),
 ]
 # switches that do not change a converted level (package/test plumbing)
 NOT_LEVEL = {"CHI_PKG_DIR", "CHI_START", "CHI_TEST_BUILD", "CHI_SETUP_CACHE", "CHI_SLOT", "CHI_NIGHT", "CHI_MENU_PAGES",
@@ -252,7 +260,8 @@ def feature_guard(old_pkg: str, new_pkg: str):
 # The game's runtime (main.cpp, game.toml [game] prelaunch) runs "setup_chicago.py --auto --build-dir EXE_DIR --check"
 # hidden before it loads the mods: exit 0 = the build's Chicago package is current (boot at once), 10 = it must be
 # (re)built; then it runs the same command without --check in a visible console and boots afterwards.
-AUTO_RECIPE = dict(RECIPE, CHI_POLISH_MUSIC="1")        # user 16.10.: Chicago music on in the player's build
+AUTO_RECIPE = dict(RECIPE, CHI_POLISH_MUSIC="1",         # user 16.10.: Chicago music on in the player's build
+                   CHI_POLISH_D2BANKS="1")               # C143 (30.10. ship): Driver 2's model -> bank map (package time)
 AUTO_PACKAGE = dict(PACKAGE_RECIPE)
 STAMP = "setup_stamp.txt"
 

@@ -10,14 +10,11 @@ None right now.
 
 ## Checks waiting for you
 
-### Probe "d2 cities 7" (since 30.10. evening; replaces "d2 cities 6")
-1. Newtown: no police in traffic, nothing floating, no falling through (also after backing out of another city's Day/Night screen) (C140/C141).
-2. Unloaded areas: no black void, no colour noise; the last picture stays like in Driver 1 (C142).
-3. Horns: each Driver 2 car model honks with its own Driver 2 horn; police honk too (C143).
-4. Tyres touch the road on every Driver 2 car (Havana mini, Las Vegas start car, buses, fire truck); no bouncing at spawn (C144).
-5. Chicago bus (and other big vehicles) lights sit on the body at night (C145).
-6. Everything from d2 cities 6 still fine: freezes, sky, sounds/sirens, pause map, night looks (Chicago/Havana/Rio approved), Mods "Rewind", shadow of your car.
-Known, coming next (C147): Las Vegas night player car too dark, neon colour cycling, Vegas night traffic mix.
+### Not yet confirmed from earlier probes (optional, whenever you play)
+- Sky: each Driver 2 city shows its own sky, day and night (C126); no noise at the start of loading (C127).
+- Sounds: Driver 2 sirens; Havana chase music; Driver 2 engine sounds after moving the menu cursor over another city (C120/C121/C137).
+- Pause-menu map in every Driver 2 city (C122); Mods > Quality of Life > "Rewind" and the "Full Pro experience" section (C130/C131).
+- City menu page 2 pictures for Las Vegas and Rio.
 
 ### Questions about your last session
 - 30.10. 16:33 and 16:40 (probe "d2 cities 6"): the game froze twice. What were you doing right before (city, menu, ride)? Infrastructure is analysing the dumps (C140).
@@ -27,6 +24,9 @@ Known, coming next (C147): Las Vegas night player car too dark, neon colour cycl
 - Havana map fixes: you said you'd send details later (27.10.).
 
 ## Answered (latest first)
+- 30.10. probe "d2 cities 7": all listed checks good (Newtown no police / no falling, no black void, horns per car,
+  tyres on the road, bus lights) -> approved, shipped to your dev client (C140-C145). Later the same evening: Havana
+  mini tyres too big again after driving, restart drops the car from the air, night lights not scaled to the car (C148).
 - 30.10. probe "d2 cities 6" review: Newtown spawns police with missing models -> no police in Newtown (C141); black
   void in loading zones instead of D1's "last frame" (C142); horns per car model as in D2 (C143); wheel sizes of every
   D2 car as in D2, Havana mini + Vegas player car first (C144); Chicago bus lights misplaced (C145); Las Vegas night
