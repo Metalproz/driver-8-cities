@@ -19,3 +19,10 @@ def run(s):
     noise = float(np.abs(np.diff(reg, axis=1)).mean())
     s.record("isbg", detail="%08X %08X" % (s.word(0x800BDFB4 + 0x18), s.word(0x800BE034 + 0x18)))
     s.check("Fremont start: no VRAM noise beside the minimap", noise < 12, "neighbour diff %.1f" % noise)
+    # C142: the clear is one-shot at the level start (fog colour), then isbg 0 (Driver 1 / 2: the last frame stays)
+    w0, w1 = s.word(0x800BDFB4 + 0x18), s.word(0x800BE034 + 0x18)
+    if os.environ.get("CHI_C142") != "0":
+        s.check("C142: no per-frame clear after the start (isbg 0)", (w0 & 0xFF) == 0 and (w1 & 0xFF) == 0, "%08X %08X" % (w0, w1))
+    x, y, z, h, _ = s.car(0)
+    s.drive(6.0, int(h))
+    s.screenshot("after_drive")

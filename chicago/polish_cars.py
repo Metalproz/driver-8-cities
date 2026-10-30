@@ -44,6 +44,16 @@ AI_SLOTS = (0, 1, 2, 3, 4) if SIX else (0, 1, 2)
 SPECIALS_ON = os.environ.get("CHI_SPECIALS", "1") != "0"
 if SIX:
     D1_FROM_D2.update({3: 3, 4: 10 if SPECIALS_ON else 4})
+# C146 / Strategy 30.10. (exact D2 replica): CHI_POLISH_D2TRAFFIC=1 -> the AI civilians (slots 1-3) = Driver 2's Take a
+# Drive set of this time of day (cityprofile.C146_TRAFFIC; Las Vegas day {1, 3, 4}, night {1, 2, 4}); time = CHI_D2_LEV.
+# CHI_POLISH_D2TRAFFIC=day: the day set for both times (the package carries ONE civ damage table / bank map per city
+# until per-time civ assets exist: build_package refuses day / night levels with different civ tables).
+if os.environ.get("CHI_POLISH_D2TRAFFIC") in ("1", "day"):
+    _cp = __import__("cityprofile")
+    _tod = "night" if (os.environ.get("CHI_D2_LEV", "").lower() == "night" and os.environ.get("CHI_POLISH_D2TRAFFIC") == "1") else "day"
+    _tr = _cp.C146_TRAFFIC.get(_cp.P.name, {}).get(_tod)
+    if _tr and SIX:
+        D1_FROM_D2.update(_tr)
 BASE = 4 + 13 * 12
 # C57 (EXP 16.10.): Driver 2 models are in Driver 2 units; worldscale.SCALE (1.32) applies to them too
 # (vertices + bounding sphere of the clean, damage and low models). CHI_POLISH_CARS_SCALE=1 = unscaled.

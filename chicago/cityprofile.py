@@ -265,6 +265,26 @@ for _k, _p in list(PROFILES.items()):
         PROFILES[_k] = _dc.replace(_p, start_d2=(_f[0], _f[1]), start_rot=_f[2] if len(_f) > 2 else _p.start_rot)
         if _k == "VEGAS":
             PROFILES["LASVEGAS"] = PROFILES[_k]
+# C143 (Analyst 30.10., NOTES "C143 horn mapping"): Driver 2's Take a Drive banks: the cop (slot 3) shares the slot-2
+# civilian's bank (gamesnd.c MapCarIndexToBank: model < 3 ? model : model - 1), the special slot 4 and special / secret
+# player choices take SpecialVehicleKludge by ResidentModelsBodge (3 = special 1, 4 = special 2, 5 = secret car).
+# CHI_POLISH_D2BANKS=1 (test switch until Infrastructure adopts it): these entries replace the profile's car_banks.
+C143_BANKS = {
+    "CHICAGO": {0: 13, 8: 2, 9: 18, 10: 2, 11: 18, 12: 10},     # cop = model 3's 13; kludge {2, 18, 10}
+    "HAVANA": {0: 7, 8: 17, 9: 17, 10: 2, 11: 2, 12: 4},       # cop = model 3's 7; kludge {2, 17, 4}
+    "VEGAS": {0: 6, 8: 11, 9: 9, 10: 9, 11: 9, 12: 13},        # cop = model 4's 6 (D2 slot 2 = 4); kludge {9, 11, 13}
+    "RIO": {0: 13, 8: 17, 9: 17, 10: 17, 11: 11, 12: 15},      # cop = model 3's 13; kludge {17, 11, 15}
+}
+# C143 side find (Analyst) / Strategy 30.10. (exact D2 replica): Driver 2's Take a Drive civilians per time of day
+# (MISSIONS.BLK 50-57 residentModels[0..2]); our AI slots 1-3 = D2 models 1-3 everywhere, Las Vegas differs:
+# day {1, 3, 4}, night {1, 2, 4}. CHI_POLISH_D2TRAFFIC=1: AI slots 1-3 follow (polish_cars, by CHI_D2_LEV).
+C146_TRAFFIC = {"VEGAS": {"day": {1: 1, 2: 3, 3: 4}, "night": {1: 1, 2: 2, 3: 4}}}
+if os.environ.get("CHI_POLISH_D2BANKS") == "1":
+    import dataclasses as _dc
+    for _k, _p in list(PROFILES.items()):
+        if _p.name in C143_BANKS:
+            PROFILES[_k] = _dc.replace(_p, car_banks={**_p.car_banks, **C143_BANKS[_p.name]})
+    PROFILES["LASVEGAS"] = PROFILES["VEGAS"]
 CITY = os.environ.get("CHI_CITY", "CHICAGO").upper()
 if CITY not in PROFILES:
     raise SystemExit("CHI_CITY=%s: unknown city (known: %s)" % (CITY, ", ".join(PROFILES)))

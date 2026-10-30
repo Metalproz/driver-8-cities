@@ -1343,7 +1343,7 @@ def _near_sub_code(img, base):
             pc += 4
     k0 = (labels["PLAIN"] - c) // 4
     words[k0:k0 + 25] = plain
-    assert c + 4 * len(words) <= NEAR_SUB_CAVE_END, "cave overflow: %d words" % len(words)
+    assert c + 4 * len(words) <= 0x80011AC8, "cave overflow: %d words (C144 cave from 0x80011AC8)" % len(words)
     return words, labels
 
 
@@ -2003,7 +2003,7 @@ def c67_patches(exe_path):
     # reference); 0x80011AD8 on are sprintf's digit tables
     if NEAR_SUB_CAVE + 4 * len(words) > 0x80011A98 and img[0x80011A98 - base: 0x80011A98 - base + 11] != b"GPU timeout":
         raise RuntimeError("C67: unexpected bytes at 80011A98")
-    assert NEAR_SUB_CAVE + 4 * len(words) <= 0x80011AD8, len(words)
+    assert NEAR_SUB_CAVE + 4 * len(words) <= 0x80011AC8, len(words)   # C144's cave from 0x80011AC8
     lq = NEAR_SUB_CAVE & 0x1FFFFFFF                   # the table holds KUSEG addresses
     out = [(0x8002D564, 0x3C020003, asm(0x8002D564, ["lui v0, 0x%x" % (lq >> 16)])[0], "C67: light quad handler entry -> LQ"),
            (0x8002D568, 0x24420718, asm(0x8002D568, ["addiu v0, v0, 0x%x" % (lq & 0xFFFF)])[0], "C67: (low half)")]
@@ -3002,6 +3002,70 @@ def c133_patches(exe_path):
     return out
 
 
+# --- C143 AI horn by car model (Infrastructure 30.10., Analyst NOTES "C143 horn mapping") ----------------------------------
+# Driver 1's AI horn (0x800180D8: FUN_8004D740(-1, 0, 6 + (record id & 3, 3 -> 2))) picks bank 0 entry 6 / 7 / 8 by the
+# car's SLOT id. The 9 words 0x80018084..A4 now read entry - 6 from a 256-byte table HORN (zero block 0x80093648..0x80093747,
+# gp -0x3128) at model * 32 + id (record s1: id +0 (< 32), model +0x10), entry = 6 + that byte. The plugin writes the table
+# every vblank: Driver 1 cities = the old id rule (0 / 1 / 2 / 2 by id & 3: unchanged), D2 cities = the model's horn slot
+# - 6 (Driver 2's rule). Zero-safe: an all-zero table (boot, an older plugin) plays entry 6 (Driver 1's / since C137 a D2
+# civilian horn), never entry 0 (the crash sample). Same registers out (a0 = -1, a1 = 0, a2 = entry); load delays kept.
+# The zero block is intr.c's 4 KB handler stack (top 0x80094328): the table sits ~3 KB below its top. PS1: pure exe + the
+# 256-byte table. CHI_C143=0 = off.
+C143_TAB, C143_TAB_GP = 0x80093648, -0x3128
+
+
+def c143_patches(exe_path):
+    if os.environ.get("CHI_C143") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    for a in range(C143_TAB, C143_TAB + 256, 4):
+        if word(a) != 0:
+            raise RuntimeError("C143: table word %08X not free" % a)
+    orig = [0x92220000, 0x00000000, 0x30460003, 0x24020003, None, 0x2404FFFF, 0x24060002, 0x00002821, 0x24C60006]
+    for k, w in enumerate(orig):
+        if w is not None and word(0x80018084 + 4 * k) != w:
+            raise RuntimeError("C143: site %08X = %08X" % (0x80018084 + 4 * k, word(0x80018084 + 4 * k)))
+    src = ["lbu v0, 0x10(s1)", "lbu a2, 0(s1)", "sll v0, v0, 5", "addu a2, a2, v0", "addu a2, a2, gp",
+           "lbu a2, %d(a2)" % C143_TAB_GP, "addiu a0, zero, -1", "move a1, zero", "addiu a2, a2, 6"]
+    cw = asm(0x80018084, src)
+    assert len(cw) == 9, len(cw)
+    return [(0x80018084 + 4 * k, word(0x80018084 + 4 * k), w, "C143: AI horn entry by model %d" % k)
+            for k, w in enumerate(cw) if w != word(0x80018084 + 4 * k)]
+
+
+# --- C144 wheel height per car (Infrastructure 30.10., Analyst NOTES "C144 wheel checkup") -------------------------------
+# DrawCarWheels places each wheel centre at y = -disp.vy - (susp + 50) (0x8003B600..14): with Driver 1's rest suspension the
+# centre sits ~73 above the road whatever the tyre radius R, so small D2 tyres float (73 - R) and big ones sink. Draw-only
+# fix: y += WDY (zero block 0x80093748 = gp-0x3028; the plugin's DrawCarWheels entry hook writes 73 - R per car in D2
+# cities, 0 elsewhere = Driver 1). Site 0x8003B60C 'addiu v0, v0, 0x32' -> 'j WCAVE' with that addiu in the delay slot;
+# WCAVE (4 words at 0x80011AC8: the GPU-timeout text's tail + the unreferenced 'LoadImage2', behind the C45 cave; seeded):
+# lw t9, WDY(gp) / subu v1, v1, v0 / j 0x8003B614 / addu v1, v1, t9. Physics (ride height) untouched. Zero-safe (0 =
+# Driver 1). PS1: pure exe + 1 data word. CHI_C144=0 = off.
+C144_WDY, C144_WDY_GP = 0x80093748, -0x3028
+C144_CAVE = 0x80011AC8
+
+
+def c144_patches(exe_path):
+    if os.environ.get("CHI_C144") == "0":
+        return []
+    img, base = load_exe(exe_path)
+    word = lambda a: struct.unpack_from("<I", img, a - base)[0]
+    if word(C144_WDY) != 0:
+        raise RuntimeError("C144: WDY word not free")
+    if img[C144_CAVE - base + 4: C144_CAVE - base + 14] != b"LoadImage2":   # GPU-timeout text tail (4 bytes) + 'LoadImage2'
+        raise RuntimeError("C144: cave bytes at %08X are not the GPU-timeout tail + 'LoadImage2'" % C144_CAVE)
+    if word(0x8003B60C) != 0x24420032 or word(0x8003B610) != 0x00621823:
+        raise RuntimeError("C144: wheel y site %08X %08X" % (word(0x8003B60C), word(0x8003B610)))
+    cw = asm(C144_CAVE, ["lw t9, %d(gp)" % C144_WDY_GP, "subu v1, v1, v0", "j 0x8003b614", "addu v1, v1, t9"])
+    assert len(cw) == 4
+    out = [(C144_CAVE + 4 * i, word(C144_CAVE + 4 * i), w, "C144: wheel height cave %d" % i) for i, w in enumerate(cw)]
+    site = asm(0x8003B60C, ["j %#x" % C144_CAVE, "addiu v0, v0, 0x32"])
+    out += [(0x8003B60C, word(0x8003B60C), site[0], "C144: wheel y -> WCAVE"),
+            (0x8003B610, word(0x8003B610), site[1], "C144: (delay) susp + 50")]
+    return out
+
+
 # --- C132 (c) glow kind 4 = SLIGHT02 in CITY 3 (Infrastructure 28.10., user: the D2 night look) --------------------------
 # CITY 3's glow table 0x8008AD7C already holds an unused 5th entry {4, 0, "SLIGHT02", 0} (count word 0x8008AE68 = 4); the
 # plugin sets the count to 5 for a D2 city whose level keeps SLIGHT02 resident (Las Vegas), 4 elsewhere (an unresolved entry
@@ -3072,7 +3136,7 @@ def all_patches(exe_path):
             + c42m_patches(exe_path) + c42l_patches(exe_path) + c42p_patches(exe_path) + c35t_patches(exe_path)
             + sky_dome_patches(exe_path) + s1_clut_patches(exe_path) + s1_slot15_patches(exe_path)
             + s1_cave_patches(exe_path) + s4_patches(exe_path) + c82_patches(exe_path) + c87_patches(exe_path) + c88_patches(exe_path)
-            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path) + c132_patches(exe_path))
+            + c94_all(exe_path) + c113_patches(exe_path) + c114_patches(exe_path) + c109_patches(exe_path) + c122_patches(exe_path) + c133_patches(exe_path) + c132_patches(exe_path) + c143_patches(exe_path) + c144_patches(exe_path))
 
 
 def apply(exe_in, exe_out):

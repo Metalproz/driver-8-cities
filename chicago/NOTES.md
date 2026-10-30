@@ -635,6 +635,7 @@ New engine features need a PS1-native path (guest MIPS in the exe, data within 2
 | C88 Nightmare / C92 Uncap (25.10.): the 24-slot cop array (47 KB) in mod memory, chaser assignment at spawn (plugin hook FUN_8001B720), cheats menu pages, Uncap CPU overclock + frame-wait skip (runtime) | driver_chicago.c, driver_gameplay.c, psxrecomp runtime | slots in RAM under the stack (Miami 77 / SF 80 / LA 72 KB free fit 24); **New York: only ~8 slots fit (14 KB free)**, so the real-PS1 build caps NY Nightmare at ~8 chasers (no cap on PC); chaser assignment as guest code in the spawn; Uncap has no PS1 equivalent (off = PS1 reference) |
 | C94 Extra draw distance (25.10.): 27 x 27 PVS buffer + 4096-entry object list in mod memory, 2 x 0x50000 primitive buffers in the GPU-DMA aperture 0x00F00000, ~2x guest CPU per frame (needs Uncap) | driver_gameplay.c extra-draw, exe c94 words | none at 1.5x (RAM + CPU); the toggle off is the PS1 reference |
 | C96 / C101 (25.10.): Nightmare / Hell levels on the 2 x 0x50000 aperture primitive buffers; the _xd level pair + XTMP buffer for Extra draw distance | driver_gameplay.c dp_big_prim_buffers, driver_chicago.c | Nightmare: Driver 1 buffers + its own car budget (near cars low-poly beyond ~11 full models); xd: none (feature host-only) |
+| C129 D2 traffic (30.10., Strategy decision): the Driver 2 civ-AI core (REDRIVER2 civ_ai.c road following, chicago/c129) runs host-side in the plugin, hooked at Driver 1's per-car AI (FUN_80013D88), D2 cities only; needs ~50 KB guest RAM as an overlay (12 KB code, 21-29 KB road blob, ~7 KB state) | driver_chicago.c (hook) + chicago/c129 | the identical core built for mipsel (verified against the host path in every C129 test) as a recompiled overlay at a fixed main-RAM window once the RAM diet frees ~50 KB in D2 cities; diet candidate: Driver 1's replay recording buffer (0x801E0000.., up to ~80 KB in play) shrunk in D2 cities |
 
 - **C42 r3 (b) six resident car models** (exe c42m is guest code + fixed RAM): host-only are the car polygon buffer for car
   set 4 (mod memory, 1400 entries = 34 KB; 6 Driver 2 models use ~900 entries = 22 KB, Driver 1's buffer 0x800AB728 holds
@@ -3705,8 +3706,11 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
 - GCC MIPS toolchain, user-local, no PATH / registry change: `D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/` = PSn00bSDK v0.24
   release asset `gcc-mipsel-none-elf-12.3.0-windows.zip` (GCC 12.3.0, mipsel-none-elf; github.com/Lameguy64/PSn00bSDK),
   SHA-256 51df48145d5ef4b396d3932b72ccba538cc605c7c7745b32c58c277aa00523c5 (zip kept in tools/dl).
-- Status: extracted; running it was refused by the Claude Code permission system (downloaded binaries). Needs the user
-  to allow it (a Bash permission rule for `D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/bin/*`) before C129 can build.
+- Status 30.10.: the user added `Bash(D:/recomps/tools/gcc-mipsel-none-elf-12.3.0/bin/*)` (settings.local.json); call it
+  by that full D:/ path from Bash only. **Smoke test OK:** `mipsel-none-elf-gcc (GCC) 12.3.0`; a small C file (struct array
+  loop, lw / lh, mult, extern call) with `-O2 -march=r3000 -mtune=r3000 -mabi=32 -msoft-float -mno-abicalls -fno-pic -G0
+  -mno-gpopt -c` -> elf32-littlemips; objdump: no load-use in the delay slot (the next use is >= 2 instructions later),
+  mflo / mult spacing fine, R_MIPS_26 relocation for the call (tail call 'j ext_fn'). Flags = the C129 overlay baseline.
 - **C138 Havana mini car (Polish 30.10.):** the mini is D2 model 12 (Havana choice 0, D2's secret car): body 280 x 554 D1
   (model x1.32), colBox (94, 66, 210) -> 124 / 277 half, cPoints (-93..92, -186..226) -> 240 x 544 shadow quad, wheel 33.
   - Shadow: Driver 1 draws it through the physics corners car + 0x88 .. 0xB8, measured 370 x 1040 for EVERY car (Miami's
@@ -3803,3 +3807,242 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
   page menu (menu_again() now navigates from the remembered page, variant-checked); c138_mini reads the shadow quad
   paused in one block along its axes: the shadow stays the D2 size after crashes (the 'fixed offset to the physics
   corners' seen before was separate reads of a moving car).
+
+## C140 probe "d2 cities 6" freeze dumps (Infrastructure 30.10., offline; copies in devtest/_out/c140)
+- **Both dumps are wedge kind "slow_frames"** (no FAIL-FAST, no C135 signature: no vector wipe, no far-car dispatch).
+- **Session 1 (16:28-16:33):** menu path Rio row -> Day -> back -> page 1 -> cursor over Interview ("Take a Ride ->
+  mission 0xAE", C135 browsing artefact) -> Newtown. The mission-parse hook (0x80068928, mission_parse_entry) did NOT run
+  for that load: MISSION_SAFE 0x800A0D00 empty, no "C50 ... parsed" / "C79" lines, cops on (0x800976F8 = 1, cap 2),
+  "start vector 0 (level 7): y 0" (the vblank fallback found LA's start in the vectors = LA's unmodified script). Result:
+  Newtown ran LA's raw Take a Ride script: police (Newtown has no police model -> cars drawn as bare wheels: the user's
+  snapshot 16:30 = C141), AI cars at y -1800..-2700 (in the air), the player's car later stuck falling (17 x F5 at
+  (-26545, 12578)), then the slow-frames dump; the window was closed (run report: sdl_window_close 16:33:19, dump
+  truncated). Same path in the runner (LA Day/Night instead of Rio) ran the hook (menu_route), so the Rio Day/Night
+  back-out is the difference; reproduce when the user's game is closed.
+- **Session 2 (16:33-):** Rio night ride, then Chicago night: dump 16:40:55 at the Chicago night LOADING screen (snapshot
+  16:40:58, FPS 14 "LOADING"); the game went on (Havana mini, Vegas day / night snapshots). Dirty-block ring: ~12,500
+  interpreted blocks per frame (pages 0x80030000 group renderer, 0x8002C000 incl. the C132 facing words, 0x8001F000,
+  0x8003E000): a load-time hitch on the laptop; to compare with 848956e9 / d4ea9929 once the game is closed.
+- Snapshots: 16:30 Newtown bare wheels + air cars (C141); 16:40 Chicago night loading; 16:42 Havana mini (wall-top texture
+  noise behind the car); 16:45 / 16:48 Vegas day / night (no visible fault).
+
+- **Fix (build-wip 30.10.):** (1) mission_parse_entry gates the C50 / C79 script work on the mission being parsed (s0 =
+  0x7C) instead of the mission word, which the menu routing rewrites (0x7C <-> 0xAE) while the cursor moves; log lines
+  "C140 mission parse skipped" / "C140 mission word ... parsed anyway" for the next field report. (2) C141 guard
+  (c141_newtown_vblank): while the selector's Newtown runs (CITY 7, mission 0x7C) the cop cap 0x80097760 is forced to 0
+  every vblank (Nightmare unaffected: it relies on that cap). Repro: runner `c140_route` (PRE=chicago ride + quit, Rio
+  Day/Night back-out, over Interview, Newtown; checks hook, cap, no model-1 car, guard) passes on 106cfe7c too: the
+  user's exact timing did not reproduce; the s0 gate + guard cover the observed state. extra_load newtown / desert,
+  menu_route desert / newtown PASS on build-wip.
+
+## C143 horn mapping (Analyst 30.10., offline; REDRIVER2 gamesnd.c / civ_ai.c / main.c + D2 MISSIONS.BLK + VOICES2)
+- **Driver 2's rule:** a car's horn is sample 2 of its car bank (`GetCarBankSample(slot) * 3 + 2`): traffic honks via
+  civ_ai.c (at the player / chased car, max 2 at once, `hornchanflag[2]`), the player via DealWithHorn (main.c, channel 2),
+  lead cars via LeadHorn. Bank of a slot (retail, MAX_CAR_RESIDENT_MODELS 5): slots 0 / 1 / 2 own the banks
+  MapCarIndexToBank(slot) = car_banks[level][residentModels[slot] - 1]; **slot 3 (the cop in Take a Drive) shares slot 2's
+  bank** (`model < 3 ? model : model - 1`); the special slot 4 takes ResidentModelsBodge(): 3 = special-1 bank, 4 =
+  special-2 bank, 5 = secret-car bank (SpecialVehicleKludge: Chicago {2, 18, 10}, Havana {2, 17, 4}, Las Vegas
+  {9, 11, 13}, Rio {17, 11, 15}). Bodge per city: Chicago model 9 / 11 -> 4, Havana 8 / 9 -> 4, Las Vegas 8 -> 4, Rio
+  11 -> 4, model 12 (Take a Drive) -> 5, else 3.
+- **Take a Drive residentModels (MISSIONS.BLK 50-57, header +96):** Chicago {1, 2, 3, 0, 10 / 11 night}, Havana
+  {1, 2, 3, 0, 11}, Las Vegas day {1, 3, 4, 0, 9}, night {1, 2, 4, 0, 9}, Rio {1, 2, 3, 0, 8}; playerCarModel 1 everywhere.
+- **D2 model -> horn bank (truth) vs ours (car_sfx.bin map, probe d2_cities_6):**
+
+  | city | cop | civ 1 / 2 / 3 | specials (D2 bodge) | ours where it differs |
+  |---|---|---|---|---|
+  | Chicago | 13 (slot 2 = model 3) | 12 / 4 / 13 | 8 -> 2, 9 -> 18, 10 -> 2, 11 -> 18, 12 -> 10 | cop 4; special / choice 8 -> 16, 9 -> 9 |
+  | Havana | 7 | 10 / 11 / 7 | 8 -> 17, 9 -> 17, 10 -> 2, 11 -> 2, 12 -> 4 | cop 11; special 11 -> 5 |
+  | Las Vegas | 6 (slot 2 = model 4, not in our set: use our 3rd civilian's 4) | 1 -> 14, 2 -> 3, 3 -> 4, 4 -> 6 | 8 -> 11, 9 / 10 / 11 -> 9, 12 -> 13 | cop 3; special 10 -> 2, 11 -> 17, 12 -> 10; choice 2 (10) -> 2 |
+  | Rio | 13 | 8 / 7 / 13 | 8 / 9 / 10 -> 17, 11 -> 11, 12 -> 15 | cop 7; special / choice 8 -> 2 |
+
+  Civilian banks and the choices built from civilians / model 12 are right. The profile `car_banks` uses
+  MapCarIndexToBank for every model, where Driver 2's Take a Drive uses the slot-2 bank for the cop and
+  SpecialVehicleKludge for slot 4. Engines / idles come from the same bank, so they change together.
+  Side find: Las Vegas traffic is D2 models 1 / 2 / 3 + cop; Driver 2's Take a Drive runs 1 / 3 / 4 (day), 1 / 2 / 4 (night).
+- **Why horns are not tied to models today:** Driver 1's own AI horn (0x800180D8, FUN_8004D740(-1, 0, 6 + (record id & 3,
+  3 -> 2))) picks table entry 6 / 7 / 8 by the car's SLOT ID; since C137 those entries hold the three civilian horns
+  (slots 25 / 24 / 26), so a car honks with a random civilian horn. The plugin's own honk (step 6) uses the model's bank
+  (sx_horn_slot_of_bank), skips the cop (Driver 2's patrol cops do honk, with the slot-2 horn) and plays the special's horn
+  (28); the player's R1 horn is the choice's bank (27). Driver 1's path never plays the special's horn; the cop has no slot.
+- **Fix route:** (1) data: cityprofile / build_package bank map = Driver 2's slot rules (cop = bank of residentModels[2];
+  specials and special / secret player choices = kludge by bodge; Las Vegas cop = its 3rd civilian's bank until the car set
+  follows D2); (2) exe (PS1-native, the 8 words at 0x80018084..0x800180A4): the AI horn takes `lbu model, 0x10(record)` and
+  an 8-byte model -> table-entry table (written per city: model 1 -> the cop's horn = the slot-2 civilian's, 2-4 -> their
+  bank's horn slot, 5 -> 28) instead of `id & 3`; entry 8 keeps an address for the R1 detection; (3) plugin: patrol cops
+  (model 1, not pursuing) may honk with that horn (D2 civ_ai).
+- **SPU room:** horns are 8 kHz, 1,456-6,336 B. The cop shares a civilian bank (no new sample); corrected special / choice
+  banks replace others in the same reserved player / special space (engine + idle <= 18,992 B tails, horn <= reserved
+  hmax). Las Vegas: bank 13's horn (6,336) > today's hmax 6,000 -> +672 B reserved (free 5,680 -> 5,008). Chicago bank 18
+  (horn 5,520, engine + idle ~17.7 KB at 11 kHz) fits. No other room needed.
+
+## C144 wheel checkup (Analyst 30.10., offline; REDRIVER2 cars.c DrawCarWheels / wheelforces.c, D2 LCF, assets of probe d2_cities_6)
+- **Driver 2:** generic wheel models (clean / fast / damaged); per car: tread vertices 16-23 = +-wheelSize, rim 8-15 rotate
+  at wheelSize x 1.4142, hub 0-7 untouched; centre (car frame) x = +-17 - disp.vx, z = -disp.vz, y = -wheelSize - disp.vy
+  - susCompression + 14 (compression from the ground contact, 0..42). Every tyre stands on the road.
+- **Ours:** car_wheels.bin (choices 0-3, AI 1-5) and the specials' sizes = LCF wheelSize x 1.32: **all sizes match Driver 2**
+  (Chicago 65 / 91 / 98 / 119, civilians 65-70; Havana mini = model 12, choice 0: 44; Las Vegas choice 0 = model 1: 57; Rio
+  civilians 54-61, model 8: 102). x / z = D2 x 1.32 (+-17 f - f vx, FixCarCos dz): match. The plugin's DrawCarWheels hook
+  sets tread / hub +-size and the rim word per car (car set 4 in all four sidecars; sizes reloaded per city).
+- **Mismatch = height.** Driver 1 draws the wheel centre at -(susp + 50) - disp.vy and sets the ride height to
+  -disp.vy - 1, so at rest (D1 susp ~24) the wheel CENTRE sits ~73 above the road (Driver 1's own radius) whatever the size:
+  a tyre of radius R floats 73 - R above the road (R < 73) or sinks R - 73 into it. The body rides at the D1 clearance 34
+  (+ the d2wheel extras for models 8-12).
+
+  | city | car (role) | R | tyre vs road (ours; D2 = 0) | wheel-to-body vs D2 (minus the civilians' mean) |
+  |---|---|---|---|---|
+  | Chicago | 0 cop / 1 / 2 / 3 civ | 65 / 69 / 65 / 70 | +8 / +4 / +8 / +3 | +8 / +1 / -6 / -2 |
+  | Chicago | 8 (choice 3, special) / 9 (choice 1) / 10 bus (choice 2, AI 5) / 12 (choice 0) | 119 / 91 / 98 / 65 | -46 / -18 / -25 / +8 | +1 each |
+  | Havana | civ 0-3 | 65 | +8 | 0 / +8 / -15 / +9 |
+  | Havana | **12 mini (choice 0)** / 8 / 9 / 10 / 11 | **44** / 91 / 91 / 88 / 65 | **+29** / -18 / -18 / -15 / +8 | 0 / +1 / 0 / 0 / 0 |
+  | Las Vegas | **1 (choice 0, civ)** / 0 cop / 2 / 3 | **57** / 65 / 67 / 65 | **+16** / +8 / +6 / +8 | -4 / -4 / -1 / +9 |
+  | Las Vegas | 8 / 9 / 10 / 11 / 12 | 74 / 70 / 88 / 88 / 57 | -1 / +3 / -15 / -15 / +16 | 0 each |
+  | Rio | civ 0 cop / 1 / 2 / 3 | 54 / 57 / 58 / 61 | +19 / +16 / +15 / +12 | +21 / -4 / -14 / -4 |
+  | Rio | 8 / 9 / 10 / 11 | 102 / 67 / 86 / 65 | -29 / +6 / -13 / +8 | 0 / 0 / -1 / -1 |
+
+  "wheel-to-body" = (73 - 34 - extra) minus Driver 2's (wheelSize - clearance) x 1.32, each minus the city's civilian mean
+  (Driver 2's rest compression is not known statically). Models 8-12 already follow D2 through the d2wheel rule; the
+  civilians use the fixed 34 (spread -15..+21). The Havana mini's tyres float 29 above the road and fill the arch high
+  (reads as "too large"); Las Vegas choice 0 floats 16; Rio's small-wheeled traffic floats 12-19; big specials sink 15-46.
+  Scratch: c144_lcf.py (LCF table), c144_geom.py (this table).
+- **Fix route:** (1) engine, small (PS1-native like WHEEL_RIM): a per-car draw-only wheel y offset dy = 73 - R at
+  DrawCarWheels' four wheel-position sites (the per-car hook already runs; guest version = a byte table by model), so every
+  tyre touches the road; (2) data (polish_cosmetics): ride row disp.vy += (73 - R) so the body moves with its wheels, and
+  Driver 2's wheel-to-body relation per model for ALL cars (today only 8-12). Risk: ride height drives physics (spawn
+  height, collision box); big wheels raise the fire engine / bus by 25-46 (the R35 "spawned high and bounced" case) -> one
+  drive test per city. Needs one constant: Driver 2's rest compression (a D2 reference capture or a static solve of
+  wheelforces.c).
+
+## C142 no black void: one-shot fog-colour clear (Infrastructure 30.10., build-wip)
+- Driver 2 never clears the frame either (REDRIVER2 system.c: SetDefDrawEnv -> isbg 0; D2's maps just have no holes).
+  C134's per-frame black clear made unloaded areas a black void. Now clear_bg_vblank clears both DRAWENVs only for 6
+  vblanks after a D2 level starts running (in-level heartbeat rising edge), to the level's fog colour 0x80097138
+  (0x00BBGGRR); afterwards isbg 0 (Driver 1 / 2: never-drawn spots keep the fog colour, later the last frame stays).
+  This still removes C134's old-VRAM noise (Fremont start: neighbour diff 0.0, foreground hole = fog colour instead of
+  black / noise). CHI_C142=0: C134's per-frame black clear; CHI_C134=0: no clear at all. Runner c134_clear (+ isbg 0
+  after the start, drive shot) PASS. Holes show trails after driving (D1's look, user's choice).
+
+## C143-C146 data bundle (Polish 30.10.): chi8 / hav10 / vegas7 / rio6
+- **Levels** (day / night / xd each) = the chi7 / hav9 / vegas6 / rio5 recipe + CHI_POLISH_LIGHTCOG=1 (C145) +
+  CHI_POLISH_WHEELROAD=1 (C144) + CHI_POLISH_D2TRAFFIC=day (Vegas set) + CHI_POLISH_CYCLE=1 (Vegas nights; .cyc.bin
+  written standalone for the rest) (+ CHI_POLISH_D2BANKS=1 and CHI_POLISH_D2TRAFFIC at package time).
+  Drives (current build-test exe, package from these levels, devtest/polish): all 4 cities day + night alive after a 10 s crash drive, no
+  spawn bounce (player y span 0), SPU free after the horn reserve: Chicago 1312, Havana 5936, Las Vegas 8224, Rio 3584 B.
+  Byte check vs sources: Chicago / Havana differ only in lump 28 (car models) + .cos.bin + .spc.bin; Las Vegas also in the
+  car texture pages / names (the new traffic model) + .dmg / .lvl / .whl. New sidecar .cyc.bin (C146) on chi8 / vegas7.
+- **C145 lights (polish_cosmetics.light_shift):** Driver 2 draws the body at where + R (cog + v) and every light at
+  where + R (light + cog) (cosmetic.c); our bodies carried the cog (x, z) + ride raise, the light rows did not -> lights
+  off by -cog x 1.32: Chicago bus (model 10, cog.vz 117) headlights 82 in front of the body, tail lights 157 inside;
+  fire engine (8, cog.vz 5) fine. Same error: Rio 8 / 10 (cog 58 / 77), Vegas 9 / 10 (57 / 37), Havana 10 (52), all
+  cars by their cog (5-30). Fix: the 8 light / exhaust / smoke points get the body's shift (cog x / z x 1.32 + ride dy).
+  The extraInfo 0x5000 brake double-cog quirk (AddBrakeLight) only on Chicago model 8 (cog 5): ignored.
+- **C144 ride rows (polish_cosmetics.wheel_road):** R = round(LCF wheelSize x 1.32) (= .whl.bin); ride row
+  disp.vy += 73 - R (Driver 1's wheel centre stays 73 above the road, origin + body go down by 73 - R); Driver 2's
+  wheel-to-body relation (d2wheel body extras, anchored on the civilians' mean) for every model 0-12 (was 8-12).
+  **Infrastructure's draw-only wheel offset must be dy = 73 - R with the same R**; data without it sinks small-wheeled
+  bodies onto their wheels (Havana mini 29). Per model R / ride shift / body extra (D1 units):
+  Chicago 0 65/+8/+7, 1 69/+4/+1, 2 65/+8/-6, 3 70/+3/-2, 8 119/-46/+15, 9 91/-18/+11, 10 98/-25/+28, 12 65/+8/-13;
+  Havana 0-3 65/+8 (-1/+7/-15/+9), 8 91/-18/+19, 9 91/-18/-32, 10 88/-15/-15, 11 65/+8/-3, 12 44/+29/+10;
+  Las Vegas 0 65/+8/-5, 1 57/+16/-3, 2 67/+6/-1, 3 65/+8/+9, 4 74/-1/+40, 8 74/-1/-5, 9 70/+3/+10, 10 88/-15/-27,
+  11 88/-15/-14, 12 57/+16/-5; Rio 0 54/+19/+21, 1 57/+16/-4, 2 58/+15/-13, 3 61/+12/-4, 8 102/-29/-45, 9 67/+6/-3,
+  10 86/-13/-13, 11 65/+8/-9, 12 94/-21/-18. Big wheels raise the physics ride (bus +25, Chicago 8 +46): drive-tested.
+- **C143 banks (cityprofile.C143_BANKS, CHI_POLISH_D2BANKS=1 at package time):** cop = the slot-2 civilian's bank
+  (Chicago 13, Havana 7, Las Vegas 6, Rio 13); specials / special choices by SpecialVehicleKludge (Chicago 8/10 -> 2, 9/11
+  -> 18, 12 -> 10; Havana 8/9 -> 17, 10/11 -> 2, 12 -> 4; Las Vegas 8 -> 11, 9/10/11 -> 9, 12 -> 13; Rio 8/9/10 -> 17,
+  11 -> 11, 12 -> 15). **Open for Infrastructure:** car_sfx.bin has one slot map per city, built from the day slot map;
+  Las Vegas night's slot 2 is model 2 (bank 3) where the day has model 3 (bank 4) -> needs a night map / per-time car_sfx.
+- **Traffic sets (MISSIONS.BLK 50-57 residentModels):** Chicago {1, 2, 3, 0, 10 / night 11}, Havana {1, 2, 3, 0, 11},
+  Las Vegas day {1, 3, 4, 0, 9} / night {1, 2, 4, 0, 9}, Rio {1, 2, 3, 0, 8}; times all 1 / 3, weather 0. Ours were
+  1 / 2 / 3 everywhere -> Las Vegas follows D2 with CHI_POLISH_D2TRAFFIC=1 (polish_cars, by CHI_D2_LEV; CLUT 381 -> 377).
+  build_package refuses day / night levels with different civ damage tables (one dmg_civ / car_sfx map per city), so the
+  bundle uses CHI_POLISH_D2TRAFFIC=day (D2's day set 1 / 3 / 4 at both times); the exact night set (1 / 2 / 4) needs per-time
+  civ assets (package + plugin: dmg_civ, car_sfx map, civ zone rows) -> Infrastructure, then CHI_POLISH_D2TRAFFIC=1.
+  Not changed: Chicago night's starting special is 11 in D2 (ours 10; 11 is not in our Chicago special list).
+- **C146 Las Vegas night vs Driver 2 (REDRIVER2 reference):** D2's night code has no Vegas case except night_vectors[2]
+  (car light direction) and **ColourCycle** (objanim.c: 12 Vegas neon textures rotate CLUT entries every other frame;
+  Chicago 2; Havana / Rio none). Measured at the same start, same orange car (D2 model 1), night / day: road 0.25 vs ours
+  0.24, trees 0.16 / 0.17, sidewalk 0.25 / 0.28 (match); **player car 0.28 vs ours 0.05** (Chicago's car: 0.30 / 0.30
+  match). The same model 1 in Rio renders lit at night (bundle shots) and our car palettes (pages 5-6) and the car model are
+  identical day / night in both levels -> the Las Vegas night player car takes a near-black paint / palette at RUNTIME
+  (D2: playerCarColour 1 day and night, REDRIVER2 shows it orange-brown): engine-side check (palette / colour pick); neon static
+  (canopy stripe blue where D2 cycles to red); pole traffic-light glows weaker; sky (8, 8, 8) vs D2 (1, 1, 6).
+  Data: polish_cycle.py -> <lev>.cyc.bin ("CYC1": name, our page, texture index, start1 / stop1 / speed1 / start2 /
+  stop2 / speed2 per cycling texture; vegas7 4-7 entries, chi8 xd NAVPIR34) for an engine ColourCycle (PS1-native: guest
+  CLUT row rotate + LoadImage like D2). Missing names (FLAMINGO, ENT1B, F-MTSYN2 ...) are not under their own name in our
+  levels (not placed / merged): follow-up.
+- **Reference tool:** devtest/polish_r2 = private REDRIVER2 copy (config: 640 x 480, no bilinear / PGXP texture mapping,
+  dynamic lights off, image = the D2 disc 2 .bin read-only); DRIVER2/MISSIONS/M50.D2MS / M51.D2MS override Take a Ride
+  Chicago day / night with any mission (GameLevel = header city, start patchable at +20): Las Vegas / Rio are locked in a
+  fresh profile. Driven with posted key messages (needs brief window focus; SDL drops keys otherwise; the first keys
+  after launch replay later) + PrintWindow captures off-screen (scratch r2.py). Only when no user game runs.
+
+## C143 AI horn by model (Infrastructure 30.10., exe window + plugin, build-wip)
+- **Exe (c143_patches, 7 of the 9 words 0x80018084..A4):** entry = 6 + HORN[model * 32 + record id] (lbu model 0x10(s1),
+  lbu id 0(s1), sll 5, addu, addu gp, lbu -0x3128(a2), a0 = -1, a1 = 0, +6). HORN = 256 bytes in the zero block
+  0x80093648..0x80093747 (intr.c's handler stack bottom, ~3 KB below its top 0x80094328). Zero-safe: an all-zero table
+  (boot / an older plugin) plays entry 6, never entry 0. Record ids are 0..21 (24 slots < 32).
+- **Plugin (c143_horn_table, every vblank):** D1 cities / D2 horns not loaded: id rule (id & 3: 0 / 1 / 2 / 2 = entries
+  6 / 7 / 8 / 8, Driver 1 unchanged); D2 city: per model the horn slot of its bank (cop model 1 = the bank map's cop
+  entry; Polish's data fix makes that the slot-2 civilian's bank as in Driver 2), special 28, else 25. The plugin's own
+  honk now lets patrol cops honk (model 1 with car +0x12E != 1; pursuing cops run the siren). CHI_C143=0: exe group off.
+- **Trigger** (FUN_8001A1BC): a car heading against the player (heading difference 0x69C..0x964) within 9000 ahead.
+  Runner `c143_horns` (code words, table, turn round and drive against the start lane's traffic, C137 trace): Miami
+  entry 6 (D1 rule), Chicago the model-4 horn (slot 26; the trace prints 8, same address since C137); Vegas / Havana no
+  oncoming honk in those runs; tables right in all.
+
+## C144 engine: draw-only wheel height per car (Infrastructure 30.10., exe window + plugin, build-wip)
+- **Exe (c144_patches):** DrawCarWheels' wheel centre y (0x8003B600..14: -disp.vy - (susp + 50)) gets + WDY (zero block
+  0x80093748 = gp-0x3028): site 0x8003B60C 'addiu v0, v0, 0x32' -> 'j WCAVE' with the addiu in the delay slot; WCAVE =
+  4 words at 0x80011AC8 (the GPU-timeout text's last 4 bytes + the unreferenced 'LoadImage2'; seeded in
+  seeds/ghidra_funcs.txt): lw t9, WDY(gp) / subu v1, v1, v0 / j 0x8003B614 / addu v1, v1, t9 (t9 unused in the wheel
+  loop). The C45 near-sub cave's limit is now 0x80011AC8. Zero-safe (0 = Driver 1). 2079 patches.
+- **Plugin (wheels_entry, per car):** WDY = 73 - R (the car's D2 wheel size) in D2 cities (car set 4), 0 otherwise.
+  CHI_C144=0: off. Physics / ride height untouched (Polish's ride rows move the body; R35 bounce risk is theirs).
+- Runner `c144_wheels` (site + cave words, WDY samples, start / drive shots): Havana WDY {8 civilians, 29 the mini} with
+  the mini's tyres on the road; Miami WDY 0. PASS.
+
+## C129 plan: Driver 2 civ-AI traffic as a guest overlay (Infrastructure 30.10., Q72 = B; Las Vegas first)
+- **One C core, two builds.** REDRIVER2 civ_ai.c is decompiled PS1 C; its road-following subset (InitNodeList,
+  GetNodePos, CreateNewNode, GetNextRoadInfo, CheckChangeLanes, CivFindStation / FindPointOnPath / SteerAngle,
+  CivAccel(+TrafficRules)) is cut into `chicago/c129/d2civ.c` over its own per-car state (CIV_STATE + a 13-node route
+  ring) and a road blob (STRAIGHTS2 / CURVES2 / JUNCTIONS2_NEW + a surface lookup for GetSurfaceRoadInfo), with shims for
+  CAR_DATA fields (position, heading, wheel speed), Random2, ratan2 / SquareRoot0 / rcossin. Built twice: host (clang)
+  = the reference that prints node paths; mipsel (`-O2 -march=r3000 ... -G0`, the smoke-test flags) = the overlay.
+  "Exact match" = guest traces vs the host run on the same data and seeds.
+- **Phases:** (1) offline: road blob exporter (per city, from the D2 LEV) + core + host harness (node paths for 10
+  diagonal / curve routes in Las Vegas) + mipsel object size check; (2) plumbing: the overlay + road blob in guest RAM
+  (loaded per D2 city; PS1 path = the level's data later), an exe hook at D1's per-car AI entry (0x80013D88) for D2
+  cities only, kinematic follow (position / heading / speed written to the D1 car from the D2 path point); D1 roads
+  kept for felony / cops; (3) spawn on D2 roads (PingIn by straight / curve), lights (D1 cycle) / yield junctions, lane
+  changes, parking; (4) runner traces on 3 diagonals + 3 curves in Vegas (within 256 of the lane line, heading within
+  64/4096, no axis snapping, speed limits), 10 min soak without stalls, then Chicago / Havana / Rio.
+- **Phase 1 done (30.10.):** `chicago/c129/`: d2civ.cpp = civ_ai.c lines 242-1494 + 3032-3274 verbatim (GetLeft/
+  RightBoundLane, GetNextRoadInfo, InitNodeList, RemapLaneChange, GetNodePos, CheckChangeLanes, CreateNewNode,
+  CivFindStation, CivFindPointOnPath, CivSteerAngle; one change: Random2's unused pointer argument -> 0 for the 64-bit
+  host); compat.h / compat.cpp = the D2 types + macros, a reduced CAR_DATA shell (where, direction, wheel_speed, oBox,
+  model, carCos, ai.c, id, controlType), globals, Random2 (D2's frame-counter formula), integer SquareRoot0 / ratan2
+  (exact over libgte's rcossin: worst error 0), bcollided2d, GetSurfaceRoadInfo. export_roads.py = <city>_roads.bin
+  ("D2RD" + the three lumps' records as stored: Vegas 21,320 B, Chicago 29,080 B) + rcossin.bin (Driver 1's table at
+  0x8008EAA8 = libgte's). build.sh builds mipsel objects (core 10,828 B text + helpers 1,299 B + 6,668 B shells; no
+  libgcc calls, links standalone), the host harness, and out/vegas_ref_paths.txt (10 routes: 5 diagonals at 45 deg, 5
+  curves; 2400 frames each at 40 units / frame; kinematic follow = CivSteerAngle (node upkeep) + CivFindStation +
+  CivFindPointOnPath at station + speed): all 10 run through junctions / curve chains without a 'confused' stop.
+- **Phase 2 design (next):** the overlay must run natively (the C140 dump showed what interpreted pages cost): link it at
+  a fixed main-RAM address and register it as a recompiled overlay (game.toml, like FRONTEND / IVIEW.BIN), loaded per
+  D2 city with the road blob; needs a free main-RAM window during D2 Take a Ride (~12 KB code + 21-29 KB roads + ~7 KB
+  state) -> RAM survey first; entry hook at D1's per-car AI (0x80013D88) for D2 cities; coordinates D2 -> D1 via the
+  converter's worldscale (x1.32 + offsets).
+- **Phase 2 RAM survey (30.10., user snapshots of d2 cities 6):** heap end in D2 Take a Ride 0x801D8570..0x801DECEC; from
+  0x801E0000 a dynamic buffer (likely Driver 1's replay recording: Vegas night after a few minutes filled it to 0x801F3800,
+  "Demonstration" text at its start in another run), then DTL.BIN 0x801F8BC0 and the stack. Free gap under 0x801E0000:
+  4-30 KB. **No ~50 KB main-RAM window for the overlay in D2 cities today** (the known M8 deficit: D2 cities already keep
+  cell objects / carry / specials / surface table in mod memory). Proposal (Strategy): run the same core host-side in the
+  plugin now (per-car AI entry hook, native speed), keep the mipsel build verified against the host reference as the
+  PS1 path for M8 (after the RAM diet); host-only item added to the M8 list.
+- **Phase 2 hook notes (30.10.):** D1's civ AI FUN_80013D88(record a0 = 0x80098950 + 0x50 i, car a1) is called once per car
+  from FUN_8001A30C (0x8001A784); it returns early for record[2] == 1 / record[1] in (1, 9), re-plans via FUN_8001A1BC /
+  FUN_80021820 + FUN_80016F0C (junction picker) and steers through record fields; the physics then moves the car. A
+  kinematic follow must therefore write the car state AFTER physics (position x/y/z + the x16 copies car+0x24..0x2C,
+  orientation matrix car+4.., direction, velocities car+0x40 / +0x48, oBox), D2 -> D1 coordinates via worldscale, and skip
+  D1's AI for D2-driven slots (return 0 like the parked case). Entry hooks need game.toml mod_function_entry_funcs + a
+  regenerate (shared window). Open: the placement decision (host plugin now vs main-RAM overlay after the M8 diet).
+- **Decision (Strategy 30.10.):** core host-side in the plugin now (D2 cities only); the mipsel build stays verified against the host path in every C129 test; exact D2 paths remain the pass criterion (runner traces vs the host reference). M8 host-only row added (~50 KB); RAM-diet candidate: Driver 1's replay recording buffer in D2 cities.

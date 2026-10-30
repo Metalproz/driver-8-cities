@@ -880,6 +880,12 @@ static void spd_write_row5(uint32_t blk, int t, uint32_t model) {
 }
 static uint8_t s_dmg_lvl[2304]; static uint32_t s_dmg_lvl_n, s_lvl_block;   /* C42 r3: D2 damage kinds, AI 1..3 + choices 0..3 */    /* C42 r3: wheel size (tread) per choice 0..3, AI 1..3 */   /* C42E: player choices 0..3: half x, y, z (D2 colBox x1.32) */
 static uint32_t s_cos[2][250], s_cos_n[2];          /* C42/C53: cosmetics rows (8 or 10 x 100 B) day / night, car set 4 */
+static uint8_t s_cyc[4][8 + 28 * 24]; static uint32_t s_cyc_n[4];
+/* C147 (3): per-time civilian sets (Driver 2: Las Vegas day 1/3/4, night 1/2/4): the package writes *_night assets only when
+ * the night level's civilians differ; [0] day, [1] night; civ_time_select() copies the running time's set into the active
+ * arrays (s_dmg_civ, s_dmg_lvl, s_car_whl) and the car-sound map. */
+static uint32_t s_t_dmg_civ[2][900], s_t_dmg_civ_n[2]; static uint8_t s_t_dmg_lvl[2][2304]; static uint32_t s_t_dmg_lvl_n[2];
+static int16_t s_t_car_whl[2][9]; static uint32_t s_t_car_whl_n[2]; static uint8_t s_sx_map_night[28]; static int s_sx_map_night_ok, s_civ_t = -1;   /* C147 (2): CYC1 per variant (day, night, xd day, xd night) */
 static uint32_t s_chi_map[6];
 static uint32_t s_chi_entry[8], s_la_entry[8], s_night_entry[8], s_xd_entry[2][8];
 static int s_have_xd, s_lvl_xd;   /* C101: extra-draw level pair in the package / the level table points at it */
@@ -950,6 +956,21 @@ static int city_assets_load(int city) {
     {   /* C42 step 1: Driver 2 civ damage tables (car-set city 4), written to 0x800A0E20 while in use */
         FILE* g = fopen(apath("dmg_civ.bin"), "rb");
         if (g) { s_dmg_civ_n = (uint32_t)fread(s_dmg_civ, 4, 900, g); fclose(g); }
+        for (int t = 0; t < 2; t++) {                    /* C147 (3): per-time civilian sets (day = the plain assets) */
+            g = t ? fopen(apath("dmg_civ_night.bin"), "rb") : NULL;
+            s_t_dmg_civ_n[t] = g ? (uint32_t)fread(s_t_dmg_civ[t], 4, 900, g) : 0u;
+            if (g) fclose(g);
+            g = t ? fopen(apath("dmg_levels_night.bin"), "rb") : NULL;
+            s_t_dmg_lvl_n[t] = g ? (uint32_t)fread(s_t_dmg_lvl[t], 1, sizeof s_t_dmg_lvl[t], g) : 0u;
+            if (g) fclose(g);
+            g = t ? fopen(apath("car_wheels_night.bin"), "rb") : NULL;
+            s_t_car_whl_n[t] = g ? (uint32_t)fread(s_t_car_whl[t], 2, 9, g) : 0u;
+            if (g) fclose(g);
+        }
+        s_sx_map_night_ok = 0;
+        g = fopen(apath("car_sfx_night_map.bin"), "rb");
+        if (g) { s_sx_map_night_ok = fread(s_sx_map_night, 1, 28, g) == 28u; fclose(g); }
+        s_civ_t = -1;
         g = fopen(apath("dmg_player.bin"), "rb");
         if (g) { s_dmg_ply_n = (uint32_t)fread(s_dmg_ply, 4, 720, g); fclose(g); }
         g = fopen(apath("car_boxes.bin"), "rb");
@@ -991,8 +1012,17 @@ static int city_assets_load(int city) {
             g = fopen(apath(t ? "specdmg_night.bin" : "specdmg_day.bin"), "rb");
             if (g) { s_spd_n[t] = (uint32_t)fread(s_spd[t], 1, sizeof s_spd[t], g); fclose(g); }
         }
+        for (int t = 0; t < 4; t++) {                    /* C147 (2): Driver 2's palette-cycling neon (Polish .cyc.bin, CYC1) */
+            static const char* nm[4] = { "colcycle_day.bin", "colcycle_night.bin", "colcycle_xd_day.bin", "colcycle_xd_night.bin" };
+            s_cyc_n[t] = 0;
+            g = fopen(apath(nm[t]), "rb");
+            if (g) { s_cyc_n[t] = (uint32_t)fread(s_cyc[t], 1, sizeof s_cyc[t], g); fclose(g); }
+        }
         g = fopen(apath("car_wheels.bin"), "rb");
         if (g) { s_car_whl_n = (uint32_t)fread(s_car_whl, 2, 9, g); fclose(g); }
+        memcpy(s_t_dmg_civ[0], s_dmg_civ, sizeof s_dmg_civ); s_t_dmg_civ_n[0] = s_dmg_civ_n;   /* C147 (3): the day set */
+        memcpy(s_t_dmg_lvl[0], s_dmg_lvl, sizeof s_dmg_lvl); s_t_dmg_lvl_n[0] = s_dmg_lvl_n;
+        memcpy(s_t_car_whl[0], s_car_whl, sizeof s_car_whl); s_t_car_whl_n[0] = s_car_whl_n;
         for (int t = 0; t < 2; t++) {
             g = fopen(apath(t ? "cosmetics_night.bin" : "cosmetics_day.bin"), "rb");
             if (g) { s_cos_n[t] = (uint32_t)fread(s_cos[t], 4, 250, g); fclose(g); }
@@ -2039,21 +2069,111 @@ static void night_look_vblank(int chi) {
     if ((int32_t)psx_mod_read_word(0x80093644u) != ly) psx_mod_write_word(0x80093644u, (uint32_t)ly);
 }
 /* C134 (Polish 28.10.: Vegas downtown 'colour noise'): Driver 1 never clears the frame (its sky + ground tiles always cover
- * it); Driver 2 cities have spots without ground geometry (D2 draws roads / paths only there), so the previous VRAM content
- * shows (the noise at the Fremont start, black elsewhere). While a D2 city runs, both DRAWENVs (0x800BDFB4 / 0x800BE034:
- * clip, ofs, tw, tpage, dtd, dfe, isbg +0x18, r0 g0 b0 +0x19..1B) get isbg = 1 with a black background, so PutDrawEnv
- * clears like Driver 2. D1 cities: isbg 0 as before. CHI_C134=0 = off. (M8: a guest data word, cheap.) */
+ * it); Driver 2 cities have spots without ground geometry, so the previous VRAM content showed there (the noise at the
+ * Fremont start = garbage that was never drawn over). C134 cleared every frame to black (isbg = 1 in both DRAWENVs
+ * 0x800BDFB4 / 0x800BE034: isbg +0x18, r0 g0 b0 +0x19..1B).
+ * C142 (user review d2 cities 6: unloaded areas / 'loading zones' became a black void; keep Driver 1's look where the
+ * last frame stays): Driver 2 itself never clears either (REDRIVER2 system.c SetDefDrawEnv: isbg 0). So the clear is now
+ * one-shot: for CLEAR_VBL vblanks after a D2 level starts running (in-level heartbeat rising edge) both buffers clear to
+ * the level's fog colour (0x80097138, 0x00BBGGRR, set at level init), which wipes the old VRAM garbage; then isbg = 0 as
+ * in Driver 1 / 2 (never-drawn spots keep the fog colour until something is drawn there, then show the last frame).
+ * D1 cities: isbg 0 as before. CHI_C134=0: off; CHI_C142=0: C134's clear every frame. (M8: a guest data word.) */
+#define CLEAR_VBL 6u
 static void clear_bg_vblank(int chi) {
-    static int on = -1;
+    static int on = -1, every = -1;
     if (on < 0) { const char* e = getenv("CHI_C134"); on = !(e && *e == '0'); }
+    if (every < 0) { const char* e = getenv("CHI_C142"); every = e && *e == '0'; }
+    static int was_in;
+    static uint32_t left;
+    int in_level = s_lvl_seen && s_vbl_n - s_lvl_beat <= LVL_BEAT_MAX;
+    if (chi && in_level && !was_in) left = CLEAR_VBL;            /* a D2 level started running */
+    was_in = chi && in_level;
+    int clear = on && chi && (every || left > 0u);
+    if (left) left--;
+    uint32_t fog = psx_mod_read_word(0x80097138u) & 0x00FFFFFFu;
     static const uint32_t env[2] = { 0x800BDFB4u, 0x800BE034u };
     for (int i = 0; i < 2; i++) {
         uint32_t a = env[i] + 0x18u, w = psx_mod_read_word(a);    /* isbg | r0 << 8 | g0 << 16 | b0 << 24 */
         if (psx_mod_read_half(env[i] + 4u) != 0x200u) continue;    /* not a DRAWENV (yet) */
-        uint32_t want = (on && chi) ? 1u : 0u;
-        if (w != want && (w == 0u || w == 1u)) psx_mod_write_word(a, want);
+        uint32_t want = clear ? (1u | (every ? 0u : fog << 8)) : 0u;
+        if (w != want && (w & 0xFFu) <= 1u) psx_mod_write_word(a, want);
     }
 }
+/* C147 (2) (Polish C146: Driver 2's neon cycles, ours was static): REDRIVER2 objanim.c ColourCycle, per game frame while
+ * not paused (D2: StepSim then ColourCycle unless fast-forward): nothing while an area loads (phase back to 0), odd frames
+ * skipped; phase 0 reads each cycling texture's 16-entry CLUT row from VRAM, later even frames rotate entry start..stop
+ * down by one (old start at stop) for both ranges when (cycle_timer & speed) == 0 and upload the row; cycle_timer counts
+ * the stepping calls. Table = the level variant's .cyc.bin (CYC1: name, our page, texture index, start1 / stop1 / speed1,
+ * start2 / stop2 / speed2). Driver 1 equivalents: frame counter 0x800970D8 (paused: it stands still), page loaded =
+ * tpageslots 0x800BE4F8 (16 slot bytes) holds the page, CLUT word 0x80087030[page * 32 + tex] (as texture_cluts).
+ * A CLUT row another loaded texture shares is left alone (would cycle that one too; logged once).
+ * Host-only (M8: guest table + StoreImage / LoadImage of the 16-entry rows per frame, like D2). CHI_C147_CYCLE=0: off. */
+static int vram_put(int x, int y, int w, int h, const uint16_t* px);
+static void colour_cycle_vblank(int chi) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C147_CYCLE"); en = !(e && *e == '0'); }
+    static uint32_t last_fc, timer, logged;
+    static int phase, cur_t = -1;
+    static uint16_t buf[24][16];
+    static uint16_t clut[24];
+    int t = (s_chi_night ? 1 : 0) + (s_lvl_xd ? 2 : 0);
+    int in_level = s_lvl_seen && s_vbl_n - s_lvl_beat <= LVL_BEAT_MAX;
+    const uint8_t* c = s_cyc[t];
+    uint32_t n = s_cyc_n[t] >= 8u && !memcmp(c, "CYC1", 4) ? (uint32_t)c[4] | ((uint32_t)c[5] << 8) : 0u;
+    if (n > 24u || 8u + 28u * n > s_cyc_n[t]) n = 0;
+    uint32_t fc = psx_mod_read_word(0x800970D8u);
+    if (!en || !chi || !in_level || !n || t != cur_t) { phase = 0; timer = 0; cur_t = t; last_fc = fc; return; }
+    if (fc == last_fc) return;                               /* no new game frame (paused, menu) */
+    uint32_t steps = fc - last_fc; last_fc = fc;
+    if (steps > 4u) steps = 1u;
+    if (psx_mod_read_word(AREA_LOADING_FLAG)) { phase = 0; return; }
+    uint8_t slots[16];
+    for (uint32_t s = 0; s < 16u; s++) slots[s] = psx_mod_read_byte(0x800BE4F8u + s);
+    for (uint32_t k = 0; k < steps; k++) {
+        uint32_t frame = fc - steps + 1u + k;
+        if (frame & 1u) continue;
+        for (uint32_t i = 0; i < n; i++) {
+            const uint8_t* e = c + 8u + 28u * i;
+            int16_t par[8]; memcpy(par, e + 12, 16);
+            uint32_t page = (uint16_t)par[0], tex = (uint16_t)par[1];
+            if (page >= 128u || tex >= 32u) continue;
+            int loaded = 0;
+            for (uint32_t s = 0; s < 16u; s++) if (slots[s] == page) loaded = 1;
+            if (!loaded) continue;
+            if (phase == 0) {
+                uint16_t cw = psx_mod_read_half(0x80087030u + 2u * (page * 32u + tex));
+                clut[i] = 0;
+                int cx = (cw & 63u) << 4, cy = cw >> 6;
+                if (!cw || cx + 16 > 1024 || cy >= 512) continue;
+                int shared = 0;                               /* another loaded texture with this CLUT row? */
+                for (uint32_t s = 0; s < 16u && !shared; s++) {
+                    if (slots[s] == 0xFFu || slots[s] >= 128u) continue;
+                    for (uint32_t x = 0; x < 32u; x++)
+                        if ((slots[s] != page || x != tex) && psx_mod_read_half(0x80087030u + 2u * (slots[s] * 32u + x)) == cw) { shared = 1; break; }
+                }
+                if (shared) {
+                    if (!(logged & (1u << i))) { logged |= 1u << i; fprintf(stdout, "driver.chicago: C147 cycle: %.12s CLUT %04X shared, not cycled\n", (const char*)e, cw); }
+                    continue;
+                }
+                clut[i] = cw;
+                for (int j = 0; j < 16; j++) buf[i][j] = gpu_vram_peek(cx + j, cy);
+                continue;
+            }
+            if (!clut[i]) continue;
+            for (int r = 0; r < 2; r++) {
+                int start = par[2 + 3 * r], stop = par[3 + 3 * r], speed = par[4 + 3 * r];
+                if (start < 0 || stop > 15 || start >= stop || (timer & (uint32_t)speed) != 0u) continue;
+                uint16_t tmp = buf[i][start];
+                memmove(&buf[i][start], &buf[i][start + 1], (size_t)(stop - start) * 2u);
+                buf[i][stop] = tmp;
+            }
+            vram_put((clut[i] & 63u) << 4, clut[i] >> 6, 16, 1, buf[i]);
+        }
+        if (phase) timer++;
+        else phase = 1;
+    }
+}
+
 static void glow_offsets_vblank(void) {
     test_oc_vblank();
     test_pose_vblank();
@@ -2061,6 +2181,7 @@ static void glow_offsets_vblank(void) {
     int chi = chicago_active();
     night_look_vblank(chi);
     clear_bg_vblank(chi);
+    colour_cycle_vblank(chi);
     (void)s_c38_words;   /* C38: static exe patch now (exe_patches look_city_patches); no RAM rewrite */
     c45_vblank(chi);
     /* C45 part 3: the guest page loop (exe patch group CHI_C45_SKIP) reads the stable-page end from main RAM
@@ -2781,10 +2902,10 @@ static uint32_t sfx_sample_for_model(uint32_t model) {
 #define SFX_V2_MAGIC 0x32585343u
 #define SFX_BANK_BASE 0x800BD484u
 typedef struct { int32_t bank, kind, size, loop, rate; uint32_t off; } SfxSmp;
-static SfxSmp s_sx[48]; static int s_sx_n; static const uint8_t* s_sx_map;
+static SfxSmp s_sx[48]; static int s_sx_n; static const uint8_t* s_sx_map; static const uint8_t* s_sx_map_day;
 static uint32_t s_sx_done, s_sx_player, s_sx_spc, s_sx_slot_ok;
 static uint32_t s_sx_reg[2][2];                    /* [0] music tail, [1] mission tail: {start, end} */
-static void sx_reset(void) { s_sx_n = 0; s_sx_map = NULL; s_sx_done = 0; s_sx_player = 0xFFFFFFFFu; s_sx_spc = 0; }
+static void sx_reset(void) { s_sx_n = 0; s_sx_map = s_sx_map_day = NULL; s_sx_done = 0; s_sx_player = 0xFFFFFFFFu; s_sx_spc = 0; }
 
 static int sx_find(int bank, int kind) {
     for (int i = 0; i < s_sx_n; i++) if (s_sx[i].bank == bank && s_sx[i].kind == kind) return i;
@@ -2798,7 +2919,8 @@ static int sx_parse(void) {
     int32_t n; memcpy(&n, s_sfx + 4, 4);
     if (n <= 0 || n > 48 || 8u + 20u * (uint32_t)n + 28u > s_sfx_n) return 0;
     uint32_t dp = 8u + 20u * (uint32_t)n + 28u;
-    s_sx_map = s_sfx + 8u + 20u * (uint32_t)n;
+    s_sx_map = s_sx_map_day = s_sfx + 8u + 20u * (uint32_t)n;
+    if (s_civ_t == 1 && s_sx_map_night_ok) s_sx_map = s_sx_map_night;   /* C147 (3) */
     for (int i = 0; i < n; i++) {
         int32_t h[5]; memcpy(h, s_sfx + 8u + 20u * (uint32_t)i, 20);
         s_sx[i].bank = h[0]; s_sx[i].kind = h[1]; s_sx[i].size = h[2]; s_sx[i].loop = h[3]; s_sx[i].rate = h[4];
@@ -2953,8 +3075,22 @@ static void c137_bank0(uint8_t* spu) {
             is >= 0 ? s_sx[is].size : 0, e[0], hole ? e[2] + z[2] - e[0] : 0u);
 }
 
+static void civ_time_select(void) {
+    int t = s_chi_night ? 1 : 0;
+    if (t == s_civ_t) return;
+    s_civ_t = t;
+    int nd = t && s_t_dmg_civ_n[1], nl = t && s_t_dmg_lvl_n[1], nw = t && s_t_car_whl_n[1];
+    memcpy(s_dmg_civ, s_t_dmg_civ[nd], sizeof s_dmg_civ); s_dmg_civ_n = s_t_dmg_civ_n[nd];
+    memcpy(s_dmg_lvl, s_t_dmg_lvl[nl], sizeof s_dmg_lvl); s_dmg_lvl_n = s_t_dmg_lvl_n[nl];
+    memcpy(s_car_whl, s_t_car_whl[nw], sizeof s_car_whl); s_car_whl_n = s_t_car_whl_n[nw];
+    if (s_sx_map_day) { s_sx_map = t && s_sx_map_night_ok ? s_sx_map_night : s_sx_map_day; sx_civ_banks(); }
+    if (nd || nl || nw || (t && s_sx_map_night_ok))
+        fprintf(stdout, "driver.chicago: C147 night civilian set (damage %d, levels %d, wheels %d, sound map %d)
+", nd, nl, nw, t && s_sx_map_night_ok);
+}
 static void sfx_v2_vblank(void) {
     uint8_t* spu = spu_get_ram_ptr();
+    civ_time_select();
     if (!spu || !sx_parse()) return;
     {   /* C127: is a game frame running (frame counter moved within 8 vblanks)? */
         static uint32_t last_fc, vb, last_move;
@@ -3098,7 +3234,8 @@ static void sfx_v2_vblank(void) {
         int32_t cx = fr32(car + 0x18u), cz = fr32(car + 0x20u);
         if (!(cx | cz)) continue;
         uint32_t model = psx_mod_read_byte(rec + 0x10u) & 7u;
-        if (model < 2u) continue;                            /* not the cop (siren) */
+        if (model == 0u || (model == 1u && psx_mod_read_byte(car + 0x12Eu) == 1u)) continue;   /* C143: patrol cops honk
+                                                             * (D2 civ_ai), pursuing ones run their siren */
         int32_t dx = px - cx, dz = pz - cz;
         int64_t d2 = (int64_t)dx * dx + (int64_t)dz * dz;
         if (d2 > (int64_t)1800 * 1800 || d2 < (int64_t)300 * 300) continue;
@@ -3140,6 +3277,30 @@ static void c137_bank4_vblank(void) {
     if (skip && psx_mod_read_word(SFX_TAB + 0x200u * 4u))
         for (uint32_t k = 0; k < 32u * 4u; k++) psx_mod_write_word(SFX_TAB + 0x200u * 4u + 4u * k, 0u);
 }
+/* C143 (user: horns per car model as in Driver 2; Analyst NOTES "C143 horn mapping"): the exe's AI horn (c143_patches,
+ * 0x80018084..A4) plays bank 0 entry 6 + HORN[model * 32 + record id] (zero block 0x80093648, 256 bytes; all zero = entry
+ * 6 everywhere). Written every vblank (the zero block is cleared at boot): Driver 1 cities / no D2 horns loaded = Driver
+ * 1's id rule (id & 3: 0 / 1 / 2 / 2 -> entries 6 / 7 / 8 / 8, unchanged); a D2 city with its horns in SPU = per model:
+ * the horn slot of the model's bank (cop = model 1 = the slot-2 civilian's bank once the data map says so, Driver 2), the
+ * special 28, else 25 (minus 6). Host-only for now (M8: the same table written by guest code at level load). */
+#define C143_TAB 0x80093648u
+static void c143_horn_table(void) {
+    int d2 = chicago_active() && s_sx_map && psx_mod_read_word(SFX_TAB + 16u * 25u) != 0u && s_sx_done != 0u;
+    static uint8_t t[256];
+    for (uint32_t m = 0; m < 8u; m++) {
+        uint32_t hs = 25u;
+        if (d2) {
+            if (m == 5u) hs = psx_mod_read_word(SFX_TAB + 16u * 28u + 4u) ? 28u : 25u;
+            else if (m >= 1u && m <= 4u) { uint32_t h = sx_horn_slot_of_bank((int)s_sx_map[m]); if (h) hs = h; }
+        }
+        for (uint32_t id = 0; id < 32u; id++)
+            t[m * 32u + id] = (uint8_t)(d2 ? hs - 6u : ((id & 3u) == 3u ? 2u : (id & 3u)));
+    }
+    for (uint32_t k = 0; k < 64u; k++) {
+        uint32_t w; memcpy(&w, t + 4u * k, 4);
+        if (psx_mod_read_word(C143_TAB + 4u * k) != w) psx_mod_write_word(C143_TAB + 4u * k, w);
+    }
+}
 /* C137 step 2 diagnostic (CHI_C137_TRACE=1, off by default): which bank / sample each of the 16 logical channels starts.
  * Every start (FUN_0004d968, all 4 callers) stores the sample's SPU address in the channel attr (+0x1C), which stays there
  * until the channel's next start, so a per-vblank compare also catches the shortest samples. Logs each (bank, sample)
@@ -3171,6 +3332,7 @@ static void c137_trace_vblank(void) {
 }
 static void sfx_vblank(uint32_t cs) {
     c137_trace_vblank();
+    c143_horn_table();
     {   /* C137: the fixed-pitch siren words only while entry 4 holds the D2 siren (any other level: Driver 1's) */
         int d2 = cs == 4u && s_siren_addr && chicago_active() && psx_mod_read_word(SFX_TAB + 16u * 4u) == s_siren_addr;
         siren_words(d2);
@@ -3615,6 +3777,22 @@ static const uint32_t s_c138_light_words[][3] = {
     { 0x800464ACu, 0x2407001Eu, 0x24070018u }, { 0x80046504u, 0x2407001Eu, 0x24070018u },
     { 0x800465A8u, 0x24070019u, 0x24070016u }, { 0x800465F4u, 0x24070019u, 0x24070016u },   /* AddNightLights tail 25 -> 22 */
 };
+/* C141 / C140 (probe d2 cities 6: Newtown spawned police drawn as bare wheels): C79 rewrites LA's script to cop cap 0 in
+ * the mission-parse hook; after a Rio Day/Night back-out the hook did not apply and LA's cap 2 stayed. Hook-independent
+ * guard: while the selector's Newtown runs (CITY 7 via LA's Take a Ride 0x7C), the cop cap 0x80097760 is 0 every vblank
+ * (Newtown has no police model; Nightmare keeps working: it relies on this cap, NOTES C88). CHI_C79=0: off. */
+static void c141_newtown_vblank(void) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C79"); en = !(e && *e == '0'); }
+    if (!en || !s_slot_enabled || s_virtual != V_NEWTOWN || psx_mod_read_word(CITY_WORD) != 7u
+        || psx_mod_read_word(MISSION_NUMBER) != 0x7Cu || !psx_mod_game_started())
+        return;
+    if (psx_mod_read_word(0x80097760u) != 0u) {
+        psx_mod_write_word(0x80097760u, 0u);
+        static uint32_t told;
+        if (!told++) fprintf(stdout, "driver.chicago: C141 Newtown: cop cap forced to 0 (the script still had it)\n");
+    }
+}
 static void c138_lights_vblank(void) {
     static int en = -1;
     if (en < 0) { const char* e = getenv("CHI_C138_LIGHTS"); en = !(e && *e == '0'); }
@@ -3622,12 +3800,15 @@ static void c138_lights_vblank(void) {
 }
 
 extern void driver_personal_rewind_vblank(void);   /* C130: the Mods 'Rewind' choice (driver_personal.c) */
+static void civ_time_select(void);
 static void area_switch_guard_vblank(void) {
     driver_personal_rewind_vblank();
+    civ_time_select();                                   /* C147 (3): day / night civilian set */
     restore_vblank();
     shadow_vblank();
     c138_lights_vblank();
     c137_bank4_vblank();
+    c141_newtown_vblank();
     s_vbl_n++;
     car_lod_vblank();
     cop_slots_vblank();
@@ -3850,6 +4031,12 @@ static void wheels_entry(struct CPUState* cpu, uint32_t address) {
                              : (model >= 1u && model <= s_car_whl_n - 4u ? s_car_whl[4u + model - 1u] : 0));
         if (v > 20 && v < 300) ws = v;
     }
+    {   /* C144 (Analyst: D2 tyres float 73 - R above the road): draw-only wheel centre offset WDY (exe c144_patches) */
+        static int en = -1;
+        if (en < 0) { const char* e = getenv("CHI_C144"); en = !(e && *e == '0'); }
+        uint32_t dy = en && ws != 73 ? (uint32_t)(73 - ws) : 0u;
+        if (psx_mod_read_word(0x80093748u) != dy) psx_mod_write_word(0x80093748u, dy);
+    }
     if (ws == last)
         return;
     last = ws;
@@ -3908,8 +4095,19 @@ static void mission_parse_entry(struct CPUState* cpu, uint32_t address) {
                     x ? s_d2c[s_assets_city].name : "off");
         }
     }
-    if (!s_slot_enabled || !is_extra(s_virtual) || !via_la_for(s_virtual) || psx_mod_read_word(MISSION_NUMBER) != 0x7Cu)
+    /* C140 (probe d2 cities 6: Newtown ran LA's raw script after a Rio Day/Night back-out and an Interview hover; police,
+     * cars in the air, the car falling, then a stall): the gate read the mission WORD, which the menu routing rewrites
+     * (0x7C <-> 0xAE) while the cursor moves; the mission being parsed is s0 (the loader's argument), so gate on that. */
+    uint32_t parsed = cpu->gpr[16];
+    if (!s_slot_enabled || !is_extra(s_virtual) || !via_la_for(s_virtual) || parsed != 0x7Cu) {
+        if (s_slot_enabled && is_extra(s_virtual) && via_la_for(s_virtual) && psx_mod_read_word(MISSION_NUMBER) == 0x7Cu)
+            fprintf(stdout, "driver.chicago: C140 mission parse skipped: s0 %#x, mission word 0x7C, level %d\n",
+                    (unsigned)parsed, s_virtual);
         return;
+    }
+    if (psx_mod_read_word(MISSION_NUMBER) != 0x7Cu)
+        fprintf(stdout, "driver.chicago: C140 mission word %#x while parsing 0x7C (level %d): parsed anyway\n",
+                (unsigned)psx_mod_read_word(MISSION_NUMBER), s_virtual);
     uint32_t a0 = cpu->gpr[4] | 0x80000000u, a1 = cpu->gpr[5] | 0x80000000u;
     if (a1 <= a0 || a1 - a0 > MISSION_SAFE_END - MISSION_SAFE)
         return;
@@ -3949,6 +4147,154 @@ static void mission_parse_entry(struct CPUState* cpu, uint32_t address) {
             (unsigned)n, (unsigned)MISSION_SAFE, (unsigned)a0, s_virtual);
 }
 
+/* C129 phase 2 (user: Driver 2's traffic lanes, a "perfect replica"; Strategy 30.10.: the D2 civ-AI core runs host-side
+ * in the plugin for now, D2 cities only; NOTES "C129 plan"). The core = chicago/c129 (REDRIVER2 civ_ai.c road following,
+ * the same sources as the verified mipsel build) in c129_plugin.cpp, working in Driver 2 coordinates on the city's D2
+ * road blob (package asset c129_roads.bin: "C129", D1 offset x / z, then export_roads.py's "D2RD" blob; D1 = D2 x 1.32 +
+ * offset, the converter's worldscale). Hook = the entry of FUN_8004C15C (called once per frame right after
+ * GlobalTimeStep = after physics; game.toml). Every civilian D1 spawns (record state 2, resident model 2-5) is put on the
+ * nearest D2 lane point running along its heading and its record goes to state 10 (handler table entry 10 = the empty
+ * one; exe c129_patches make FUN_80013D88 return early for states >= 9, so Driver 1's speed / lane logic never touches
+ * it); each frame the core advances it (kinematic follow) and the car's x / z (+ the <<4 copies), velocity, yaw
+ * (quaternion rotated about y, matrix rebuilt) and heading are written; y and pitch / roll stay physics'. Driver 1 still
+ * despawns it far from the player (record cleared -> detached). Cops, the player, felony / red-light rules: Driver 1's
+ * roads as before. D1 cities: nothing. CHI_C129=1 on (test switch; default off until verified).
+ * Host-only (M8: the mipsel build of the same core as a guest overlay after the RAM diet). */
+extern int c129_roads_load(const void* blob, uint32_t size, const int16_t* rcossin);
+extern void c129_reset(void);
+extern void c129_frame(void);
+extern int c129_attach(int slot, int x, int z, int heading, int maxd, int* ox, int* oz, int* odir, int* oroad, int* olane);
+extern void c129_detach(int slot);
+extern int c129_step(int slot, int speed, int* ox, int* oz, int* odir, int* oroad, int* olane, int* octrl);
+extern int c129_speed_limit(int slot);
+#define C129_REC   0x80098950u
+#define C129_CARS  0x8009B0A4u
+#define C129_STATE 10u
+static int s_c129_city = -2, s_c129_ok;
+static int32_t s_c129_off[2];
+static uint8_t s_c129_on[22];
+static int32_t s_c129_spd[22], s_c129_pos[22][2];
+static uint32_t s_c129_att, s_c129_fail, s_c129_lost, s_c129_fc;
+static int c129_enabled(void) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C129"); en = e && *e == '1'; }
+    return en;
+}
+static int32_t c129_to_d1(int32_t v, int axis) { return (int32_t)lround(v * 1.32) + s_c129_off[axis]; }
+static int32_t c129_to_d2(int32_t v, int axis) { return (int32_t)lround((v - s_c129_off[axis]) / 1.32); }
+static void c129_load_city(void) {
+    s_c129_ok = 0;
+    memset(s_c129_on, 0, sizeof s_c129_on);
+    FILE* f = fopen(apath("c129_roads.bin"), "rb");
+    if (!f) { fprintf(stdout, "driver.chicago: C129 no road blob for this city\n"); return; }
+    static uint8_t buf[64 * 1024];
+    size_t n = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (n < 28 || memcmp(buf, "C129", 4) != 0) { fprintf(stdout, "driver.chicago: C129 road blob bad\n"); return; }
+    memcpy(s_c129_off, buf + 4, 8);
+    static int16_t tab[4096 * 2];
+    for (uint32_t i = 0; i < 4096u * 2u; i += 2) {
+        uint32_t w = psx_mod_read_word(0x8008EAA8u + 2u * i);
+        tab[i] = (int16_t)(w & 0xFFFFu); tab[i + 1] = (int16_t)(w >> 16);
+    }
+    s_c129_ok = c129_roads_load(buf + 12, (uint32_t)(n - 12), tab);
+    fprintf(stdout, "driver.chicago: C129 D2 roads %s (offset %d, %d)\n", s_c129_ok ? "loaded" : "REJECTED",
+            (int)s_c129_off[0], (int)s_c129_off[1]);
+}
+/* yaw the car to `dir` (4096 = full turn) keeping physics' pitch / roll: q' = qy(delta) * q, matrix as LongQuaternion2Matrix */
+static void c129_set_yaw(uint32_t car, int32_t dir) {
+    int16_t m02 = (int16_t)psx_mod_read_half(car + 4u + 4u), m22 = (int16_t)psx_mod_read_half(car + 4u + 16u);
+    double cur = atan2((double)m02, (double)m22), want = dir * (2.0 * 3.14159265358979 / 4096.0);
+    double d = want - cur, s = sin(d / 2.0), c = cos(d / 2.0);
+    double qx = (int32_t)psx_mod_read_word(car + 0x30u), qy = (int32_t)psx_mod_read_word(car + 0x34u);
+    double qz = (int32_t)psx_mod_read_word(car + 0x38u), qw = (int32_t)psx_mod_read_word(car + 0x3Cu);
+    /* Hamilton product (0, s, 0, c) * (qx, qy, qz, qw) */
+    double nx = c * qx + s * qz, ny = c * qy + s * qw, nz = c * qz - s * qx, nw = c * qw - s * qy;
+    double len = sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
+    if (len < 1.0) return;
+    double k = 4096.0 / len;
+    int32_t q[4] = { (int32_t)lround(nx * k), (int32_t)lround(ny * k), (int32_t)lround(nz * k), (int32_t)lround(nw * k) };
+    for (int i = 0; i < 4; i++) psx_mod_write_word(car + 0x30u + 4u * (uint32_t)i, (uint32_t)q[i]);
+#define FHR(a) (((a) + (1 << 10)) >> 11)
+    int32_t yy = FHR(q[1] * q[1]), zz = FHR(q[2] * q[2]), xx = FHR(q[0] * q[0]), zw = FHR(q[2] * q[3]), xy = FHR(q[0] * q[1]);
+    int32_t xz = FHR(q[0] * q[2]), yw = FHR(q[1] * q[3]), xw = FHR(q[0] * q[3]), yz = FHR(q[1] * q[2]);
+#undef FHR
+    int16_t m[9] = { (int16_t)(4096 - (yy + zz)), (int16_t)(xy - zw), (int16_t)(xz + yw),
+                     (int16_t)(xy + zw), (int16_t)(4096 - (xx + zz)), (int16_t)(yz - xw),
+                     (int16_t)(xz - yw), (int16_t)(yz + xw), (int16_t)(4096 - (xx + yy)) };
+    for (int i = 0; i < 9; i++) psx_mod_write_half(car + 4u + 2u * (uint32_t)i, (uint16_t)m[i]);
+    psx_mod_write_word(car + 0xF8u, (uint32_t)(dir & 4095));
+}
+static void c129_post_physics_entry(struct CPUState* cpu, uint32_t address) {
+    (void)cpu; (void)address;
+    if (!c129_enabled()) return;
+    int city = chicago_active() ? s_assets_city : -1;
+    if (city != s_c129_city) {
+        if (s_c129_ok) c129_reset();
+        s_c129_city = city;
+        s_c129_ok = 0;
+        if (city >= 0) c129_load_city();
+    }
+    if (city < 0 || !s_c129_ok) return;
+    uint32_t fc = psx_mod_read_word(0x800970D8u);
+    if (fc == s_c129_fc) return;                    /* once per game frame */
+    s_c129_fc = fc;
+    c129_frame();
+    for (uint32_t i = 0; i < 22u; i++) {
+        uint32_t rec = C129_REC + 0x50u * i;
+        uint32_t st = psx_mod_read_byte(rec + 1u), model = psx_mod_read_byte(rec + 0x10u);
+        uint32_t car = C129_CARS + ((uint32_t)psx_mod_read_byte(rec) + 1u) * 0x18Cu;
+        if (s_c129_on[i] && st != C129_STATE) { c129_detach((int)i); s_c129_on[i] = 0; s_c129_lost++; }
+        if (!s_c129_on[i]) {
+            if (st != 2u || model < 2u || model > 5u) continue;
+            int32_t x = (int32_t)psx_mod_read_word(car + 0x18u), z = (int32_t)psx_mod_read_word(car + 0x20u);
+            int32_t h = (int32_t)psx_mod_read_word(car + 0xF8u) & 4095;
+            int ox, oz, od, road, lane;
+            if (!c129_attach((int)i, c129_to_d2(x, 0), c129_to_d2(z, 1), h, 3000, &ox, &oz, &od, &road, &lane)) {
+                s_c129_fail++;
+                continue;
+            }
+            s_c129_on[i] = 1; s_c129_att++;
+            s_c129_spd[i] = c129_speed_limit((int)i) / 2;
+            s_c129_pos[i][0] = c129_to_d1(ox, 0); s_c129_pos[i][1] = c129_to_d1(oz, 1);
+            psx_mod_write_byte(rec + 1u, (uint8_t)C129_STATE);
+            psx_mod_write_word(car + 0x18u, (uint32_t)s_c129_pos[i][0]);
+            psx_mod_write_word(car + 0x20u, (uint32_t)s_c129_pos[i][1]);
+            psx_mod_write_word(car + 0x24u, (uint32_t)(s_c129_pos[i][0] << 4));
+            psx_mod_write_word(car + 0x2Cu, (uint32_t)(s_c129_pos[i][1] << 4));
+            c129_set_yaw(car, od);
+            if (s_c129_att <= 8u)
+                fprintf(stdout, "driver.chicago: C129 attach rec %u model %u road %#x lane %d (moved %d)\n", i, model, road, lane,
+                        (int)lround(hypot((double)(s_c129_pos[i][0] - x), (double)(s_c129_pos[i][1] - z))));
+            continue;
+        }
+        int lim = c129_speed_limit((int)i);
+        if (s_c129_spd[i] < lim) s_c129_spd[i] += 2;
+        if (s_c129_spd[i] > lim) s_c129_spd[i] -= 4;
+        if (s_c129_spd[i] < 0) s_c129_spd[i] = 0;
+        int ox, oz, od, road, lane, ctrl;
+        if (!c129_step((int)i, s_c129_spd[i], &ox, &oz, &od, &road, &lane, &ctrl)) {
+            c129_detach((int)i); s_c129_on[i] = 0; s_c129_lost++;
+            psx_mod_write_byte(rec + 1u, 1u);          /* confused: parked (Driver 1's state 1, FUN_80013D88 idles it) */
+            continue;
+        }
+        int32_t nx = c129_to_d1(ox, 0), nz = c129_to_d1(oz, 1);
+        int32_t vx = nx - s_c129_pos[i][0], vz = nz - s_c129_pos[i][1];
+        s_c129_pos[i][0] = nx; s_c129_pos[i][1] = nz;
+        psx_mod_write_word(car + 0x18u, (uint32_t)nx);
+        psx_mod_write_word(car + 0x20u, (uint32_t)nz);
+        psx_mod_write_word(car + 0x24u, (uint32_t)(nx << 4));
+        psx_mod_write_word(car + 0x2Cu, (uint32_t)(nz << 4));
+        psx_mod_write_word(car + 0x40u, (uint32_t)(vx << 12));
+        psx_mod_write_word(car + 0x48u, (uint32_t)(vz << 12));
+        psx_mod_write_word(car + 0x50u, 0u);           /* no yaw spin from physics: the path sets the heading */
+        c129_set_yaw(car, od);
+    }
+    static uint32_t vb;
+    if (++vb % 1800u == 0u)
+        fprintf(stdout, "driver.chicago: C129 attached %u, not on a D2 lane %u, released %u\n", s_c129_att, s_c129_fail, s_c129_lost);
+}
+
 PSX_MOD_CONSTRUCTOR(driver_chicago_register) {
     psx_mod_register_activation_plugin("driver.model-table", model_table_activate);
     psx_mod_register_vblank_plugin("driver.model-table", area_switch_guard_vblank);   /* also runs surface_select_vblank */
@@ -3960,4 +4306,5 @@ PSX_MOD_CONSTRUCTOR(driver_chicago_register) {
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8003B208u, wheels_entry);
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8002E230u, lod_entry);   /* R33: far-car palettes */
     psx_mod_register_function_entry_plugin("driver.model-table", 0x8001B720u, nightmare_spawn_entry);   /* C88 r3 */
+    psx_mod_register_function_entry_plugin("driver.model-table", 0x8004C15Cu, c129_post_physics_entry);   /* C129 */
 }

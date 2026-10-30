@@ -30,3 +30,6 @@ findings/**/*.wav
 findings/**/*.mp3
 findings/**/*.xm
 findings/screenshots temp/
+
+# C129 build outputs + D2-derived road blobs / reference paths (Option A: never published)
+chicago/c129/out/

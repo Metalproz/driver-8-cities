@@ -84,10 +84,27 @@ def wheel_vy(d2: dict) -> int:
     first version: bodies sank, y ~77)."""
     if RIDE == "visual":
         return d2["wheels"][0][1] + d2["wheelSize"] - 64
-    return -(d2["depth"] + CLEARANCE)
+    return -(d2["depth"] + CLEARANCE) + (wheel_road(d2) if WHEELROAD else 0)
 
 
-RIDE_MODELS = os.environ.get("CHI_RIDE_MODELS", "8,9,10,11,12")   # R34: Driver 2 ride height relative to the civilians
+# C144 (Analyst 30.10., NOTES "C144 wheel checkup"): Driver 1 draws every wheel centre D1_WHEEL_Y = 73 above the road
+# (-(susp + 50) - disp.vy with the ride height -disp.vy - 1, rest susp ~24), so a tyre of radius R = round(wheelSize x 1.32)
+# floats 73 - R (Havana mini +29) or sinks R - 73 (fire engine -46). Infrastructure draws the wheels dy = 73 - R lower
+# (draw only, same R); CHI_POLISH_WHEELROAD=1 moves the body with them: ride row disp.vy += 73 - R (the drawn wheel stays
+# where Driver 1 puts it, origin + body go down by 73 - R), and Driver 2's wheel-to-body relation for EVERY model (the
+# d2wheel body extras, anchored on the civilians' mean like cheats 6, not only models 8-12). Data and engine go together:
+# without the engine offset small-wheeled bodies sink onto their wheels.
+WHEELROAD = os.environ.get("CHI_POLISH_WHEELROAD", "") == "1"
+D1_WHEEL_Y = 73
+
+
+def wheel_road(d2: dict) -> int:
+    """C144: 73 - R (D1 units), R = the drawn tyre radius (= .whl.bin, LCF wheelSize x polish_cars.SCALE)."""
+    import polish_cars as pc
+    return D1_WHEEL_Y - int(round(d2["wheelSize"] * pc.SCALE))
+
+
+RIDE_MODELS = os.environ.get("CHI_RIDE_MODELS", ",".join(str(m) for m in range(13)) if WHEELROAD else "8,9,10,11,12")   # R34: D2 ride relative to the civilians
 
 
 _RIDE = {}
@@ -145,13 +162,29 @@ def thrust_scale(d2: dict) -> int:
     return max(1024, min(8192, int(round(pr * 4915 * pc.SCALE / 7200.0))))
 
 
-def d1_row(d2: dict, tail: bytes, f: float = 1.0) -> bytes:
+# C145 (user 30.10.: the Chicago bus's tail lights sunk into the body, headlights in front of it): Driver 2 draws the
+# body at where + R (cog + v) and every light at where + R (light + cog) (cosmetic.c), so a light sits where the model
+# says. Our body vertices carry the cog (x, z) and the ride raise (polish_cars.cog_shift); the light rows did not -> off
+# by -cog (bus cog.vz 117 x 1.32). CHI_POLISH_LIGHTCOG=1: the 8 light / exhaust / smoke points get the body's shift too.
+LIGHTCOG = os.environ.get("CHI_POLISH_LIGHTCOG", "") == "1"
+
+
+def light_shift(m: int):
+    """(dx, dy, dz) D1 units added to model m's light points = its body shift (0 without CHI_POLISH_LIGHTCOG=1)."""
+    if not LIGHTCOG:
+        return (0, 0, 0)
+    import polish_cars as pc
+    sh = pc.cog_shift(m)
+    return (sh[0], sh[2] if len(sh) > 2 else 0, sh[1])
+
+
+def d1_row(d2: dict, tail: bytes, f: float = 1.0, sh=(0, 0, 0)) -> bytes:
     """f: model scale (C57, polish_cars.SCALE): positions scale with the body; the wheel x keeps D1's own
-    +-25 offset (D2 x = +-17 - vx -> D1 x = +-25 - vx' with x' = f * x)."""
+    +-25 offset (D2 x = +-17 - vx -> D1 x = +-25 - vx' with x' = f * x). sh: light_shift (C145)."""
     out = bytearray()
     r = lambda v: max(-32768, min(32767, int(round(v))))
     for vx, vy, vz, pad in d2["lights"][:8]:           # D2 order = D1 order; 'fire' has no D1 slot
-        out += struct.pack("<4h", r(vx * f), r(vy * f), r(vz * f), 0)
+        out += struct.pack("<4h", r(vx * f + sh[0]), r(vy * f + sh[1]), r(vz * f + sh[2]), 0)
     for i, (vx, vy, vz, pad) in enumerate(d2["wheels"]):
         sg = 1 if i < 2 else -1
         vz = vz + d2.get("fix_dz", 0)                 # C42 r3: D2's FixCarCos wheel centring
@@ -206,7 +239,7 @@ def build(lcf_path: str, outdir: str, lev_path: str = None, suffix: str = ""):
             tail = rows[r][96:100]
             if r < 4 and THRUST:                   # R35: player choices carry their thrust scale (exe C35T, plugin THRS)
                 tail = struct.pack("<h", thrust_scale(d2[m])) + tail[2:]
-            new[r] = d1_row(d2[m], tail, scale())
+            new[r] = d1_row(d2[m], tail, scale(), light_shift(m))
         path = os.path.join(outdir, "var_polish_cosmetics_chicago_%s%s.bin" % (tod, suffix))
         open(path, "wb").write(b"".join(new))
         files[tod] = path
@@ -222,7 +255,7 @@ def special_row(lcf_path: str, lev_path: str, m: int, tail: bytes) -> bytes:
         d2[mm]["depth"] = dep
     if THRUST:
         tail = struct.pack("<h", thrust_scale(d2[m])) + tail[2:]
-    return d1_row(d2[m], tail, scale())
+    return d1_row(d2[m], tail, scale(), light_shift(m))
 
 
 if __name__ == "__main__":

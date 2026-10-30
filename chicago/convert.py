@@ -3803,6 +3803,10 @@ def convert(out_path: str):
         print("d2 car set: damage rows (civ %d + player 2880) + cosmetics rows (%d) ->" % (720 * len(polish_cars.AI_SLOTS),
               os.path.getsize(out_path + ".cos.bin")), out_path + ".dmg.bin / .cos.bin")
     clut_check(out_path)
+    if os.environ.get("CHI_POLISH_CYCLE") == "1":       # C146: Driver 2's palette-cycling neon table (polish_cycle)
+        import polish_cycle
+        print("colour cycle (C146): %d textures -> %s" % (polish_cycle.write(out_path, open(out_path, "rb").read(), CITY.name),
+                                                          out_path + ".cyc.bin"))
     multi = [i for i, hs in AREA_COPY_HASH.items() if len(hs) > 1]
     print("area model copies: %d models in more than one area (%d copies), %d with differing copies" % (
         len(multi), sum(len(AREA_COPY_HASH[i]) for i in multi), sum(1 for i in multi if len(set(AREA_COPY_HASH[i])) > 1)))
