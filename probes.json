@@ -1,8 +1,8 @@
 {
  "_comment": "Current probes (Strategy keeps this up to date). name -> level (relative to driver_personal/chicago), optional build (exe folder, default build-dev). python driver_personal/probes.py sync publishes each as a self-contained copy in <Desktop>/Driver Probe Tests/NAME (OneDrive -> laptop). NOTE: 'env' only feeds the PACKAGE BUILD (converter/build_package switches); runtime/plugin switches (e.g. CHI_C88_*) are NOT passed to the running game, so a runtime variant needs its own build/default.",
- "d2 cities 5": {
-  "lev": "work/var_polish_cheats6_day.lev",
-  "night": "work/var_polish_q73_night.lev",
+ "d2 cities 6": {
+  "lev": "work/var_polish_chi7_day.lev",
+  "night": "work/var_polish_chi7_night.lev",
   "build": "build-test",
   "slot": true,
   "menu": "pages",
@@ -12,12 +12,12 @@
    "CHI_XD_LEVELS": "1",
    "CHI_HAVANA_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav9_day.lev",
    "CHI_HAVANA_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_hav9_night.lev",
-   "CHI_VEGAS_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas5_day.lev",
-   "CHI_VEGAS_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas5_night.lev",
-   "CHI_RIO_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio2_day.lev",
-   "CHI_RIO_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio4_night.lev",
+   "CHI_VEGAS_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas6_day.lev",
+   "CHI_VEGAS_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_vegas6_night.lev",
+   "CHI_RIO_DAY": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio5_day.lev",
+   "CHI_RIO_NIGHT": "D:/recomps/Apps/Driver-DriverRecompiled/driver_personal/chicago/work/var_polish_rio5_night.lev",
    "CHI_POLISH_PLAYERSHADOW": "1"
   },
-  "what": "d2 cities 4 (C135 freeze fixes, D2 night look, Chicago lit signs Q73) + C137 D2 horns/sirens in D2 cities + C138 player car shadow/light sizes (Havana mini); exe 848956e9"
+  "what": "d2 cities 5 + C137 step 2 (no unused Take a Ride sound bank in D2 cities) + player car D2 shadow in all D2 cities (chi7/hav9/vegas6/rio5); exe 106cfe7c"
  }
 }

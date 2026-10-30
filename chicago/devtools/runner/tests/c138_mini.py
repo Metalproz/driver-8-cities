@@ -24,16 +24,25 @@ def s32(v):
 
 
 def quad(s, with_shd):
-    """(length, width) of car 0's shadow quad: corners P0 P1 P3 P2 (+0x88 / 98 / A8 / B8) (+ SHD offsets)"""
+    """(length, width) of car 0's shadow quad: corners P0 P1 P3 P2 (+0x88 / 98 / A8 / B8) (+ SHD offsets), read in one
+    block while the game is paused (separate reads of a moving / wrecked car gave sizes off by up to 40 %), measured along
+    the quad's own axes like the plugin's stretch (axis = side midpoint - centre)."""
+    s.d.cmd("pause")
+    try:
+        c = s.ram(CAR + 0x88, 0x40)
+        shd = s.ram(0x80093480, 16)
+    finally:
+        s.d.cmd("continue")
     p = []
-    for k, o in enumerate((0x88, 0x98, 0xA8, 0xB8)):
-        x, z = s32(s.word(CAR + o)), s32(s.word(CAR + o + 8))
+    for k in range(4):
+        x, z = struct.unpack_from("<i", c, 0x10 * k)[0], struct.unpack_from("<i", c, 0x10 * k + 8)[0]
         if with_shd:
-            w = s.word(0x80093480 + 4 * k)
-            dx, dz = struct.unpack("<hh", struct.pack("<I", w))
+            dx, dz = struct.unpack_from("<hh", shd, 4 * k)
             x, z = x + dx, z + dz
         p.append((x, z))
-    a = math.dist(p[0], p[1]); b = math.dist(p[0], p[2])
+    cx, cz = sum(q[0] for q in p) / 4, sum(q[1] for q in p) / 4
+    a = 2 * math.dist(((p[0][0] + p[1][0]) / 2, (p[0][1] + p[1][1]) / 2), (cx, cz))
+    b = 2 * math.dist(((p[0][0] + p[2][0]) / 2, (p[0][1] + p[2][1]) / 2), (cx, cz))
     return max(a, b), min(a, b)
 
 
@@ -65,9 +74,11 @@ def run(s):
     s.drive(DRIVE, h)
     time.sleep(1.0)
     s.screenshot("after_drive")
-    shd2 = quad(s, True)
-    s.record("after", detail="damage %d, shadow quad %.0f x %.0f" % (s.word(0x8009B220) & 0xFFFF, shd2[0], shd2[1]))
-    if want:
-        s.check("shadow still the D2 size after the drive / crash", abs(shd2[0] - want[0]) <= 12 and abs(shd2[1] - want[1]) <= 12,
-                "%.0f x %.0f" % shd2)
+    shd2, phys2 = quad(s, True), quad(s, False)
+    s.record("after", detail="damage %d, physics quad %.0f x %.0f, shadow quad %.0f x %.0f"
+             % (s.word(0x8009B220) & 0xFFFF, phys2[0], phys2[1], shd2[0], shd2[1]))
+    if want:   # the plugin stretches to the D2 size along the quad's axes every vblank, whatever the (wrecked) corners
+        s.check("shadow still the D2 size after the drive / crash (paused read)",
+                abs(shd2[0] - want[0]) <= 8 and abs(shd2[1] - want[1]) <= 8,
+                "%.0f x %.0f vs %d x %d (physics %.0f x %.0f)" % (shd2[0], shd2[1], want[0], want[1], phys2[0], phys2[1]))
     s.check("alive", s.alive())

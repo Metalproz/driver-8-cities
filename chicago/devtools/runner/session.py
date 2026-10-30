@@ -269,6 +269,10 @@ class Session:
         time.sleep(1.5)
         city = parts[1]
         d2rows = {"chicago": 0, "havana": 1, "vegas": 2, "rio": 3}
+        if city in d2rows and city != "chicago" and not os.environ.get("CHI_%s_DAY" % city.upper()):
+            # Polish 30.10.: an unpackaged city's row is greyed and the cursor skips it, so a fixed row index loads another
+            # city (Rio -> Chicago) or stalls; package all four (CHI_HAVANA_DAY / CHI_VEGAS_DAY / CHI_RIO_DAY)
+            raise StepFailed("menu %s: CHI_%s_DAY not set (the D2 rows assume all four cities are packaged)" % (path, city.upper()))
         if city in d2rows:                           # page 2 "Driver 2 cities": Chicago, Havana, Las Vegas, Rio (M3)
             for _ in range(7):
                 self.press("down", gap=0.6)
@@ -286,6 +290,11 @@ class Session:
         self.wait_for(self.in_level, 120, "in level (%s)" % path)
         time.sleep(3)
         self.record("menu", detail="%s city %d" % (path, self.word(CITY)))
+        if city in d2rows:                           # the variant word says which D2 city really loaded (CITY is 3 for all)
+            want = {"chicago": (1, 2), "havana": (3, 4), "vegas": (6, 7), "rio": (8, 9)}[city]
+            v = self.word(0x80093620)
+            if (v >> 24) == 0x56 and (v & 15) not in want:
+                raise StepFailed("menu %s: loaded variant %d, not %s" % (path, v & 15, want))
 
     def _write_pose(self, x, y, z, heading):
         tmp = str(self.pose_file) + ".t"

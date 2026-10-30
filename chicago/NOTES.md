@@ -3752,3 +3752,54 @@ shot, spu_*, audio_wav, fntrace / wtrace), the dev-mode watchdog dumps.
 - **Runner `c138_mini`** (CITY, NIGHT; hav9 levels): start shot (as Polish's 20261030-010048 / -010135), shadow quad =
   .pps.bin, physics 1040 x 370, light words, 10 s drive into traffic / wall, alive; PASS day + night. c137_sounds' D1 leg
   checks D1 light words + SHD0 = 0 (PASS Havana -> Miami). Regression: shadow_bus, city_switch, havana_drive, cheats_menu PASS.
+- **Polish check (30.10.):** before/after start shots: Driver 1's big dark quad -> shadow under the mini; night glows
+  D2-sized. c138_mini night once 5/6 (510 x 243 after wrecking into a wall): Driver 1's own physics corners shrink after
+  a wreck (1040 -> 1014-1033 over 4 s) and the shadow keeps its fixed -496 offset. That is Driver 1's own behaviour, not a C138 bug;
+  the test's +-12 tolerance after the drive could compare against physics length - 496 instead.
+- **Other D2 cities (Polish 30.10.):** CHI_POLISH_PLAYERSHADOW=1 levels var_polish_chi7_* (Chicago: cheats6 recipe, nights
+  = q73 = Q73 profile default), vegas6_* (vegas5, CHI_CLUT_MARGIN=3), rio5_* (rio2 day / rio4 night), each day / night /
+  xd: every file byte-identical to its source, plus .pps.bin. Choice 0 quads: Chicago D2 model 12 977 x 331, Vegas / Rio
+  D2 model 1 869 x 331 / 886 x 321 (choice 3 = model 8: Chicago 1763, Vegas 1749, Rio 2104 long). Start shots on
+  build-test 848956e9 day + night: shadow quad = .pps.bin, D2 light words, alive.
+  Runner pitfall: Session.menu's page-2 row index (chicago 0 .. rio 3) assumes all four D2 cities are packaged; page 2
+  lists only packaged cities, so with only CHI_RIO_* set the Rio row loads Chicago and the Vegas row stalls at Day/Night
+  (an extra cross then lands in Miami). Package all four (CHI_HAVANA_* / CHI_VEGAS_* / CHI_RIO_*) and check 0x80096834 = 3.
+
+## C137 step 2: usage check of s5 / s9 / s14 / s15 and Take a Ride bank 4 (Infrastructure 30.10., build-wip)
+- **Static (complete start-site list):** every sample start goes through FUN_0004d968(ch, bank, sample, pitch) via
+  FUN_0004d6b0 / d740 / d7e4 / d8b0; their 18 + 2 call sites pass bank 0 immediates 0 / 1 / 2 / 3 / 4 / 8 / 11 (engine
+  starter FUN_0004c438: 1 / 2 / 3 / 4 only), AI horn 6 + (id & 3, 3 -> 2), smash table 0x8008AE8C (24 entries {key, name,
+  sample, vol, pitch} + default 0x8008AEB4: samples 10-13 only), speech queue 0x800BC9BC -> FUN_0004cf50: ids < 100 bank 3,
+  >= 100 bank 4 (id - 100) only. The one path with free bank / sample bytes = the mission-script sound slots
+  0x800C6F04 + 0x14 (3 x 16 B: flags +0xA, sample +0xB, bank +0xC; FUN_0006a6c8 from the main loop 0x800241C8).
+  -> bank 0 s5 / s9 / s14 / s15 have no start site except script slots; bank 4 only via queue ids >= 100 (driving
+  comments FUN_0006b9d8 for objective type 4, script slots / random speech list +0x50).
+- **Runtime (runner `c137_usage`, plugin trace CHI_C137_TRACE=1 = every channel's sample address per vblank, off by
+  default):** Take a Ride with ~60-90 s of driving with turns / crashes / horn + 40-60 s cop chase: Vegas (x2), Chicago,
+  Havana, Rio, LA (D1 baseline). Started: bank 0 s0-s4, s8 (D1 R1 path), s11, D2 slots 16-22 / 27, bank 3 radio. Never:
+  s5 / s9 / s14 / s15, any bank 4 sample; script slots empty in every run (Rio, Vegas sampled).
+- **Verdict:** unused in D2 cities (Take a Ride is the only mode there): s5 / s9 / s14 / s15 (12,560 B) and bank 4
+  (117,108 B incl. the special-engine tail's neighbour). Not tested: smash objects (s10-13 stay: listed in the table).
+- **What dropping gains:** the game loads bank 0 / bank 4 as whole blobs, so SPU RAM is only won when something new uses
+  it. Free in D2 cities now: bank 0 0x1C5E0..0x23F40 (s4 + s5 + s6-8 + s9 = 31,072 B contiguous, of which the D2 siren
+  uses <= 14,848 from 0x1E4D0) + s14 / s15 (1,760 B) + the mission block 0x21800 (137 KB; today only its last ~20 KB
+  hold the special's engine). Skipping bank 4's CD read in D2 cities would also shorten level loads (exe change).
+- **Done (Strategy decision 30.10., build-wip):** (1) bank 4 is not loaded in D2 cities: FUN_0004c29c (level sound load:
+  bank 0 = VOICES lump 0, bank 3 = lump 1, bank 4 = the lump of the first (mission threshold, lump) byte pair at 0x8008A96C
+  with threshold >= mission; 0xFF = none) -> Take a Ride 0x7C's pair (0xAE, 0) gets lump byte 0x8008A985 = 0xFF while a D2
+  city runs mission 0x7C (plugin c137_bank4_vblank, exe DATA byte, no code word, no shared exe window needed), 0x00 for
+  everything else (D1 cities, missions 63..174 such as Interview / driving games, future D2 missions). No CD read (117 KB,
+  ~57 sectors) and no SPU upload; the stale bank 4 table of the previous level is cleared (rate 0 = FUN_0004d968 plays
+  nothing); the special's engine slot now starts at the mission block base (0x52410..0x73C10 = 137 KB, reserve).
+  CHI_C137_BANK4=0: off. Host-only (M8: the byte from guest code before the level load).
+  (2) s5 / s9 / s14 / s15 stay uploaded: bank 0 is ONE SpuWrite of the whole lump (FUN_0004e214); leaving samples out needs
+  a split upload (code patch + per-sample table fix-up) = fragile, skipped; their 12.5 KB count as reserve.
+  Runner: c137_sounds (+ lump byte FF / bank 4 table empty / special engine in the block in the D2 city; lump 00 / bank 4
+  back in Miami / LA) PASS Vegas -> LA, Chicago -> Miami; `c137_mission` (Undercover first mission 0xAE: bank 4 loaded)
+  PASS; car_sounds Vegas, c137_usage LA PASS.
+- **Runner fixes (30.10.):** Session.menu raises StepFailed for a D2 row whose city is not packaged (greyed rows are
+  skipped by the cursor) and checks the variant word after the load (CITY is 3 for every D2 city); `python -m runner run
+  T --day X --night Y` overrides Chicago's levels; city_switch's second ride had run into the attract demo since the
+  page menu (menu_again() now navigates from the remembered page, variant-checked); c138_mini reads the shadow quad
+  paused in one block along its axes: the shadow stays the D2 size after crashes (the 'fixed offset to the physics
+  corners' seen before was separate reads of a moving car).

@@ -17,6 +17,16 @@ WORDS = {0x8004CCB4: (0x00621823, 0x24031000), 0x8004CC84: (0x00473823, 0x2407F8
 D2ROWS = {"chicago": 0, "havana": 1, "vegas": 2, "rio": 3}
 
 
+LUMP4 = 0x8008A985                                     # C137 step 2: Take a Ride's bank 4 lump byte (0xFF = skipped)
+
+
+def bank4(s):
+    """(lump byte, entries of the bank 4 table with an address, mission block base)"""
+    t = s.ram(0x800BCA74 + 0x800, 16 * 32)
+    n = sum(1 for k in range(32) if struct.unpack_from("<I", t, 16 * k)[0])
+    return s.ram(LUMP4, 1)[0], n, s.word(0x800BD484 + 16)
+
+
 def table(s):
     t = s.ram(TAB, 16 * 32)
     return [struct.unpack_from("<4I", t, 16 * k) for k in range(32)]
@@ -44,6 +54,13 @@ def run(s):
             % (t[6][0], t[7][0], t[8][0], t[25][0], t[24][0], t[26][0]))
     s.check("entry 4 = the D2 siren (car_sfx kind 3)", sir is not None and t[4][1] == sir[1] and t[4][3] == sir[2],
             "entry 4 %05X/%d/%d, siren %s" % (t[4][0], t[4][1], t[4][3], sir))
+    lb, n4, b4 = bank4(s)
+    sp = t[22]                                          # the special's engine slot (when a special is loaded)
+    s.check("bank 4 not loaded in the D2 city (lump byte 0xFF, table empty)", lb == 0xFF and n4 == 0,
+            "lump byte %02X, bank 4 entries %d" % (lb, n4))
+    s.record("special engine", detail="slot 22 %05X/%d, mission block %05X..%05X" % (sp[0], sp[1], b4, b4 + 0x21800))
+    if sp[0]:
+        s.check("special engine inside the freed mission block", b4 <= sp[0] < b4 + 0x21800, "%05X" % sp[0])
     w = {a: s.word(a) for a in WORDS}
     s.check("siren code words = D2 constants", all(w[a] == WORDS[a][1] for a in WORDS), str({hex(a): hex(v) for a, v in w.items()}))
     # the player's horn (R1 -> entry 8 on channel 4; the plugin retargets it to the player's D2 horn, slot 27 / 25)
@@ -104,6 +121,8 @@ def run(s):
     s.wait_world(what=SECOND)
     s.screenshot(SECOND)
     t2 = table(s)
+    lb2, n42, _ = bank4(s)
+    s.check("%s: bank 4 loaded again (lump byte 00)" % SECOND, lb2 == 0 and n42 > 0, "lump byte %02X, entries %d" % (lb2, n42))
     w2 = {a: s.word(a) for a in WORDS}
     s.record(SECOND, detail="CITY %d bank0 4:%05X/%d 6:%05X/%d 8:%05X/%d words %s" % (s.word(0x80096834), t2[4][0], t2[4][1],
              t2[6][0], t2[6][1], t2[8][0], t2[8][1], {hex(a): hex(v) for a, v in w2.items()}))

@@ -14,6 +14,36 @@ def quit_to_menu(s):
     time.sleep(6)
 
 
+D1ROWS = {"miami": 0, "frisco": 1, "la": 2, "ny": 3, "newtown": 4, "interview": 5, "desert": 6}
+D2ROWS = {"chicago": 0, "havana": 1, "vegas": 2, "rio": 3}
+VARIANT = {"chicago": (1, 2), "havana": (3, 4), "vegas": (6, 7), "rio": (8, 9)}
+
+
+def menu_again(s, first, city):
+    """Take a Ride after quit_to_menu (C135 follow-up: s.menu() from here ran into the attract demo): the carousel is
+    still on Take a Ride and the list reopens on the page played last, cursor on its first row."""
+    s.press("triangle"); time.sleep(2)
+    s.press("cross"); time.sleep(1.5)
+    on2 = first in D2ROWS
+    if (city in D2ROWS) != on2:                         # turn the page: page row 7 on page 1, 4 on page 2
+        for _ in range(4 if on2 else 7):
+            s.press("down", gap=0.6)
+        s.press("cross", gap=1.5)
+    rows = D2ROWS if city in D2ROWS else D1ROWS
+    for _ in range(rows[city]):
+        s.press("down", gap=0.6)
+    s.press("cross"); time.sleep(3)
+    if city in D2ROWS or city in ("miami", "frisco", "ny", "la"):
+        s.press("cross")                                # Day / Night screen: Day (LA without a day level: harmless)
+    s.wait_for(s.in_level, 120, "in level (%s, after %s)" % (city, first))
+    time.sleep(3)
+    if city in D2ROWS:
+        v = s.word(0x80093620)
+        s.check("%s really loaded (variant %d)" % (city, v & 15), (v >> 24) == 0x56 and (v & 15) in VARIANT[city], hex(v))
+    else:
+        s.check("%s really loaded (CITY %d)" % (city, s.word(0x80096834)), True)
+
+
 def state(s, tag):
     v = {k: s.word(a) for k, a in W.items()}
     s.record("state", detail="%s: %s" % (tag, {k: hex(x) for k, x in v.items()}))
@@ -43,7 +73,7 @@ def run(s):
     s.screenshot(a)
     quit_to_menu(s)
     s.screenshot("menu_after_quit")
-    s.menu("take_a_ride/" + b); s.wait_world(what="start"); time.sleep(3)
+    menu_again(s, a, b); s.wait_world(what="start"); time.sleep(3)
     v2 = state(s, b)
     s.drive(15.0, s.car(0)[3])
     drawn, near = cars(s)

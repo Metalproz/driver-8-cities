@@ -2912,6 +2912,7 @@ static void sx_horn_play(uint32_t slot, int32_t vol) {
 #define SIREN_VOL_ORIG   0x00473823u
 #define SIREN_VOL_D2     0x2407F830u
 static uint32_t s_siren_addr;                          /* SPU address of the D2 siren in entry 4 (0 = none) */
+static int s_bank4_skip;                                /* C137 step 2: bank 4 not loaded (D2 Take a Ride) */
 static int c137_on(void) {
     static int on = -1;
     if (on < 0) { const char* e = getenv("CHI_C137"); on = !(e && *e == '0'); }
@@ -3010,6 +3011,7 @@ static void sfx_v2_vblank(void) {
     uint32_t m_end = sx_bank_end(2u), q_end = sx_bank_end(4u);
     if (!s_sx_reg[0][1] && m_end > b2 && b3 > m_end && b3 <= 0x80000u) { s_sx_reg[0][0] = (m_end + 15u) & ~15u; s_sx_reg[0][1] = b3; }
     if (!s_sx_reg[1][1] && q_end > b4 && b4 + 0x21800u <= 0x80000u && q_end < b4 + 0x21800u) { s_sx_reg[1][0] = (q_end + 15u) & ~15u; s_sx_reg[1][1] = b4 + 0x21800u; }
+    else if (!s_sx_reg[1][1] && !q_end && s_bank4_skip && b4 && b4 + 0x21800u <= 0x80000u) { s_sx_reg[1][0] = b4; s_sx_reg[1][1] = b4 + 0x21800u; }   /* C137: no bank 4 */
     /* a later bank load into those blocks (beyond what we reserved) cancels the slot */
     if (s_sx_reg[0][1] && m_end > s_sx_reg[0][0]) { s_sx_reg[0][1] = 0; s_sx_player = 0xFFFFFFFFu; }
     if (s_sx_reg[1][1] && q_end > s_sx_reg[1][0]) { s_sx_reg[1][1] = 0; s_sx_spc = 0; }
@@ -3118,7 +3120,57 @@ static void sfx_v2_vblank(void) {
     }
 }
 
+/* C137 step 2 (Strategy 30.10., user rule: only sound data that is used stays loaded): Take a Ride never starts a bank 4
+ * sample in a D2 city (NOTES "C137 step 2": static start-site list + traced runs), so its VOICES lump (117 KB) is not read
+ * there. FUN_0004c29c (level sound load) picks bank 4's lump from the byte pairs (mission threshold, lump) at 0x8008A96C,
+ * first pair with threshold >= mission; Take a Ride 0x7C lands on (0xAE, 0) whose lump byte 0x8008A985 becomes 0xFF (= no
+ * bank 4: no CD read, no SPU upload) only while a D2 city runs mission 0x7C; 0x00 again for anything else (D1 cities,
+ * missions, future D2 missions keep the mission-script path). The stale bank 4 table of the previous level is cleared
+ * (rate 0: FUN_0004d968 then plays nothing). The freed mission block (0x21800 B) is the special engine's region and the
+ * reserve. Exe DATA only (no code word). CHI_C137_BANK4=0: off. Host-only (M8: the same byte from guest code). */
+#define TAR_BANK4_LUMP 0x8008A985u
+static void c137_bank4_vblank(void) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C137_BANK4"); en = c137_on() && !(e && *e == '0'); }
+    int skip = en && s_slot_enabled && chicago_active() && psx_mod_read_word(MISSION_NUMBER) == 0x7Cu;
+    uint32_t cur = psx_mod_read_byte(TAR_BANK4_LUMP), want = skip ? 0xFFu : 0x00u;
+    if (cur != want && (cur == 0x00u || cur == 0xFFu) && psx_mod_read_byte(TAR_BANK4_LUMP - 1u) == 0xAEu)
+        psx_mod_write_byte(TAR_BANK4_LUMP, want);
+    s_bank4_skip = skip;
+    if (skip && psx_mod_read_word(SFX_TAB + 0x200u * 4u))
+        for (uint32_t k = 0; k < 32u * 4u; k++) psx_mod_write_word(SFX_TAB + 0x200u * 4u + 4u * k, 0u);
+}
+/* C137 step 2 diagnostic (CHI_C137_TRACE=1, off by default): which bank / sample each of the 16 logical channels starts.
+ * Every start (FUN_0004d968, all 4 callers) stores the sample's SPU address in the channel attr (+0x1C), which stays there
+ * until the channel's next start, so a per-vblank compare also catches the shortest samples. Logs each (bank, sample)
+ * the first time and a count summary every 60 s. */
+static void c137_trace_vblank(void) {
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("CHI_C137_TRACE"); en = e && *e == '1'; }
+    if (!en) return;
+    static uint32_t last[16], vb, cnt[5][32];
+    for (uint32_t ch = 0; ch < 16u; ch++) {
+        uint32_t a = psx_mod_read_word(0x800BD498u + 0x84u * ch + 0x1Cu);
+        if (!a || a == last[ch]) continue;
+        last[ch] = a;
+        int fb = -1, fk = -1;
+        for (uint32_t b = 0; b < 5u && fb < 0; b++)
+            for (uint32_t k = 0; k < 32u; k++)
+                if (psx_mod_read_word(SFX_TAB + 0x200u * b + 16u * k) == a) { fb = (int)b; fk = (int)k; break; }
+        if (fb < 0) { fprintf(stdout, "driver.chicago: C137 trace: ch %u addr 0x%05X (no table entry)\n", ch, a); continue; }
+        if (!cnt[fb][fk]++)
+            fprintf(stdout, "driver.chicago: C137 trace: first bank %d sample %d (ch %u, addr 0x%05X, CITY %u)\n", fb, fk, ch, a,
+                    psx_mod_read_word(CITY_WORD));
+    }
+    if (++vb % 3600u == 0u) {
+        char buf[512]; int n = 0;
+        for (int b = 0; b < 5; b++) for (int k = 0; k < 32; k++)
+            if (cnt[b][k] && n < 480) n += snprintf(buf + n, sizeof buf - (size_t)n, " %d/%d:%u", b, k, cnt[b][k]);
+        fprintf(stdout, "driver.chicago: C137 trace summary (bank/sample:starts):%s\n", n ? buf : " none");
+    }
+}
 static void sfx_vblank(uint32_t cs) {
+    c137_trace_vblank();
     {   /* C137: the fixed-pitch siren words only while entry 4 holds the D2 siren (any other level: Driver 1's) */
         int d2 = cs == 4u && s_siren_addr && chicago_active() && psx_mod_read_word(SFX_TAB + 16u * 4u) == s_siren_addr;
         siren_words(d2);
@@ -3575,6 +3627,7 @@ static void area_switch_guard_vblank(void) {
     restore_vblank();
     shadow_vblank();
     c138_lights_vblank();
+    c137_bank4_vblank();
     s_vbl_n++;
     car_lod_vblank();
     cop_slots_vblank();

@@ -67,7 +67,7 @@ def main(argv):
         names, ov, i = [], {}, 1
         while i < len(argv):
             a = argv[i]
-            if a in ("--port", "--copy", "--build"):
+            if a in ("--port", "--copy", "--build", "--day", "--night"):   # --day / --night: Chicago's levels (work/ names)
                 ov[a[2:]] = int(argv[i + 1]) if a == "--port" else argv[i + 1]; i += 2
             elif a == "--reuse":
                 ov["reuse"] = True; i += 1
